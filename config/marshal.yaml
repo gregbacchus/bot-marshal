@@ -1,0 +1,138 @@
+# bot-marshal — example configuration.
+#
+# The policy chain is ordered and short-circuits: each layer returns ALLOW, DENY or PASS, and
+# the first terminal verdict wins. If every layer PASSes, `default_action` decides — that is
+# where default-deny actually lives.
+
+include:
+  - bundles/*.yaml
+
+listeners:
+  explicit:
+    listen: "127.0.0.1:8080"          # HTTP CONNECT and SOCKS5, protocol sniffed
+    unix_socket: "/run/user/1000/marshal.sock"   # unlocks SO_PEERCRED identity
+  management:
+    listen: "127.0.0.1:9092"
+    api_key_env: "MARSHAL_MANAGEMENT_KEY"
+
+tls:
+  ca_cert: "~/.config/bot-marshal/ca.crt"
+  ca_key: "~/.config/bot-marshal/ca.key"
+  cert_cache_size: 1000
+  leaf_expiry_hours: 72
+  passthrough: []                     # hosts never intercepted (certificate-pinned clients)
+
+upstream:
+  # Checked against every resolved IP, after DNS and before connect. SSRF / rebinding guard.
+  deny_cidrs:
+    - "169.254.0.0/16"                # link-local, incl. cloud metadata endpoints
+    - "127.0.0.0/8"
+    - "::1/128"
+    - "fe80::/10"
+    - "fd00::/8"
+  allow_private: false
+  max_response_bytes: 0
+
+profiles:
+  base:
+    default_action: deny
+    policy:
+      - layer: denylist               # first, so hard denies beat any later approval
+        deny:
+          domains: ["*.onion"]
+
+      - layer: allowlist
+        allow:
+          domains: ["*.githubusercontent.com"]
+        on_match: allow
+        on_miss: pass
+
+      - layer: dlp
+        scan_request: true
+        patterns: ["aws-access-key", "github-pat", "private-key-pem"]
+        on_match: deny
+        annotate:
+          flags: ["PossibleSecretInBody"]
+
+    transforms:
+      headers:
+        allow: ["accept*", "content-*", "user-agent", "authorization"]
+
+  coding-agent:
+    extends: base
+    default_action: deny
+    policy:
+      - layer: denylist
+        deny:
+          domains: ["*.onion"]
+
+      - layer: allowlist
+        allow:
+          bundles: [github, npm, pypi, crates-io]
+        on_match: allow
+        on_miss: pass
+
+      - layer: rules                  # CEL over the request and accumulated evidence
+        expressions:
+          - when: 'req.method in ["POST", "PATCH", "DELETE"]'
+            verdict: pass
+            annotate:
+              flags: ["WriteOperation"]
+
+      - layer: dlp
+        scan_request: true
+        patterns: ["aws-access-key", "github-pat", "private-key-pem"]
+        on_match: deny
+
+      - layer: judge                  # expensive, so it caches and circuit-breaks
+        provider:
+          type: anthropic
+          model: "claude-haiku-4-5-20251001"
+          api_key_env: ANTHROPIC_API_KEY
+        scope:
+          - host: "api.github.com"
+            methods: ["POST", "PATCH", "DELETE"]
+        cache:
+          ttl: "15m"
+          max_entries: 10000
+        timeout: "8s"
+        max_concurrent: 32
+        on_error: deny
+        on_timeout: deny
+        circuit_breaker:
+          consecutive_failures: 5
+          cooldown: "30s"
+        prompt: |
+          Allow only changes to repositories owned by gregbacchus. Deny anything that
+          modifies workflow files, repository secrets, or repository settings.
+
+sessions:
+  # Tried in order; first match wins. Identity is derived from the connection, never
+  # asserted by the client — transparent and DNS ingress give the client no way to present
+  # a credential.
+  resolvers:
+    - type: proxy_auth
+      credentials:
+        - user: "agent-a"
+          password_env: "MARSHAL_AGENT_A_PW"
+          session: "agent-a"
+          profile: coding-agent
+
+    - type: source_ip                 # containers / netns
+      map:
+        - cidr: "172.20.0.10/32"
+          session: "agent-a"
+          profile: coding-agent
+
+    - type: peer_cred                 # kernel-supplied uid; safe to trust for policy
+      enrich: false                   # pid/cgroup/cmdline: racy, audit-only
+      map:
+        - uid: 1001
+          session: "bot-ci"
+          profile: base
+
+    - type: launched                  # registered dynamically by `marshal run`
+
+  unidentified:
+    profile: base
+    action: allow_with_profile

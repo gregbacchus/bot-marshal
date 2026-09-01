@@ -1,0 +1,78 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gregbacchus/bot-marshal"
+
+[workspace.dependencies]
+# internal
+marshal-core = { path = "crates/marshal-core" }
+marshal-config = { path = "crates/marshal-config" }
+marshal-tls = { path = "crates/marshal-tls" }
+marshal-policy = { path = "crates/marshal-policy" }
+marshal-secrets = { path = "crates/marshal-secrets" }
+marshal-judge = { path = "crates/marshal-judge" }
+marshal-launch = { path = "crates/marshal-launch" }
+marshal-proxy = { path = "crates/marshal-proxy" }
+marshal-dns = { path = "crates/marshal-dns" }
+marshal-audit = { path = "crates/marshal-audit" }
+
+# runtime
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "time", "sync", "fs"] }
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+
+# http
+hyper = { version = "1.11", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy"] }
+http = "1.5"
+bytes = "1.12"
+axum = "0.8"
+
+# tls
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+rcgen = "0.14"
+
+# dns
+hickory-server = "0.26"
+hickory-resolver = "0.26"
+
+# config + serde
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+humantime-serde = "1"
+
+# policy
+cel = "0.14"
+globset = "0.4"
+ipnet = "2.12"
+regex = "1.13"
+moka = { version = "0.12", features = ["future"] }
+
+# platform
+socket2 = { version = "0.6", features = ["all"] }
+
+# observability + errors
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+
+# cli
+clap = { version = "4.6", features = ["derive", "env"] }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+todo = "allow"

@@ -1,0 +1,5 @@
+bundles:
+  pypi:
+    domains:
+      - "pypi.org"
+      - "files.pythonhosted.org"

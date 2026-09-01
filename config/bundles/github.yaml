@@ -1,0 +1,8 @@
+bundles:
+  github:
+    domains:
+      - "github.com"
+      - "api.github.com"
+      - "codeload.github.com"
+      - "objects.githubusercontent.com"
+      - "raw.githubusercontent.com"

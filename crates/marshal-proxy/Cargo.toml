@@ -1,0 +1,32 @@
+[package]
+name = "marshal-proxy"
+description = "Proxy listeners, MITM, streaming and the upstream guard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+marshal-core.workspace = true
+marshal-config.workspace = true
+marshal-policy.workspace = true
+marshal-tls.workspace = true
+marshal-secrets.workspace = true
+marshal-audit.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+bytes.workspace = true
+tokio-rustls.workspace = true
+socket2.workspace = true
+ipnet.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

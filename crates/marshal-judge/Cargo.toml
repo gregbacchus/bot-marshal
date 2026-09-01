@@ -1,0 +1,22 @@
+[package]
+name = "marshal-judge"
+description = "LLM judge policy layer with caching and circuit breaking"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+marshal-core.workspace = true
+marshal-config.workspace = true
+async-trait.workspace = true
+moka.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

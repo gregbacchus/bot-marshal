@@ -1,0 +1,5 @@
+bundles:
+  npm:
+    domains:
+      - "registry.npmjs.org"
+      - "registry.yarnpkg.com"

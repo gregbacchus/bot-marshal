@@ -1,0 +1,23 @@
+[package]
+name = "marshal-policy"
+description = "Policy chain runner and layers (denylist, allowlist, rules, dlp, mcp)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+marshal-core.workspace = true
+marshal-config.workspace = true
+async-trait.workspace = true
+cel.workspace = true
+globset.workspace = true
+ipnet.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
