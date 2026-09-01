@@ -152,12 +152,36 @@ async fn serve(
     };
     let audit: Arc<dyn AuditSink> = Arc::new(MultiSink::new(vec![json, Arc::new(TracingSink)]));
 
+    // Interception needs a CA. If none has been created, run as a tunnel and say so rather
+    // than refusing to start — a proxy that sees destinations is still enforcing policy.
+    let (cert_path, key_path) = ca_paths(config_path).unwrap_or_default();
+    let tls = if cert_path.exists() && key_path.exists() {
+        let ca = marshal_tls::CertificateAuthority::load(&cert_path, &key_path)?;
+        let minter = Arc::new(marshal_tls::LeafMinter::new(
+            Arc::new(ca),
+            cfg.tls.cert_cache_size,
+            cfg.tls.leaf_expiry_hours,
+        ));
+        let mut extra_roots = Vec::new();
+        for path in &cfg.tls.upstream_ca_certs {
+            let path = expand_tilde(path);
+            extra_roots.push(std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
+            })?);
+        }
+        Some(Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(minter, &extra_roots)?))
+    } else {
+        None
+    };
+
+    let passthrough = marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?;
+
     let listen = listen
         .or_else(|| cfg.listeners.explicit.as_ref().map(|e| e.listen.clone()))
         .unwrap_or_else(|| "127.0.0.1:8080".to_owned());
 
     let server = Server::new(
-        ServerConfig { listen, profile: Arc::from(profile) },
+        ServerConfig { listen, profile: Arc::from(profile), tls, passthrough },
         Arc::new(chain),
         Arc::new(guard),
         audit,

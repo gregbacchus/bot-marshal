@@ -25,6 +25,7 @@ marshal-audit = { path = "crates/marshal-audit" }
 # runtime
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "io-std", "macros", "signal", "time", "sync", "fs"] }
 tokio-util = "0.7"
+tokio-stream = "0.1.19"
 futures = "0.3"
 async-trait = "0.1"
 
@@ -40,6 +41,7 @@ http-body-util = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2"
+webpki-roots = "1.0.9"
 time = { version = "0.3.55", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 

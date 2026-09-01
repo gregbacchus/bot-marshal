@@ -53,16 +53,23 @@ endpoints.
 
 ## Status
 
-Early, but **traffic flows**. M1 is complete: one listener serving HTTP `CONNECT`,
-absolute-form HTTP and SOCKS5; the policy chain with denylist and allowlist layers; the
-upstream SSRF guard; and JSON audit records. TLS is tunnelled, not yet intercepted, so
-policy sees the requested host but not the request — that is M2.
+Early, but **traffic flows and TLS is intercepted**. M2 is complete: policy evaluates the
+real decrypted request, not just the tunnel destination, and each request inside a connection
+is judged and audited separately.
+
+Interception does not break streaming. SSE arrives event by event, request bodies forward as
+they are written rather than being collected first, protocol upgrades become raw bidirectional
+relays that survive idle periods, and `Content-Encoding` passes through byte-identical. Those
+are the tests worth having: buffering never surfaces as an error, only as an agent whose
+stream goes quiet and then delivers everything at once.
+
+Without a CA the proxy still runs as a tunnel, sees destinations only, and says so at startup.
 
 | Milestone | Contents | State |
 |---|---|---|
 | M0 | Workspace, core traits, config load + validate, CI | done |
 | M1 | Explicit proxy (CONNECT + SOCKS5), chain runner, denylist + allowlist, upstream guard, audit | done |
-| M2 | TLS MITM, streaming (WebSocket / SSE / chunked) | |
+| M2 | TLS MITM, streaming (WebSocket / SSE / chunked) | done |
 | M3 | Secret injection, egress DLP, CEL rules layer | |
 | M4 | Session identity, profiles, `marshal run` | |
 | M4.5 | LLM judge layer | |
@@ -74,6 +81,13 @@ policy sees the requested host but not the request — that is M2.
 
 ```bash
 cargo run --bin marshal -- config check
+```
+
+Create a CA and trust it — `ca init` prints per-runtime instructions, and prefers scoped
+environment variables over touching the system store:
+
+```bash
+cargo run --bin marshal -- ca init
 ```
 
 Then run the proxy and point something at it:

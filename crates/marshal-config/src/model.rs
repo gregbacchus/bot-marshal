@@ -93,6 +93,10 @@ pub struct Tls {
     /// Hosts never intercepted — certificate-pinned clients.
     #[serde(default)]
     pub passthrough: Vec<String>,
+    /// Extra CA certificates (PEM paths) trusted when verifying upstreams, for services
+    /// behind an internal CA. Additive: the public roots remain trusted.
+    #[serde(default)]
+    pub upstream_ca_certs: Vec<String>,
 }
 
 fn default_cert_cache() -> u64 {

@@ -35,7 +35,14 @@ async fn start_proxy_with_guard(
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
 
     let server = Server::new(
-        ServerConfig { listen: "127.0.0.1:0".into(), profile: Arc::from(profile) },
+        ServerConfig {
+            listen: "127.0.0.1:0".into(),
+            profile: Arc::from(profile),
+            // No CA: these tests cover the tunnel path, where policy sees only the
+            // destination. Interception is covered in tests/mitm.rs.
+            tls: None,
+            passthrough: marshal_policy::HostMatcher::default(),
+        },
         Arc::new(chain),
         Arc::new(guard),
         audit,

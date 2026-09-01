@@ -18,17 +18,36 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::guard::{GuardError, UpstreamGuard};
 use crate::httpfront::{self, ProxyRequest};
+use crate::mitm::{self, MitmHandler, TlsEngine};
+use crate::rewind::Rewind;
 use crate::sniff::{self, Protocol};
 use crate::socks5::{self, Reply};
 use crate::tunnel;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub listen: String,
     /// Which profile applies. Real session resolution arrives in M4; until then every
     /// connection is explicitly *unattributed*, and the audit record says so rather than
     /// implying an identity the proxy cannot yet establish.
     pub profile: Arc<str>,
+    /// Present when a CA is configured. Without it the proxy still runs, but sees only the
+    /// tunnel destination — which is the honest behaviour when no CA has been created, not a
+    /// degraded mode to hide.
+    pub tls: Option<Arc<TlsEngine>>,
+    /// Hosts tunnelled without interception. Certificate-pinned clients belong here, as does
+    /// anything whose traffic must demonstrably not be read.
+    pub passthrough: marshal_policy::HostMatcher,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("listen", &self.listen)
+            .field("profile", &self.profile)
+            .field("intercepting", &self.tls.is_some())
+            .finish()
+    }
 }
 
 pub struct Server {
@@ -63,8 +82,15 @@ impl Server {
             listen = %local,
             profile = %self.config.profile,
             layers = ?self.chain.layer_names(),
+            intercepting = self.config.tls.is_some(),
             "explicit proxy listening"
         );
+        if self.config.tls.is_none() {
+            tracing::warn!(
+                "no CA configured: TLS is tunnelled, so policy sees the destination host but \
+                 not the request. Run `marshal ca init` to intercept."
+            );
+        }
         on_bind(local);
 
         let this = Arc::new(self);
@@ -205,18 +231,52 @@ impl Server {
                 )
                 .await?;
 
-            // Cross-check the TLS SNI against the authority the client asked us to allow.
-            // A tunnel opened to an allowlisted host that then presents SNI for a different
-            // one is either a broken client or an attempt to launder a denied destination
-            // through an allowed CONNECT; neither should be relayed.
+            // Anything the buffered reader pulled in past the request head has to lead the
+            // tunnel, or a pipelining client's first TLS record arrives truncated.
+            let leftover = client.buffer().to_vec();
+            let mut stream = Rewind::new(client.into_inner(), leftover);
+            let authority = request.authority.clone();
+
+            let intercept = match &self.config.tls {
+                Some(engine) if self.config.passthrough.matches(&authority.host).is_none() => {
+                    Some(Arc::clone(engine))
+                }
+                _ => None,
+            };
+
+            if let Some(engine) = intercept {
+                // The CONNECT itself is allowed here; each request inside the tunnel is
+                // evaluated separately once decrypted, and audited on its own.
+                self.emit(&cx, &outcome.reason, Action::Allow, outcome.evidence, None, started)
+                    .await;
+
+                let handler = Arc::new(MitmHandler {
+                    chain: Arc::clone(&self.chain),
+                    audit: Arc::clone(&self.audit),
+                    authority: authority.clone(),
+                    session: cx.session.clone(),
+                    profile: Arc::clone(&self.config.profile),
+                    client_addr: peer,
+                });
+
+                if let Err(e) = mitm::intercept(stream, upstream, engine, handler).await {
+                    tracing::debug!(peer = %peer, authority = %authority, error = %e,
+                        "intercepted tunnel ended");
+                }
+                return Ok(());
+            }
+
+            // Not intercepting. Cross-check the TLS SNI against the authority the client
+            // asked us to allow: a tunnel opened to an allowlisted host that then presents
+            // SNI for a different one is an attempt to launder a denied destination through
+            // an allowed CONNECT.
             //
             // The check runs on the relay's first client chunk rather than by peeking before
             // the relay starts, so a server-speaks-first protocol is not held up waiting for
             // a client that has nothing to say yet.
-            let authority = request.authority.clone();
             self.emit(&cx, &outcome.reason, Action::Allow, outcome.evidence, None, started).await;
 
-            let result = tunnel::relay_inspected(&mut client, &mut upstream, |opening| {
+            let result = tunnel::relay_inspected(&mut stream, &mut upstream, |opening| {
                 check_sni(opening, &authority)
             })
             .await;

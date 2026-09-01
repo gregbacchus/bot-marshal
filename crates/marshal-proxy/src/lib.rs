@@ -5,6 +5,8 @@
 
 pub mod guard;
 pub mod httpfront;
+pub mod mitm;
+pub mod rewind;
 pub mod server;
 pub mod sniff;
 pub mod socks5;
