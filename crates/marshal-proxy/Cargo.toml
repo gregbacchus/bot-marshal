@@ -29,4 +29,11 @@ socket2.workspace = true
 ipnet.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+marshal-audit.workspace = true
+serde_yaml_ng.workspace = true
+serde_json.workspace = true

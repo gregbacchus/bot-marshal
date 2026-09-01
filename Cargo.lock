@@ -1217,6 +1217,8 @@ dependencies = [
  "marshal-policy",
  "marshal-secrets",
  "marshal-tls",
+ "serde_json",
+ "serde_yaml_ng",
  "socket2",
  "thiserror",
  "tokio",

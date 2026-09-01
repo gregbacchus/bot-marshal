@@ -39,13 +39,15 @@ filtering, secret injection). Transforms run only once the chain has allowed.
 
 ## Status
 
-Early. **M0 (scaffold) is complete**: the workspace, core traits and types, configuration
-loading and validation, and `marshal config check`. Traffic does not flow yet — that is M1.
+Early, but **traffic flows**. M1 is complete: one listener serving HTTP `CONNECT`,
+absolute-form HTTP and SOCKS5; the policy chain with denylist and allowlist layers; the
+upstream SSRF guard; and JSON audit records. TLS is tunnelled, not yet intercepted, so
+policy sees the requested host but not the request — that is M2.
 
 | Milestone | Contents | State |
 |---|---|---|
 | M0 | Workspace, core traits, config load + validate, CI | done |
-| M1 | Explicit proxy (CONNECT + SOCKS5), chain runner, denylist + allowlist, upstream guard, audit | next |
+| M1 | Explicit proxy (CONNECT + SOCKS5), chain runner, denylist + allowlist, upstream guard, audit | done |
 | M2 | TLS MITM, streaming (WebSocket / SSE / chunked) | |
 | M3 | Secret injection, egress DLP, CEL rules layer | |
 | M4 | Session identity, profiles, `marshal run` | |
@@ -59,6 +61,34 @@ loading and validation, and `marshal config check`. Traffic does not flow yet �
 ```bash
 cargo run --bin marshal -- config check
 ```
+
+Then run the proxy and point something at it:
+
+```bash
+cargo run --bin marshal -- serve --profile base --listen 127.0.0.1:8080
+```
+
+```bash
+curl -x http://127.0.0.1:8080 https://api.github.com/zen
+```
+
+`api.github.com` is in the `github` bundle, so that succeeds. Anything not allowlisted comes
+back as a 403 whose body says which layer refused and why — a bare 403 just makes agents
+retry-loop.
+
+```bash
+curl -x http://127.0.0.1:8080 https://example.com/
+```
+
+SOCKS5 works on the same port; the protocol is sniffed from the first byte.
+
+```bash
+curl --socks5-hostname 127.0.0.1:8080 https://api.github.com/zen
+```
+
+Starting `--profile coding-agent` deliberately fails: that profile names `rules`, `dlp` and
+`judge` layers that do not exist yet, and running it without them would enforce a chain more
+permissive than the one written.
 
 ## Layout
 

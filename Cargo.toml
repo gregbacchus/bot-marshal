@@ -23,7 +23,7 @@ marshal-dns = { path = "crates/marshal-dns" }
 marshal-audit = { path = "crates/marshal-audit" }
 
 # runtime
-tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "time", "sync", "fs"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "io-std", "macros", "signal", "time", "sync", "fs"] }
 tokio-util = "0.7"
 futures = "0.3"
 async-trait = "0.1"

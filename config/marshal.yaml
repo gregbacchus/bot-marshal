@@ -34,6 +34,8 @@ upstream:
   max_response_bytes: 0
 
 profiles:
+  # Runnable today. Only the denylist and allowlist layers are implemented (M1), so this
+  # profile uses just those. `marshal serve --profile base` works as-is.
   base:
     default_action: deny
     policy:
@@ -43,20 +45,18 @@ profiles:
 
       - layer: allowlist
         allow:
+          bundles: [github, crates-io]
           domains: ["*.githubusercontent.com"]
         on_match: allow
         on_miss: pass
 
-      - layer: dlp
-        scan_request: true
-        patterns: ["aws-access-key", "github-pat", "private-key-pem"]
-        on_match: deny
-        annotate:
-          flags: ["PossibleSecretInBody"]
-
     transforms:
       headers:
         allow: ["accept*", "content-*", "user-agent", "authorization"]
+
+  # The intended shape, and not yet runnable: `dlp`, `rules` and `judge` arrive in M3 and
+  # M4.5. Starting with this profile fails loudly rather than silently running a chain more
+  # permissive than the one written here.
 
   coding-agent:
     extends: base
