@@ -9,5 +9,5 @@ pub mod model;
 pub mod validate;
 
 pub use load::{LoadError, load};
-pub use model::{Config, Profile};
+pub use model::{BodyTransform, Config, Profile, RequestTransforms, ResponseTransforms};
 pub use validate::{Diagnostic, Severity, validate};

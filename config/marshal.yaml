@@ -50,7 +50,7 @@ profiles:
         on_match: allow
         on_miss: pass
 
-    transforms:
+    request_transforms:
       headers:
         allow: ["accept*", "content-*", "user-agent", "authorization"]
 
@@ -105,6 +105,29 @@ profiles:
         prompt: |
           Allow only changes to repositories owned by gregbacchus. Deny anything that
           modifies workflow files, repository secrets, or repository settings.
+
+    # Applied on the way out, once the chain has allowed. Rewriting is not deciding, which
+    # is why these are not policy layers.
+    request_transforms:
+      headers:
+        allow: ["accept*", "content-*", "user-agent", "authorization"]
+      secrets:
+        - source: { type: env, var: GITHUB_TOKEN }
+          proxy_value: "marshal-github-placeholder"
+          inject: { header: "Authorization", template: "Bearer {secret}" }
+          require: true
+          rules: [{ host: "api.github.com" }]
+
+    # Applied on the way back to the agent. Body transforms need the whole response in
+    # memory, so a profile declaring one is stating that responses they apply to are no
+    # longer streamable — keep them scoped away from SSE and WebSocket endpoints.
+    response_transforms:
+      headers:
+        allow: ["content-*", "date", "etag", "cache-control", "retry-after"]
+      body:
+        # Never let an injected credential echo back to the agent through a response.
+        - transform: redact
+          patterns: ["github-pat"]
 
 sessions:
   # Tried in order; first match wins. Identity is derived from the connection, never

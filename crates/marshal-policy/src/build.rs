@@ -29,13 +29,14 @@ pub enum BuildError {
     #[error("profile `{profile}`: unknown bundle `{bundle}`")]
     UnknownBundle { profile: String, bundle: String },
 
-    #[error("profile `{profile}`: layer `{layer}` is not implemented yet")]
+    #[error("profile `{profile}`: `{layer}` is not implemented yet")]
     Unimplemented { profile: String, layer: &'static str },
 }
 
 /// Resolve a profile's `extends` chain into an effective profile.
 ///
-/// Scalars and transforms merge child-over-parent. The **policy chain does not merge**: a
+/// Scalars and transform sections merge child-over-parent. The **policy chain does not
+/// merge**: a
 /// child that declares any layers replaces the parent's chain outright. Splicing two ordered
 /// chains together would silently change precedence, and in a short-circuiting chain
 /// precedence is the whole semantics — better to make the child restate what it wants.
@@ -70,11 +71,17 @@ pub fn resolve_profile(
         if !p.policy.is_empty() {
             effective.policy = p.policy.clone();
         }
-        if p.transforms.headers.is_some() {
-            effective.transforms.headers = p.transforms.headers.clone();
+        if p.request_transforms.headers.is_some() {
+            effective.request_transforms.headers = p.request_transforms.headers.clone();
         }
-        if !p.transforms.secrets.is_empty() {
-            effective.transforms.secrets = p.transforms.secrets.clone();
+        if !p.request_transforms.secrets.is_empty() {
+            effective.request_transforms.secrets = p.request_transforms.secrets.clone();
+        }
+        if p.response_transforms.headers.is_some() {
+            effective.response_transforms.headers = p.response_transforms.headers.clone();
+        }
+        if !p.response_transforms.body.is_empty() {
+            effective.response_transforms.body = p.response_transforms.body.clone();
         }
     }
     effective.extends = None;
@@ -111,6 +118,15 @@ pub fn build_chain(
                 });
             }
         }
+    }
+
+    // Same rule as an unimplemented policy layer: a profile naming a transform we cannot run
+    // must not start. A response served untransformed is not what the operator asked for.
+    if let Some(t) = profile.response_transforms.body.first() {
+        return Err(BuildError::Unimplemented {
+            profile: profile_name.to_owned(),
+            layer: t.name(),
+        });
     }
 
     Ok(Chain::new(profile_name, layers, profile.default_action, decider))

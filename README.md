@@ -34,8 +34,22 @@ Two consequences worth knowing up front:
 * **Default-deny lives in `default_action`,** the terminal applied when every layer passed.
   Setting it to `allow` requires an explicit acknowledgement in config.
 
-Deciding *whether* (policy layers) is separate from deciding *how* (transforms: header
-filtering, secret injection). Transforms run only once the chain has allowed.
+## Transforms
+
+Deciding *whether* (policy layers) is separate from deciding *how* (transforms), and the two
+directions are separate from each other:
+
+* **`request_transforms`** rewrite an allowed request on its way out — header filtering,
+  swapping a placeholder for a real credential so the agent never holds it.
+* **`response_transforms`** rewrite what comes back — redacting a secret the upstream echoed,
+  summarising or compacting a body too large to be useful to an agent.
+
+Both run only after the chain has allowed. A transform declares whether it needs the body
+buffered, and that declaration is load-bearing rather than advisory: bodies stream by default,
+and a transform that rewrites content cannot run over a stream. Declaring a body transform is
+therefore a statement that the responses it applies to are no longer streamable, so
+`marshal config check` warns and the profile should scope it away from SSE and WebSocket
+endpoints.
 
 ## Status
 

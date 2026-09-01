@@ -73,7 +73,7 @@ pub struct RequestContext {
     pub evidence: Evidence,
 }
 
-/// The response side, as seen by response-phase layers and transforms.
+/// The response side, as seen by response-phase policy layers and response transforms.
 #[derive(Debug)]
 pub struct ResponseParts {
     pub status: http::StatusCode,

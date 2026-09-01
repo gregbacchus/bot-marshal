@@ -194,3 +194,41 @@ profiles:
     assert_eq!(chain.layer_names(), ["allowlist"]);
     assert_eq!(chain.evaluate(&request("ok.example.com")).await.action, Action::Allow);
 }
+
+#[tokio::test]
+async fn unimplemented_response_transform_is_also_an_error() {
+    // Same rule as an unimplemented policy layer. A response served untransformed is not
+    // what the operator asked for, and silently doing so would let a `redact` that never
+    // runs leak a credential the proxy itself injected.
+    let c = cfg(r#"
+profiles:
+  p:
+    default_action: deny
+    response_transforms:
+      body:
+        - transform: redact
+          patterns: ["github-pat"]
+"#);
+    let err = build_chain(&c, "p", Arc::new(DenyingDecider)).unwrap_err();
+    assert!(err.to_string().contains("redact"), "{err}");
+}
+
+#[tokio::test]
+async fn extends_inherits_both_transform_directions() {
+    let c = cfg(r#"
+profiles:
+  base:
+    default_action: deny
+    request_transforms:
+      headers:
+        allow: ["accept"]
+    response_transforms:
+      headers:
+        allow: ["content-type"]
+  child:
+    extends: base
+"#);
+    let p = marshal_policy::resolve_profile(&c, "child").unwrap();
+    assert_eq!(p.request_transforms.headers.unwrap().allow, ["accept"]);
+    assert_eq!(p.response_transforms.headers.unwrap().allow, ["content-type"]);
+}

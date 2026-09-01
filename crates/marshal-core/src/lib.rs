@@ -16,7 +16,9 @@ pub mod verdict;
 pub use audit::{Action, AuditRecord, AuditSink};
 pub use error::{Error, Result};
 pub use evidence::{Evidence, Fact, Flag, LayerOutcome};
-pub use policy::{CostClass, FailureMode, PolicyLayer, Transform};
+pub use policy::{
+    BodyRequirement, CostClass, FailureMode, PolicyLayer, RequestTransform, ResponseTransform,
+};
 pub use request::{Authority, BodyHandle, IngressMode, RequestContext, ResponseParts};
 pub use secret::{SecretSource, SecretValue};
 pub use session::{ConnInfo, Credential, PeerCred, Resolved, SessionId, SessionResolver};

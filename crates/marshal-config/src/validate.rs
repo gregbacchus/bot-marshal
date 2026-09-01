@@ -109,6 +109,23 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
             }
         }
 
+        // Body transforms force the whole response into memory. That is a real behaviour
+        // change, not a detail: an SSE or WebSocket response cannot survive it, so the
+        // operator should be told rather than discovering it when an agent's stream stalls.
+        for (i, t) in profile.response_transforms.body.iter().enumerate() {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                location: format!("{at}.response_transforms.body[{i}]"),
+                message: format!(
+                    "`{}` buffers the response body (up to {} bytes), so responses it \
+                     applies to cannot stream; scope it away from SSE and WebSocket \
+                     endpoints",
+                    t.name(),
+                    t.max_bytes()
+                ),
+            });
+        }
+
         // Bundle references must resolve.
         for (i, layer) in profile.policy.iter().enumerate() {
             let bundles = match layer {
@@ -180,6 +197,28 @@ mod tests {
             validate(&cfg)
                 .iter()
                 .any(|d| d.severity == Severity::Error && d.location == "profiles.p.extends")
+        );
+    }
+
+    #[test]
+    fn response_body_transforms_warn_about_buffering() {
+        use crate::model::{BodyTransform, ResponseTransforms};
+        let cfg = cfg_with(Profile {
+            response_transforms: ResponseTransforms {
+                headers: None,
+                body: vec![BodyTransform::Redact {
+                    patterns: vec!["github-pat".into()],
+                    max_bytes: 4096,
+                }],
+            },
+            ..Default::default()
+        });
+        let d = validate(&cfg);
+        assert!(
+            d.iter().any(|d| d.severity == Severity::Warning
+                && d.location == "profiles.p.response_transforms.body[0]"
+                && d.message.contains("cannot stream")),
+            "{d:?}"
         );
     }
 

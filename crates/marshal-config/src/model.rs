@@ -151,23 +151,98 @@ pub struct Profile {
     /// Ordered chain. First terminal verdict wins.
     #[serde(default)]
     pub policy: Vec<LayerConfig>,
+    /// Applied on the way out, after the chain has allowed.
     #[serde(default)]
-    pub transforms: Transforms,
+    pub request_transforms: RequestTransforms,
+    /// Applied on the way back to the agent.
+    #[serde(default)]
+    pub response_transforms: ResponseTransforms,
 }
 
+/// Rewrites applied to an allowed request before it leaves.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Transforms {
+pub struct RequestTransforms {
     #[serde(default)]
-    pub headers: Option<HeaderTransform>,
+    pub headers: Option<HeaderAllowlist>,
+    /// Placeholder-to-real credential swaps, so the agent never holds the real secret.
     #[serde(default)]
     pub secrets: Vec<serde_json::Value>,
 }
 
+/// Rewrites applied to a response before the agent sees it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HeaderTransform {
-    /// Default-deny: headers not listed are stripped.
+pub struct ResponseTransforms {
+    #[serde(default)]
+    pub headers: Option<HeaderAllowlist>,
+    /// Body rewrites. Each of these needs the whole body in memory, so a profile that
+    /// declares one is stating that responses it applies to are no longer streamable.
+    #[serde(default)]
+    pub body: Vec<BodyTransform>,
+}
+
+/// A rewrite of the response body.
+///
+/// None of these are implemented yet; a profile naming one fails to build rather than
+/// quietly serving untransformed responses. The shapes are declared because they determine
+/// whether a response can stream, which is a decision the rest of the design has to respect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "transform", rename_all = "snake_case")]
+pub enum BodyTransform {
+    /// Replace a body with an LLM-generated summary once it exceeds `over_bytes`.
+    Summarize {
+        over_bytes: usize,
+        #[serde(default = "default_body_cap")]
+        max_bytes: usize,
+        #[serde(default)]
+        rules: Vec<serde_json::Value>,
+    },
+    /// Mechanically shrink a structured body — drop known-noisy fields, collapse arrays —
+    /// without invoking a model.
+    Compact {
+        #[serde(default = "default_body_cap")]
+        max_bytes: usize,
+        #[serde(default)]
+        rules: Vec<serde_json::Value>,
+    },
+    /// Redact secrets the upstream echoed back, so a credential the proxy injected cannot
+    /// leak to the agent through a response.
+    Redact {
+        #[serde(default)]
+        patterns: Vec<String>,
+        #[serde(default = "default_body_cap")]
+        max_bytes: usize,
+    },
+}
+
+fn default_body_cap() -> usize {
+    1024 * 1024
+}
+
+impl BodyTransform {
+    pub fn name(&self) -> &'static str {
+        match self {
+            BodyTransform::Summarize { .. } => "summarize",
+            BodyTransform::Compact { .. } => "compact",
+            BodyTransform::Redact { .. } => "redact",
+        }
+    }
+
+    /// Every body transform needs the body materialised; this is the cap it declares.
+    pub fn max_bytes(&self) -> usize {
+        match self {
+            BodyTransform::Summarize { max_bytes, .. }
+            | BodyTransform::Compact { max_bytes, .. }
+            | BodyTransform::Redact { max_bytes, .. } => *max_bytes,
+        }
+    }
+}
+
+/// Default-deny header filtering: headers not listed are stripped.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderAllowlist {
     #[serde(default)]
     pub allow: Vec<String>,
 }

@@ -67,17 +67,67 @@ pub trait PolicyLayer: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Decides **how** a permitted request is rewritten.
+/// How much of a body a transform needs materialised before it can run.
 ///
-/// Transforms run only after the chain has allowed. Secret injection is a transform, not a
-/// policy layer: it is not a decision.
+/// Bodies stream by default, which is what makes SSE, WebSockets and large uploads work. A
+/// transform that needs bytes has to say so and name a cap, so the cost of buffering is
+/// declared rather than discovered — and so the runner can reject a config whose transforms
+/// would buffer a stream that must not be buffered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyRequirement {
+    /// Sees headers only; the body passes through untouched.
+    Streaming,
+    /// Needs the body in memory, up to `cap` bytes.
+    ///
+    /// What happens when a body exceeds the cap is a configured choice — refuse the request,
+    /// or pass it through untransformed — never a silent truncation.
+    Buffered { cap: usize },
+}
+
+impl BodyRequirement {
+    pub fn buffers(&self) -> bool {
+        matches!(self, BodyRequirement::Buffered { .. })
+    }
+}
+
+/// Decides **how** a permitted request is rewritten on its way out.
+///
+/// Request transforms run only after the chain has allowed. Secret injection is a request
+/// transform, not a policy layer: swapping a placeholder for a real credential is not a
+/// decision about whether the request may proceed.
 #[async_trait::async_trait]
-pub trait Transform: Send + Sync + std::fmt::Debug {
+pub trait RequestTransform: Send + Sync + std::fmt::Debug {
     fn name(&self) -> &str;
 
-    async fn on_request(&self, cx: &mut RequestContext) -> Result<()>;
-
-    async fn on_response(&self, _cx: &RequestContext, _resp: &mut ResponseParts) -> Result<()> {
-        Ok(())
+    fn body_requirement(&self) -> BodyRequirement {
+        BodyRequirement::Streaming
     }
+
+    async fn apply(&self, cx: &mut RequestContext) -> Result<()>;
+}
+
+/// Decides **how** a response is rewritten on its way back to the agent.
+///
+/// Separate from [`RequestTransform`] because the two differ in more than direction. A
+/// response transform may rewrite content the agent will act on — redacting a credential the
+/// upstream echoed, summarising a body too large to be useful, compacting a payload before it
+/// consumes an agent's context — and those need the whole body, whereas most request
+/// transforms only touch headers.
+///
+/// That makes [`BodyRequirement`] load-bearing here rather than advisory: a transform that
+/// summarises cannot run over a stream, so declaring `Buffered` is how it says that a
+/// response it applies to is no longer streamable. Applying one to an SSE or WebSocket
+/// response is a configuration error, not something to discover at runtime when the agent's
+/// stream stalls.
+#[async_trait::async_trait]
+pub trait ResponseTransform: Send + Sync + std::fmt::Debug {
+    fn name(&self) -> &str;
+
+    fn body_requirement(&self) -> BodyRequirement {
+        BodyRequirement::Streaming
+    }
+
+    /// The request is available because a response is rarely interpretable without it — what
+    /// to redact, or how aggressively to compact, usually depends on what was asked.
+    async fn apply(&self, cx: &RequestContext, resp: &mut ResponseParts) -> Result<()>;
 }
