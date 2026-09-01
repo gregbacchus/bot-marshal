@@ -21,3 +21,9 @@ regex.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+http.workspace = true
+serde_yaml_ng.workspace = true
+async-trait.workspace = true

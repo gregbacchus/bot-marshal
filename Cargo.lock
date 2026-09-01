@@ -1188,12 +1188,15 @@ dependencies = [
  "async-trait",
  "cel",
  "globset",
+ "http",
  "ipnet",
  "marshal-config",
  "marshal-core",
  "regex",
  "serde_json",
+ "serde_yaml_ng",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 
