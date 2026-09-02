@@ -96,19 +96,40 @@ unspoofable and free of a lookup race.
 marshal run --profile coding-agent -- claude
 ```
 
-This places the agent in a transient systemd scope named `marshal-coding-agent-<id>.scope`
-and sets the proxy and CA environment for every runtime that consults its own trust store.
-The naming convention *is* the registration: the `launched` resolver reads the profile back
-out of the cgroup, so there is no control socket and nothing to get out of sync if the proxy
-restarts. Because cgroups are inherited, the `git`, `npm` and `curl` processes the agent
-spawns — which is where most of its egress actually comes from — are identified too.
+The agent goes into a network namespace with no route out, inside a transient systemd scope
+named `marshal-coding-agent-<id>.scope`. The scope supplies identity — the naming convention
+*is* the registration, so the `launched` resolver reads the profile back out of the cgroup and
+there is no control socket to get out of sync. Because cgroups are inherited, the `git`, `npm`
+and `curl` processes the agent spawns — where most of its egress actually comes from — are
+identified too. That gives distinct sessions for agents running as the *same* uid, which uid
+alone cannot do.
 
-That gives distinct sessions for agents running as the *same* uid, which uid alone cannot do.
+**`netns` enforces rather than identifies**, which is what separates it from every other mode.
+An unprivileged namespace has loopback and nothing else; the proxy is reached over a Unix
+socket, which is a filesystem object and so crosses the namespace boundary untouched. A small
+forwarder inside bridges loopback to it. No `CAP_NET_ADMIN`, no veth, no slirp4netns.
 
-`--isolation netns` is deliberately absent rather than half-implemented. It is the only option
-that prevents bypass rather than merely identifying traffic, but doing it unprivileged needs a
-forwarder inside the namespace; a flag that quietly did something weaker would be worse than
-no flag. Use a container with its own address and a `source_ip` resolver for that today.
+The difference is not theoretical. The same agent, told to unset its proxy variables and
+connect directly to a host its profile denies:
+
+| isolation | result |
+|---|---|
+| `cgroup` | reaches the host — **bypassed** |
+| `netns`  | `Could not resolve host` — no route out |
+
+Two consequences worth knowing. DNS is gone too, so a hostname is only ever resolved by the
+proxy *after* policy has run, which closes DNS-based exfiltration that destination filtering
+never sees. And a tool that ignores proxy environment variables gets no network at all rather
+than silently bypassing — failing closed is the point, but it does surface badly-behaved
+tooling as a hard error.
+
+Only the network is isolated; the filesystem is passed through, because the agent needs its
+workspace. This is an egress firewall, not a sandbox.
+
+```bash
+marshal run --profile coding-agent --isolation cgroup -- claude   # identify only
+marshal run --profile coding-agent --isolation none   -- claude   # env vars only
+```
 
 ### A note on CONNECT
 

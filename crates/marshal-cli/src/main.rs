@@ -51,9 +51,11 @@ enum Command {
         #[arg(long)]
         profile: String,
 
-        /// How the agent is isolated: `cgroup` (identity by cgroup, inherited by children)
-        /// or `none` (identity by proxy credential).
-        #[arg(long, default_value = "cgroup")]
+        /// How the agent is isolated:
+        /// `netns` (no route out except the proxy — enforces, not just identifies),
+        /// `cgroup` (identity by cgroup, inherited by children),
+        /// or `none` (identity by a proxy credential the agent holds).
+        #[arg(long, default_value = "netns")]
         isolation: String,
 
         /// Proxy address the agent should use.
@@ -65,6 +67,24 @@ enum Command {
         dry_run: bool,
 
         /// The command to launch.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Internal: the half of `--isolation netns` that runs inside the namespace.
+    ///
+    /// Not intended to be invoked directly; `marshal run` re-executes this binary with it.
+    #[command(hide = true)]
+    Sandbox {
+        /// The proxy's Unix socket, as visible inside the namespace.
+        #[arg(long)]
+        socket: PathBuf,
+        /// Where to listen inside the namespace.
+        #[arg(long, default_value = marshal_launch::SANDBOX_LISTEN)]
+        listen: String,
+        /// CA certificate for the agent's trust environment.
+        #[arg(long)]
+        ca: Option<PathBuf>,
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
@@ -119,6 +139,31 @@ fn main() -> ExitCode {
         Command::Ca(cmd) => ca_command(&cli.config, cmd),
         Command::Run { profile, isolation, proxy, dry_run, command } => {
             run_command(&cli.config, &profile, &isolation, &proxy, dry_run, &command)
+        }
+        Command::Sandbox { socket, listen, ca, command } => {
+            let listen = match listen.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("error: invalid --listen: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("error: cannot start the async runtime: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match rt.block_on(marshal_launch::sandbox::run(
+                marshal_launch::sandbox::SandboxConfig { socket, listen, ca_cert: ca, command },
+            )) {
+                Ok(code) => ExitCode::from(code as u8),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Command::Serve { profile, listen, audit_log } => {
             let rt = match tokio::runtime::Runtime::new() {
@@ -377,13 +422,38 @@ fn run_command(
         return ExitCode::FAILURE;
     }
 
-    if isolation == marshal_launch::Isolation::Cgroup && !marshal_launch::systemd_available() {
+    // Preflight every dependency the chosen mode needs, with a message that names the
+    // working alternative. Discovering a missing namespace by watching the agent fail every
+    // request is a miserable way to learn it.
+    use marshal_launch::Isolation;
+    if matches!(isolation, Isolation::Cgroup | Isolation::Netns)
+        && !marshal_launch::systemd_available()
+    {
         eprintln!(
-            "error: `--isolation cgroup` needs systemd-run, which is not available here. Use \
+            "error: `--isolation {}` needs systemd-run, which is not available here. Use \
              `--isolation none` to launch with proxy environment variables only, accepting \
-             that identity then rests on a credential the agent holds."
+             that identity then rests on a credential the agent holds.",
+            if isolation == Isolation::Netns { "netns" } else { "cgroup" }
         );
         return ExitCode::FAILURE;
+    }
+    if isolation == Isolation::Netns {
+        if !marshal_launch::bwrap_available() {
+            eprintln!(
+                "error: `--isolation netns` needs bubblewrap (`bwrap`), which is not \
+                 installed. Install it, or use `--isolation cgroup` — which identifies the \
+                 agent but does not stop it routing around the proxy."
+            );
+            return ExitCode::FAILURE;
+        }
+        if !marshal_launch::netns_available() {
+            eprintln!(
+                "error: bwrap cannot create a network namespace here, which usually means \
+                 unprivileged user namespaces are disabled \
+                 (`sysctl kernel.unprivileged_userns_clone`). Use `--isolation cgroup`."
+            );
+            return ExitCode::FAILURE;
+        }
     }
 
     let (cert_path, _) = ca_paths(config_path).unwrap_or_default();
@@ -393,8 +463,22 @@ fn run_command(
         credential: None,
     };
 
+    let unix_socket = cfg
+        .listeners
+        .explicit
+        .as_ref()
+        .and_then(|e| e.unix_socket.as_ref())
+        .map(|p| expand_tilde(p));
+
     let id = std::process::id();
-    let mut cmd = match marshal_launch::build_command(isolation, profile, id, &endpoint, command) {
+    let mut cmd = match marshal_launch::build_command_with(
+        isolation,
+        profile,
+        id,
+        &endpoint,
+        command,
+        unix_socket.as_deref(),
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}");
@@ -403,14 +487,26 @@ fn run_command(
     };
 
     if dry_run {
-        println!("scope:   {}", marshal_launch::scope_name(profile, id));
+        println!("isolation: {isolation:?}");
+        println!("scope:     {}", marshal_launch::scope_name(profile, id));
         println!(
-            "command: {} {:?}",
+            "command:   {} {:?}",
             cmd.get_program().to_string_lossy(),
             cmd.get_args().collect::<Vec<_>>()
         );
-        for (k, v) in marshal_launch::proxy_env(&endpoint) {
-            println!("env:     {k}={v}");
+        if isolation == Isolation::Netns {
+            // The proxy env is set by the sandbox from inside, pointing at the forwarder
+            // rather than at the host address — printing the host one here would mislead.
+            println!(
+                "note:      the agent reaches the proxy at {} inside its namespace, which is \
+                 forwarded to {}. It has no other route out.",
+                marshal_launch::SANDBOX_LISTEN,
+                unix_socket.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+            );
+        } else {
+            for (k, v) in marshal_launch::proxy_env(&endpoint) {
+                println!("env:       {k}={v}");
+            }
         }
         return ExitCode::SUCCESS;
     }
