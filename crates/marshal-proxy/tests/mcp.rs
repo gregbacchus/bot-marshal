@@ -72,7 +72,7 @@ async fn harness() -> Harness {
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: transforms,
-            request_transforms: Vec::new(),
+            request_transforms: std::collections::HashMap::new(),
             sessions: Arc::new(SessionRegistry::new(vec![], "p", false, false)),
             passthrough: HostMatcher::default(),
             tls: engine,

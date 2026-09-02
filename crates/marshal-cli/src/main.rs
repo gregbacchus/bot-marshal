@@ -198,21 +198,29 @@ async fn serve(
     };
     let build = Arc::new(build);
 
-    let (runtime, cfg, injector) = build()?;
+    let (runtime, cfg, injectors) = build()?;
     let handle = Arc::new(marshal_proxy::runtime::RuntimeHandle::new(runtime));
 
     let guard = UpstreamGuard::new(&cfg.upstream.deny_cidrs, cfg.upstream.allow_private)?;
 
-    // Resolve secrets once so the redactor knows the real values before a single record can
-    // be written. Seeding after the first request would leave a window in which a secret
-    // could reach the audit log.
-    let resolved = injector.resolve_all().await;
-    let secret_names: Vec<String> = resolved.iter().map(|(n, _)| n.clone()).collect();
-    if !resolved.is_empty() {
+    // Resolve every profile's secrets once, up front, so the redactor knows every real value
+    // before a single record can be written. This has to be the union across all profiles,
+    // not just whichever one a given connection resolves into: an audit line about profile
+    // B's request could in principle sit next to a log line mentioning profile A's secret,
+    // and redaction has to protect against a value appearing anywhere in output, not just in
+    // the records belonging to its own profile. Seeding after the first request would also
+    // leave a window in which a secret could reach the audit log.
+    let mut secret_names: Vec<String> = Vec::new();
+    let mut secret_values: Vec<String> = Vec::new();
+    for injector in &injectors {
+        for (name, value) in injector.resolve_all().await {
+            secret_names.push(name);
+            secret_values.push(value.expose().to_owned());
+        }
+    }
+    if !secret_names.is_empty() {
         tracing::info!(secrets = ?secret_names, "boundary secret injection active");
     }
-    let secret_values: Vec<String> =
-        resolved.into_iter().map(|(_, v)| v.expose().to_owned()).collect();
     let redactor = marshal_core::Redactor::new(secret_values.clone());
     let tracing_redactor = marshal_core::Redactor::new(secret_values);
 
@@ -323,8 +331,11 @@ async fn serve(
 fn build_runtime(
     config_path: &std::path::Path,
     profile_override: Option<String>,
-) -> anyhow::Result<(marshal_proxy::runtime::Runtime, marshal_config::model::Config, SecretInjector)>
-{
+) -> anyhow::Result<(
+    marshal_proxy::runtime::Runtime,
+    marshal_config::model::Config,
+    Vec<Arc<SecretInjector>>,
+)> {
     let cfg = marshal_config::load(config_path)?;
 
     // Refuse to start on an invalid config. A proxy that boots with a chain the operator did
@@ -345,6 +356,16 @@ fn build_runtime(
     let mut chains: HashMap<Arc<str>, Arc<marshal_policy::Chain>> = HashMap::new();
     let mut response_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>> =
         HashMap::new();
+    // Per profile, same as chains and response_transforms: a secret swap declared under one
+    // profile must never fire for a session resolved into a different one. Kept alongside as
+    // `injectors` too, because the redactor below needs the union of every profile's real
+    // secret values, not just whichever profile a given connection happens to resolve into —
+    // a value belonging to any profile can end up in a log line regardless of which session
+    // produced it.
+    let mut request_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::RequestTransform>>> =
+        HashMap::new();
+    let mut injectors: Vec<Arc<SecretInjector>> = Vec::new();
+
     for name in cfg.profiles.keys() {
         chains.insert(
             Arc::from(name.as_str()),
@@ -353,6 +374,16 @@ fn build_runtime(
         let transforms = marshal_policy::build_response_transforms(&cfg, name)?;
         if !transforms.is_empty() {
             response_transforms.insert(Arc::from(name.as_str()), transforms);
+        }
+
+        let profile = marshal_policy::resolve_profile(&cfg, name)?;
+        let injector = Arc::new(build_injector(&profile, &cfg)?);
+        if !injector.is_empty() {
+            request_transforms.insert(
+                Arc::from(name.as_str()),
+                vec![Arc::clone(&injector) as Arc<dyn marshal_core::RequestTransform>],
+            );
+            injectors.push(injector);
         }
     }
 
@@ -400,15 +431,6 @@ fn build_runtime(
 
     let passthrough = marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?;
 
-    // Secret swaps come from the fallback profile. Per-profile transform sets need the
-    // transform selection to follow the chain, which is a wider change than this.
-    let effective = marshal_policy::resolve_profile(&cfg, &fallback)?;
-    let injector = build_injector(&effective, &cfg)?;
-    let mut request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>> = Vec::new();
-    if !injector.is_empty() {
-        request_transforms.push(Arc::new(build_injector(&effective, &cfg)?));
-    }
-
     Ok((
         marshal_proxy::runtime::Runtime {
             chains,
@@ -419,7 +441,7 @@ fn build_runtime(
             tls,
         },
         cfg,
-        injector,
+        injectors,
     ))
 }
 
@@ -888,4 +910,115 @@ struct HostRule {
     host: Option<String>,
     #[serde(default)]
     cidr: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two profiles, each with its own secret swap for the same host. This is the exact
+    /// shape that used to break: `build_runtime` resolved only the fallback profile's
+    /// `request_transforms.secrets`, so a non-fallback profile's swap was either silently
+    /// never built, or — worse, if both profiles targeted the same host — the fallback
+    /// profile's real credential could be injected into a session that resolved into the
+    /// other profile entirely.
+    fn write_two_profile_config(dir: &std::path::Path) -> std::path::PathBuf {
+        let ca_dir = dir.join("ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+        let generated = marshal_tls::CertificateAuthority::generate("test", 1).unwrap();
+        marshal_tls::CertificateAuthority::write(
+            &generated,
+            &ca_dir.join("ca.crt"),
+            &ca_dir.join("ca.key"),
+        )
+        .unwrap();
+
+        // File sources rather than env vars, so the test needs no unsafe `set_var` and
+        // cannot race with anything else in the same process.
+        let secret_a = dir.join("secret-a.txt");
+        std::fs::write(&secret_a, "real-value-a").unwrap();
+        let secret_b = dir.join("secret-b.txt");
+        std::fs::write(&secret_b, "real-value-b").unwrap();
+
+        let config = dir.join("marshal.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+tls:
+  ca_cert: "{ca_dir}/ca.crt"
+  ca_key: "{ca_dir}/ca.key"
+
+profiles:
+  profile-a:
+    default_action: deny
+    request_transforms:
+      secrets:
+        - name: SECRET_A
+          source: {{ type: file, path: "{secret_a}" }}
+          proxy_value: "placeholder-a"
+          require: false
+          rules: [{{ host: "api.example.com" }}]
+
+  profile-b:
+    default_action: deny
+    request_transforms:
+      secrets:
+        - name: SECRET_B
+          source: {{ type: file, path: "{secret_b}" }}
+          proxy_value: "placeholder-b"
+          require: false
+          rules: [{{ host: "api.example.com" }}]
+"#,
+                ca_dir = ca_dir.display(),
+                secret_a = secret_a.display(),
+                secret_b = secret_b.display(),
+            ),
+        )
+        .unwrap();
+        config
+    }
+
+    #[tokio::test]
+    async fn each_profile_gets_only_its_own_secret_swap() {
+        let dir =
+            std::env::temp_dir().join(format!("marshal-build-runtime-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = write_two_profile_config(&dir);
+
+        let (runtime, _, injectors) =
+            build_runtime(&config, Some("profile-a".to_string())).expect("config builds");
+
+        // The mechanical bug: request_transforms used to be a flat Vec built from one
+        // profile, so it either lacked profile-b's swap entirely, or (worse, when hosts
+        // overlapped, as they do here) applied profile-a's real secret to profile-b's
+        // sessions. Both profiles must now have their own, independent entry.
+        assert!(
+            runtime.request_transforms.contains_key("profile-a"),
+            "profile-a's own swap is missing"
+        );
+        assert!(
+            runtime.request_transforms.contains_key("profile-b"),
+            "profile-b's swap was dropped because it was not the fallback profile — this is \
+             exactly the bug"
+        );
+
+        // And the redactor-seeding side of the same bug: every profile's real value must be
+        // resolved, not just the fallback's, because a value belonging to any profile could
+        // appear in a log line regardless of which session produced it.
+        let mut all_values = Vec::new();
+        for injector in &injectors {
+            for (_, v) in injector.resolve_all().await {
+                all_values.push(v.expose().to_owned());
+            }
+        }
+        assert!(all_values.contains(&"real-value-a".to_string()), "{all_values:?}");
+        assert!(
+            all_values.contains(&"real-value-b".to_string()),
+            "profile-b's secret value was never resolved, so it can never be redacted: \
+             {all_values:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

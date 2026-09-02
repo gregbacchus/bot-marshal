@@ -56,6 +56,9 @@ struct Session {
     /// Response transforms for this profile. Per-session rather than per-server, because
     /// which tools are visible depends on which profile applies.
     response_transforms: Vec<Arc<dyn marshal_core::ResponseTransform>>,
+    /// Request transforms for this profile, most importantly secret injection — a swap
+    /// declared under one profile must never fire for a session resolved into another.
+    request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
 }
 
 impl std::fmt::Debug for Session {
@@ -113,7 +116,14 @@ impl Server {
             Some(chain) => {
                 let response_transforms =
                     runtime.response_transforms.get(&resolved.profile).cloned().unwrap_or_default();
-                Some(Session { resolved, chain: Arc::clone(chain), response_transforms })
+                let request_transforms =
+                    runtime.request_transforms.get(&resolved.profile).cloned().unwrap_or_default();
+                Some(Session {
+                    resolved,
+                    chain: Arc::clone(chain),
+                    response_transforms,
+                    request_transforms,
+                })
             }
             None => {
                 tracing::error!(
@@ -503,7 +513,7 @@ impl Server {
                 session: cx.session.clone(),
                 profile: Arc::clone(&session.resolved.profile),
                 client_addr: peer,
-                request_transforms: runtime.request_transforms.clone(),
+                request_transforms: session.request_transforms.clone(),
                 stats: Arc::clone(&self.stats),
                 response_transforms: session.response_transforms.clone(),
                 attributed: session.resolved.attributed,
@@ -737,7 +747,7 @@ impl Server {
                     session: cx.session.clone(),
                     profile: Arc::clone(&session.resolved.profile),
                     client_addr: peer,
-                    request_transforms: runtime.request_transforms.clone(),
+                    request_transforms: session.request_transforms.clone(),
                     stats: Arc::clone(&self.stats),
                     response_transforms: session.response_transforms.clone(),
                     attributed: session.resolved.attributed,

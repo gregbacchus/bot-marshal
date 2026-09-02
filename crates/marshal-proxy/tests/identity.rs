@@ -108,7 +108,7 @@ async fn harness(
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: HashMap::new(),
-            request_transforms: Vec::new(),
+            request_transforms: std::collections::HashMap::new(),
             sessions: Arc::new(SessionRegistry::new(resolvers, fallback, deny_unidentified, false)),
             passthrough: HostMatcher::default(),
             tls: support::test_engine(),
@@ -378,7 +378,7 @@ async fn the_unix_listener_identifies_by_so_peercred() {
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: HashMap::new(),
-            request_transforms: Vec::new(),
+            request_transforms: std::collections::HashMap::new(),
             sessions: Arc::new(SessionRegistry::new(vec![resolver], "restricted", false, false)),
             passthrough: HostMatcher::default(),
             tls: support::test_engine(),

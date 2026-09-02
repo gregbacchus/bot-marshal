@@ -23,7 +23,10 @@ use crate::sessions::SessionRegistry;
 pub struct Runtime {
     pub chains: HashMap<Arc<str>, Arc<Chain>>,
     pub response_transforms: HashMap<Arc<str>, Vec<Arc<dyn ResponseTransform>>>,
-    pub request_transforms: Vec<Arc<dyn RequestTransform>>,
+    /// Per profile, exactly like `chains` and `response_transforms`: a profile's
+    /// `request_transforms.secrets` is only meaningful for sessions resolved into that
+    /// profile, and must not leak into another profile's requests.
+    pub request_transforms: HashMap<Arc<str>, Vec<Arc<dyn RequestTransform>>>,
     pub sessions: Arc<SessionRegistry>,
     /// Hosts tunnelled without interception, for genuinely certificate-pinned clients. The
     /// only sanctioned exception to interception — see [`Runtime::tls`].
@@ -108,7 +111,7 @@ mod tests {
         Runtime {
             chains,
             response_transforms: HashMap::new(),
-            request_transforms: Vec::new(),
+            request_transforms: HashMap::new(),
             sessions: Arc::new(SessionRegistry::new(vec![], profile, false, false)),
             passthrough: HostMatcher::default(),
             tls: test_engine(),

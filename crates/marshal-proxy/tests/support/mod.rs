@@ -367,15 +367,20 @@ pub fn runtime_with(
     let mut chains = std::collections::HashMap::new();
     chains.insert(Arc::from("p"), Arc::new(chain));
 
-    let mut rt_map = std::collections::HashMap::new();
+    let mut response_map = std::collections::HashMap::new();
     if !response_transforms.is_empty() {
-        rt_map.insert(Arc::from("p"), response_transforms);
+        response_map.insert(Arc::from("p"), response_transforms);
+    }
+
+    let mut request_map = std::collections::HashMap::new();
+    if !request_transforms.is_empty() {
+        request_map.insert(Arc::from("p"), request_transforms);
     }
 
     marshal_proxy::runtime::Runtime {
         chains,
-        response_transforms: rt_map,
-        request_transforms,
+        response_transforms: response_map,
+        request_transforms: request_map,
         sessions: no_resolvers(),
         passthrough,
         tls,
