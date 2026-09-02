@@ -128,14 +128,15 @@ which governs the much shorter-lived per-host leaves the CA signs while it is va
 the same trust instructions `ca init` prints. Useful for piping into a container image build
 or a trust store update without regenerating anything.
 
-**`marshal serve [--profile <name>] [--listen <addr>] [--audit-log <path>]`** — runs the
-proxy until `Ctrl-C`. `--profile` overrides `sessions.unidentified.profile` for the
-unattributed fallback; it does not select a single profile to run — every profile in the
+**`marshal serve [--profile <name>] [--listen <addr>] [--audit-sink <kinds>] [--audit-log <path>]`**
+— runs the proxy until `Ctrl-C`. `--profile` overrides `sessions.unidentified.profile` for
+the unattributed fallback; it does not select a single profile to run — every profile in the
 config gets built and is reachable by whatever resolves a session into it. `--listen`
-overrides `listeners.explicit.listen`. `--audit-log` additionally writes JSON lines to a
-file (append mode, created if missing) — see [Watching activity](#watching-activity) for
-where audit records go by default (journald, syslog, or stdout — auto-detected) and how to
-follow them live.
+overrides `listeners.explicit.listen`. `--audit-sink` (comma-separated: `trace`, `file`)
+picks where audit records go — see [Watching activity](#watching-activity) for the default
+and the distinction from `--trace-sink`. `--audit-log <path>` is the file `--audit-sink file`
+writes JSON lines to (append mode, created if missing) and implies `file` if `--audit-sink`
+wasn't given explicitly.
 
 **`marshal run --profile <name> [--isolation netns|cgroup|none] [--proxy <url>] [--dry-run] -- <command...>`**
 — launches an agent under a profile. `--isolation` defaults to `netns` (see
@@ -227,9 +228,24 @@ everywhere else identity is involved.
 
 ## Watching activity
 
-bot-marshal doesn't ship its own log storage, rotation, or `tail -f`-style command — it hands
-every event to `tracing` and, on Linux, auto-detects and defers to whatever OS-level log
-system is already running, trying each in turn at startup:
+There are two separate streams, controlled by two separate flags, and it's worth being clear
+about which is which before either one's options make sense:
+
+* **The trace stream** — startup messages, warnings, and a human-readable mirror of each
+  audit record (`allow session=... host=...`). Controlled by `--trace-sink`.
+* **The audit trail** — the canonical structured record per request, with the full
+  `Evidence` trail, redacted, meant to answer "what did this agent do." Controlled by
+  `--audit-sink`, and (when it includes `file`) written to `--audit-log <path>`.
+
+By default the audit trail's only destination *is* the trace stream's human-readable mirror
+— `--audit-sink` defaults to `trace`, or `trace,file` once `--audit-log` is given. Pass
+`--audit-sink file` explicitly to get only the structured file and a quiet console — useful
+once something else is already consuming the JSON file and the mirrored lines are just
+duplication.
+
+bot-marshal doesn't ship its own log storage, rotation, or `tail -f`-style command for the
+trace stream — it hands every event to `tracing` and, on Linux, auto-detects and defers to
+whatever OS-level log system is already running, trying each in turn at startup:
 
 1. **journald**, if `JOURNAL_STREAM` is set (true for any systemd unit whose stdout/stderr is
    the journal) *and* the connection to the journal socket actually succeeds. Fields land as
@@ -252,13 +268,10 @@ system is already running, trying each in turn at startup:
    terminal, or any supervisor (Docker, an init script) that already captures stdout into its
    own log system.
 
-This selection happens automatically and needs no flag — but `--log-sink auto|stdout|journald|syslog`
-(`MARSHAL_LOG_SINK`) forces one, erroring out if it isn't actually reachable rather than
+This selection happens automatically and needs no flag — but `--trace-sink auto|stdout|journald|syslog`
+(`MARSHAL_TRACE_SINK`) forces one, erroring out if it isn't actually reachable rather than
 silently falling back; useful when you want plain stdout while running under something that
-sets `JOURNAL_STREAM`. `--audit-log <path>` is additive,
-for the separate case of needing a durable JSON-lines copy regardless of which of the above
-is active — e.g. shipping to something none of them forward to — and gets no console mirror
-of its own.
+sets `JOURNAL_STREAM`.
 
 ## The policy chain
 
