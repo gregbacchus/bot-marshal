@@ -319,17 +319,47 @@ pub async fn start_upstream(greeting: &'static [u8]) -> std::net::SocketAddr {
     addr
 }
 
+/// A throwaway CA for tests that need *a* TlsEngine but do not care which.
+pub fn test_engine() -> Arc<marshal_proxy::mitm::TlsEngine> {
+    let generated = marshal_tls::CertificateAuthority::generate("test", 1).unwrap();
+    let ca = marshal_tls::CertificateAuthority::from_pem(&generated.cert_pem, &generated.key_pem)
+        .unwrap();
+    let minter = Arc::new(marshal_tls::LeafMinter::new(Arc::new(ca), 16, 72));
+    Arc::new(marshal_proxy::mitm::TlsEngine::new(minter).unwrap())
+}
+
 /// A single-profile runtime, which is what most tests want.
+///
+/// `tls: None` means "this test does not care about interception" — it gets a throwaway
+/// engine plus a passthrough-everything match, which reproduces the old plain-relay
+/// behaviour for tests built against plain TCP upstreams, while still satisfying the
+/// invariant that interception is mandatory except for a deliberate passthrough exception.
+/// `tls: Some(engine)` means the test wants MITM to actually happen for its hosts.
 pub fn single_profile_runtime(
     chain: marshal_policy::Chain,
     tls: Option<Arc<marshal_proxy::mitm::TlsEngine>>,
 ) -> marshal_proxy::runtime::Runtime {
-    runtime_with(chain, tls, marshal_policy::HostMatcher::default(), Vec::new(), Vec::new())
+    match tls {
+        Some(engine) => runtime_with(
+            chain,
+            engine,
+            marshal_policy::HostMatcher::default(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        None => runtime_with(
+            chain,
+            test_engine(),
+            marshal_policy::HostMatcher::new(Vec::<&str>::new(), ["0.0.0.0/0", "::/0"]).unwrap(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    }
 }
 
 pub fn runtime_with(
     chain: marshal_policy::Chain,
-    tls: Option<Arc<marshal_proxy::mitm::TlsEngine>>,
+    tls: Arc<marshal_proxy::mitm::TlsEngine>,
     passthrough: marshal_policy::HostMatcher,
     request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
     response_transforms: Vec<Arc<dyn marshal_core::ResponseTransform>>,

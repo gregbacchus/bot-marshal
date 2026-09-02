@@ -364,25 +364,39 @@ fn build_runtime(
 
     let sessions = Arc::new(build_sessions(&cfg, &fallback)?);
 
-    let (cert_path, key_path) = ca_paths(config_path).unwrap_or_default();
-    let tls = if cert_path.exists() && key_path.exists() {
-        let ca = marshal_tls::CertificateAuthority::load(&cert_path, &key_path)?;
-        let minter = Arc::new(marshal_tls::LeafMinter::new(
-            Arc::new(ca),
-            cfg.tls.cert_cache_size,
-            cfg.tls.leaf_expiry_hours,
-        ));
-        let mut extra_roots = Vec::new();
-        for path in &cfg.tls.upstream_ca_certs {
-            let path = expand_tilde(path);
-            extra_roots.push(std::fs::read_to_string(&path).map_err(|e| {
-                anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
-            })?);
-        }
-        Some(Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(minter, &extra_roots)?))
-    } else {
-        None
-    };
+    // Interception is mandatory, not a fallback. A plain relay cannot enforce per-request
+    // policy, and — the reason this is a hard requirement rather than a convenience — it
+    // cannot even guarantee the client reaches the host it claimed: shared-IP hosting routes
+    // by the TLS SNI inside the tunnel, which a relay never inspects. Refusing to start
+    // without a CA is the only way to avoid silently offering a weaker mode of operation.
+    let (cert_path, key_path) = ca_paths(config_path).map_err(|e| {
+        anyhow::anyhow!(
+            "{e} — bot-marshal only supports intercepted egress and needs `tls.ca_cert` and \
+             `tls.ca_key` set, plus `marshal ca init` to create them. (Certificate-pinned \
+             clients that must bypass interception belong in `tls.passthrough`, not this.)"
+        )
+    })?;
+    anyhow::ensure!(
+        cert_path.exists() && key_path.exists(),
+        "no CA found at {} — bot-marshal only supports intercepted egress; run `marshal ca \
+         init` first. (Certificate-pinned clients that must bypass interception belong in \
+         `tls.passthrough`, not this.)",
+        cert_path.display()
+    );
+    let ca = marshal_tls::CertificateAuthority::load(&cert_path, &key_path)?;
+    let minter = Arc::new(marshal_tls::LeafMinter::new(
+        Arc::new(ca),
+        cfg.tls.cert_cache_size,
+        cfg.tls.leaf_expiry_hours,
+    ));
+    let mut extra_roots = Vec::new();
+    for path in &cfg.tls.upstream_ca_certs {
+        let path = expand_tilde(path);
+        extra_roots.push(std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
+        })?);
+    }
+    let tls = Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(minter, &extra_roots)?);
 
     let passthrough = marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?;
 

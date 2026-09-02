@@ -25,15 +25,25 @@ pub struct Runtime {
     pub response_transforms: HashMap<Arc<str>, Vec<Arc<dyn ResponseTransform>>>,
     pub request_transforms: Vec<Arc<dyn RequestTransform>>,
     pub sessions: Arc<SessionRegistry>,
+    /// Hosts tunnelled without interception, for genuinely certificate-pinned clients. The
+    /// only sanctioned exception to interception — see [`Runtime::tls`].
     pub passthrough: HostMatcher,
-    pub tls: Option<Arc<TlsEngine>>,
+    /// Mandatory, not optional. A plain byte relay cannot enforce per-request policy, and
+    /// worse, it cannot even guarantee the client ends up talking to the host it claimed:
+    /// shared-IP hosting (CDNs, load balancers) routes by the TLS SNI inside the tunnel,
+    /// which a relay never inspects. A client can `CONNECT good.example.com` — allowed,
+    /// correctly resolved and connected — then present `SNI: evil.example.com` and have the
+    /// origin serve that content instead, entirely unseen by the proxy. Interception defeats
+    /// this structurally: the proxy re-originates its own TLS to upstream keyed on the
+    /// CONNECT authority, never on anything the client claims inside the tunnel.
+    pub tls: Arc<TlsEngine>,
 }
 
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Runtime")
             .field("profiles", &self.chains.keys().map(|k| &**k).collect::<Vec<_>>())
-            .field("intercepting", &self.tls.is_some())
+            .field("intercepting", &true)
             .finish()
     }
 }
@@ -101,8 +111,18 @@ mod tests {
             request_transforms: Vec::new(),
             sessions: Arc::new(SessionRegistry::new(vec![], profile, false, false)),
             passthrough: HostMatcher::default(),
-            tls: None,
+            tls: test_engine(),
         }
+    }
+
+    /// A throwaway CA for tests that need *a* TlsEngine but do not care which.
+    fn test_engine() -> Arc<TlsEngine> {
+        let generated = marshal_tls::CertificateAuthority::generate("test", 1).unwrap();
+        let ca =
+            marshal_tls::CertificateAuthority::from_pem(&generated.cert_pem, &generated.key_pem)
+                .unwrap();
+        let minter = Arc::new(marshal_tls::LeafMinter::new(Arc::new(ca), 16, 72));
+        Arc::new(TlsEngine::new(minter).unwrap())
     }
 
     #[test]

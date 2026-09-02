@@ -39,8 +39,9 @@ async fn start_proxy_with_guard(
 
     let server = Server::new(
         ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
-        // No CA: these tests cover the tunnel path, where policy sees only the destination.
-        // Interception is covered in tests/mitm.rs.
+        // `tls: None` here means "passthrough everything": interception is mandatory, but
+        // these tests are about the plain-relay path a passthrough host still gets (byte
+        // relay plus the SNI cross-check), not about MITM itself — that is tests/mitm.rs.
         handle(single_profile_runtime(chain, None)),
         Arc::new(guard),
         audit,
@@ -209,6 +210,47 @@ async fn connect_authority_and_tls_sni_must_agree() {
     // The proxy tears the connection down rather than relaying the mismatched handshake.
     // Either a clean EOF or a reset is acceptable; what matters is that the upstream's
     // greeting never reaches the client.
+    let mut buf = Vec::new();
+    let read = tokio::time::timeout(std::time::Duration::from_secs(5), c.read_to_end(&mut buf))
+        .await
+        .expect("proxy must close promptly, not hang");
+    match read {
+        Ok(n) => assert_eq!(n, 0, "nothing should be relayed after an SNI mismatch: {buf:?}"),
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset, "{e}"),
+    }
+}
+
+#[tokio::test]
+async fn socks5_connect_authority_and_tls_sni_must_agree() {
+    // The same laundering trick as `connect_authority_and_tls_sni_must_agree`, but through a
+    // SOCKS5 CONNECT rather than an HTTP one. Shared-IP hosting (a CDN or load balancer
+    // serving many sites off one address) routes by the SNI inside the tunnel — a plain relay
+    // never inspects that, so without this check a SOCKS5 client could open a tunnel to an
+    // allowlisted host and have the origin serve different, denied content instead.
+    let upstream = start_upstream(b"").await;
+    let proxy = start_proxy(ALLOW_LOOPBACK, "p").await;
+
+    let mut c = TcpStream::connect(proxy).await.unwrap();
+    c.write_all(&[0x05, 0x01, 0x00]).await.unwrap(); // greeting: NO_AUTH
+    let mut sel = [0u8; 2];
+    c.read_exact(&mut sel).await.unwrap();
+    assert_eq!(sel, [0x05, 0x00]);
+
+    let ip = match upstream.ip() {
+        std::net::IpAddr::V4(v4) => v4.octets(),
+        _ => unreachable!("test upstream is v4"),
+    };
+    let mut req = vec![0x05, 0x01, 0x00, 0x01];
+    req.extend(ip);
+    req.extend(upstream.port().to_be_bytes());
+    c.write_all(&req).await.unwrap();
+
+    let mut reply = [0u8; 10];
+    c.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply[1], 0x00, "the CONNECT itself is to an allowed host");
+
+    c.write_all(&client_hello("evil.example.com")).await.unwrap();
+
     let mut buf = Vec::new();
     let read = tokio::time::timeout(std::time::Duration::from_secs(5), c.read_to_end(&mut buf))
         .await

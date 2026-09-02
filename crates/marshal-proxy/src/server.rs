@@ -135,7 +135,7 @@ impl Server {
             listen = %local,
             profiles = ?runtime.chains.keys().map(|k| &**k).collect::<Vec<_>>(),
             resolvers = ?runtime.sessions.resolver_names(),
-            intercepting = runtime.tls.is_some(),
+            intercepting = true,
             "explicit proxy listening"
         );
 
@@ -149,19 +149,18 @@ impl Server {
             );
         }
 
-        if runtime.tls.is_none() {
-            tracing::warn!(
-                "no CA configured: TLS is tunnelled, so policy sees the destination host but \
-                 not the request. Run `marshal ca init` to intercept."
-            );
+        // Interception is mandatory (see `Runtime::tls`), so the only way a request-level
+        // layer is skipped is a host deliberately listed in `tls.passthrough`. Worth saying
+        // once at startup, since it is otherwise silent per-connection.
+        if !runtime.passthrough.is_empty() {
             let skipped: Vec<&str> =
                 runtime.chains.values().flat_map(|c| c.request_only_layers()).collect();
             if !skipped.is_empty() {
-                // Silently not enforcing a configured layer is the worst available outcome:
-                // the operator believes the rule is live.
                 tracing::warn!(
                     layers = ?skipped,
-                    "these layers need a decrypted request and will NEVER evaluate without a CA"
+                    passthrough_hosts = "see tls.passthrough",
+                    "these layers need a decrypted request and will not evaluate for hosts \
+                     in tls.passthrough"
                 );
             }
         }
@@ -479,6 +478,48 @@ impl Server {
         };
 
         socks5::reply(&mut client, Reply::Succeeded).await.ok();
+
+        // SOCKS5 gets exactly the same treatment as HTTP CONNECT: intercepted unless the
+        // host is a deliberate `tls.passthrough` exception, in which case the plain relay
+        // still runs the SNI cross-check. A SOCKS5 tunnel is exactly as capable of the
+        // shared-IP/SNI trick as an HTTP CONNECT tunnel, so it gets exactly the same defence.
+        if self.intercepts(&authority, &runtime) {
+            self.emit_session(
+                &session,
+                &cx,
+                &outcome.reason,
+                Action::Allow,
+                outcome.evidence,
+                None,
+                started,
+                outcome.would_deny,
+            )
+            .await;
+
+            let handler = Arc::new(MitmHandler {
+                chain: Arc::clone(&session.chain),
+                audit: Arc::clone(&self.audit),
+                authority: authority.clone(),
+                session: cx.session.clone(),
+                profile: Arc::clone(&session.resolved.profile),
+                client_addr: peer,
+                request_transforms: runtime.request_transforms.clone(),
+                stats: Arc::clone(&self.stats),
+                response_transforms: session.response_transforms.clone(),
+                attributed: session.resolved.attributed,
+                resolver: session.resolved.resolver.clone(),
+            });
+
+            if let Err(e) =
+                mitm::intercept(client.into_inner(), upstream, Arc::clone(&runtime.tls), handler)
+                    .await
+            {
+                tracing::debug!(peer = %peer, authority = %authority, error = %e,
+                    "intercepted socks5 tunnel ended");
+            }
+            return Ok(());
+        }
+
         self.emit_session(
             &session,
             &cx,
@@ -491,7 +532,26 @@ impl Server {
         )
         .await;
 
-        let _ = tunnel::relay(&mut client, &mut upstream).await;
+        let result = tunnel::relay_inspected(&mut client, &mut upstream, |opening| {
+            check_sni(opening, &authority)
+        })
+        .await;
+
+        if let Err(tunnel::RelayError::Rejected(why)) = result {
+            tracing::warn!(peer = %peer, authority = %authority, "{why}");
+            let reason = Reason::new("allowlist", "sni_authority_mismatch", why);
+            self.emit_session(
+                &session,
+                &cx,
+                &reason,
+                Action::Deny,
+                Evidence::new(),
+                None,
+                started,
+                false,
+            )
+            .await;
+        }
         Ok(())
     }
 
@@ -653,9 +713,7 @@ impl Server {
             let mut stream = Rewind::new(client.into_inner(), leftover);
             let authority = request.authority.clone();
 
-            let intercept = self
-                .intercepts(&authority, &runtime)
-                .then(|| Arc::clone(runtime.tls.as_ref().expect("checked by intercepts")));
+            let intercept = self.intercepts(&authority, &runtime).then(|| Arc::clone(&runtime.tls));
 
             if let Some(engine) = intercept {
                 // The CONNECT itself is allowed here; each request inside the tunnel is
@@ -757,8 +815,11 @@ impl Server {
     }
 
     /// Whether this destination will have its TLS intercepted.
+    /// Whether this destination is intercepted, i.e. everything except a host deliberately
+    /// listed in `tls.passthrough`. There is no "no CA" case any more: interception is
+    /// mandatory (see `Runtime::tls`).
     fn intercepts(&self, authority: &Authority, runtime: &Runtime) -> bool {
-        runtime.tls.is_some() && runtime.passthrough.matches(&authority.host).is_none()
+        runtime.passthrough.matches(&authority.host).is_none()
     }
 
     /// What a resolver gets to look at. Kernel credentials are attached separately, since

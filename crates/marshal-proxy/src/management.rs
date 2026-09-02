@@ -113,7 +113,8 @@ async fn healthz(State(state): State<ManagementState>) -> impl IntoResponse {
         "version": env!("CARGO_PKG_VERSION"),
         "generation": state.runtime.generation(),
         "profiles": runtime.chains.keys().map(|k| &**k).collect::<Vec<_>>(),
-        "intercepting": runtime.tls.is_some(),
+        // Interception is mandatory; only `tls.passthrough` hosts bypass it.
+        "passthrough_configured": !runtime.passthrough.is_empty(),
         // Surfaced here because a proxy left in warn mode looks healthy in every other way.
         "warn_only_profiles": runtime.warn_only_profiles(),
     }))

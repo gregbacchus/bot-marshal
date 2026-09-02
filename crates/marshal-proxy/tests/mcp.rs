@@ -75,7 +75,7 @@ async fn harness() -> Harness {
             request_transforms: Vec::new(),
             sessions: Arc::new(SessionRegistry::new(vec![], "p", false, false)),
             passthrough: HostMatcher::default(),
-            tls: Some(engine),
+            tls: engine,
         }),
         Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
         audit,

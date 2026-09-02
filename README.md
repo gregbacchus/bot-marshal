@@ -68,8 +68,19 @@ only a placeholder; the real credential is swapped in at the boundary and scrubb
 audit trail. The DLP layer catches the inverse case — a real credential the agent obtained
 some other way and is trying to send out, which destination filtering cannot see.
 
-Without a CA the proxy still runs as a tunnel, sees destinations only, and says so at startup
-— including a warning naming any layer that will therefore never evaluate.
+**Interception is mandatory, not a fallback.** `marshal serve` refuses to start without a CA
+— run `marshal ca init` first. A plain relay cannot enforce per-request policy, and it cannot
+even guarantee the client reaches the host it claimed: shared-IP hosting (a CDN or load
+balancer serving many sites off one address) routes by the TLS SNI *inside* the tunnel, which
+a relay never inspects. A client can `CONNECT good.example.com` — correctly resolved, guard
+approved — then present `SNI: evil.example.com` and have the origin serve that instead,
+entirely unseen by a proxy that only relays bytes. Interception defeats this structurally: the
+proxy re-originates its own TLS to upstream keyed on the CONNECT authority, never on anything
+the client claims inside the tunnel. The one sanctioned exception is `tls.passthrough`, for
+clients that pin certificates and would refuse the proxy's own cert; a passthrough host still
+gets the same SNI cross-check on its plain relay, and the SOCKS5 front-end gets identical
+treatment to HTTP CONNECT — same mandatory interception, same passthrough exception, same
+SNI check.
 
 ## Rolling it out
 
@@ -240,9 +251,10 @@ as a pre-filter: a destination no host-level layer *refused* proceeds to interce
 `rules` and `dlp` make the real call on the actual request. Otherwise the natural
 configuration is impossible — a short-circuiting chain means an allowlist with
 `on_match: allow` terminates before those layers run, while `on_match: pass` leaves nothing
-to permit the tunnel. Nothing reaches the upstream until a request-level verdict allows it,
-and in tunnel mode the CONNECT is the only decision point, so `default_action` governs it
-strictly.
+to permit the tunnel. Nothing reaches the upstream until a request-level verdict allows it. The only way a
+connection is *not* eventually judged on the real request is `tls.passthrough`, where the
+CONNECT verdict is the sole decision point and `default_action` governs it strictly — the
+same trade a certificate-pinned client always makes by opting out of interception.
 
 | Milestone | Contents | State |
 |---|---|---|
