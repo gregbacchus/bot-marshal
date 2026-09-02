@@ -104,15 +104,15 @@ async fn harness(
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(SharedWriter(Arc::clone(&buffer))));
 
     let server = Server::new(
-        ServerConfig {
-            listen: "127.0.0.1:0".into(),
-            unix_socket: None,
-            transparent: Vec::new(),
-            tls: None,
+        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        handle(marshal_proxy::runtime::Runtime {
+            chains,
+            response_transforms: HashMap::new(),
+            request_transforms: Vec::new(),
+            sessions: Arc::new(SessionRegistry::new(resolvers, fallback, deny_unidentified, false)),
             passthrough: HostMatcher::default(),
-        },
-        chains,
-        Arc::new(SessionRegistry::new(resolvers, fallback, deny_unidentified, false)),
+            tls: None,
+        }),
         Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
         audit,
     );
@@ -374,11 +374,15 @@ async fn the_unix_listener_identifies_by_so_peercred() {
             listen: "127.0.0.1:0".into(),
             unix_socket: Some(sock.clone()),
             transparent: Vec::new(),
-            tls: None,
-            passthrough: HostMatcher::default(),
         },
-        chains,
-        Arc::new(SessionRegistry::new(vec![resolver], "restricted", false, false)),
+        handle(marshal_proxy::runtime::Runtime {
+            chains,
+            response_transforms: HashMap::new(),
+            request_transforms: Vec::new(),
+            sessions: Arc::new(SessionRegistry::new(vec![resolver], "restricted", false, false)),
+            passthrough: HostMatcher::default(),
+            tls: None,
+        }),
         Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
         Arc::new(JsonSink::new(tokio::io::sink())),
     );

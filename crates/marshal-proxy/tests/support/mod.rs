@@ -292,15 +292,6 @@ pub fn request(target: std::net::SocketAddr, path: &str) -> Request<TestBody> {
         .unwrap()
 }
 
-/// Wrap a single chain as the one-profile map the server expects.
-pub fn single_profile_chains(
-    chain: marshal_policy::Chain,
-) -> std::collections::HashMap<Arc<str>, Arc<marshal_policy::Chain>> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(Arc::from("p"), Arc::new(chain));
-    map
-}
-
 /// A registry with no resolvers: everything lands in the unattributed fallback, which is what
 /// the pre-M4 tests assume.
 pub fn no_resolvers() -> Arc<marshal_proxy::sessions::SessionRegistry> {
@@ -326,4 +317,44 @@ pub async fn start_upstream(greeting: &'static [u8]) -> std::net::SocketAddr {
         }
     });
     addr
+}
+
+/// A single-profile runtime, which is what most tests want.
+pub fn single_profile_runtime(
+    chain: marshal_policy::Chain,
+    tls: Option<Arc<marshal_proxy::mitm::TlsEngine>>,
+) -> marshal_proxy::runtime::Runtime {
+    runtime_with(chain, tls, marshal_policy::HostMatcher::default(), Vec::new(), Vec::new())
+}
+
+pub fn runtime_with(
+    chain: marshal_policy::Chain,
+    tls: Option<Arc<marshal_proxy::mitm::TlsEngine>>,
+    passthrough: marshal_policy::HostMatcher,
+    request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
+    response_transforms: Vec<Arc<dyn marshal_core::ResponseTransform>>,
+) -> marshal_proxy::runtime::Runtime {
+    let mut chains = std::collections::HashMap::new();
+    chains.insert(Arc::from("p"), Arc::new(chain));
+
+    let mut rt_map = std::collections::HashMap::new();
+    if !response_transforms.is_empty() {
+        rt_map.insert(Arc::from("p"), response_transforms);
+    }
+
+    marshal_proxy::runtime::Runtime {
+        chains,
+        response_transforms: rt_map,
+        request_transforms,
+        sessions: no_resolvers(),
+        passthrough,
+        tls,
+    }
+}
+
+/// Wrap a runtime in the handle the server reads through.
+pub fn handle(
+    runtime: marshal_proxy::runtime::Runtime,
+) -> Arc<marshal_proxy::runtime::RuntimeHandle> {
+    Arc::new(marshal_proxy::runtime::RuntimeHandle::new(runtime))
 }

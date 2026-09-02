@@ -20,6 +20,9 @@ pub struct Outcome {
     pub reason: Reason,
     /// Every layer's verdict, in order, for the audit record.
     pub evidence: Evidence,
+    /// Set when the chain refused but the profile is in warn mode, so `action` is `Allow`
+    /// despite policy disagreeing. The only signal that a refusal was overridden.
+    pub would_deny: bool,
 }
 
 #[derive(Debug)]
@@ -28,6 +31,8 @@ pub struct Chain {
     layers: Vec<Arc<dyn PolicyLayer>>,
     default_action: Decision,
     decider: Arc<dyn Decider>,
+    /// When true, a refusal is recorded and then overridden.
+    warn_only: bool,
 }
 
 impl Chain {
@@ -37,7 +42,23 @@ impl Chain {
         default_action: Decision,
         decider: Arc<dyn Decider>,
     ) -> Self {
-        Self { profile: Arc::from(profile.as_ref()), layers, default_action, decider }
+        Self {
+            profile: Arc::from(profile.as_ref()),
+            layers,
+            default_action,
+            decider,
+            warn_only: false,
+        }
+    }
+
+    /// Record refusals without acting on them, for assembling an allowlist from real traffic.
+    pub fn warn_only(mut self, warn_only: bool) -> Self {
+        self.warn_only = warn_only;
+        self
+    }
+
+    pub fn is_warn_only(&self) -> bool {
+        self.warn_only
     }
 
     pub fn profile(&self) -> &str {
@@ -187,8 +208,20 @@ impl Chain {
         self.terminate(action, Reason::new("default_action", code, message), evidence)
     }
 
+    /// Apply warn mode at the single point every verdict passes through, so no path can
+    /// accidentally enforce while the profile says it should not — or the reverse.
     fn terminate(&self, action: Action, reason: Reason, evidence: Evidence) -> Outcome {
-        Outcome { action, reason, evidence }
+        if action == Action::Deny && self.warn_only {
+            tracing::warn!(
+                profile = %self.profile,
+                layer = %reason.layer,
+                code = %reason.code,
+                "WARN MODE: would have denied, forwarding anyway: {}",
+                reason.message
+            );
+            return Outcome { action: Action::Allow, reason, evidence, would_deny: true };
+        }
+        Outcome { action, reason, evidence, would_deny: false }
     }
 }
 

@@ -190,78 +190,22 @@ async fn serve(
     listen: Option<String>,
     audit_log: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let cfg = marshal_config::load(config_path)?;
+    // Startup and reload go through the same builder, so a reload cannot succeed on a
+    // config the proxy would have refused to start with — or the reverse.
+    let build = {
+        let config_path = config_path.to_path_buf();
+        move || build_runtime(&config_path, profile_override.clone())
+    };
+    let build = Arc::new(build);
 
-    // Refuse to start on an invalid config. A proxy that boots with a chain the operator did
-    // not write is worse than one that does not boot.
-    let diagnostics = validate(&cfg);
-    let mut fatal = false;
-    for d in &diagnostics {
-        match d.severity {
-            Severity::Error => {
-                eprintln!("{d}");
-                fatal = true;
-            }
-            Severity::Warning => tracing::warn!("{d}"),
-        }
-    }
-    if fatal {
-        anyhow::bail!("configuration has errors; refusing to start");
-    }
-
-    // Every profile gets a chain, because which one applies is now decided per connection.
-    // Building them all up front means a broken profile fails at startup rather than when the
-    // first agent that uses it connects.
-    let mut chains: HashMap<Arc<str>, Arc<marshal_policy::Chain>> = HashMap::new();
-    let mut response_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>> =
-        HashMap::new();
-    for name in cfg.profiles.keys() {
-        let chain = build_chain(&cfg, name, Arc::new(DenyingDecider))?;
-        chains.insert(Arc::from(name.as_str()), Arc::new(chain));
-        let transforms = marshal_policy::build_response_transforms(&cfg, name)?;
-        if !transforms.is_empty() {
-            response_transforms.insert(Arc::from(name.as_str()), transforms);
-        }
-    }
-
-    let fallback = profile_override
-        .or_else(|| cfg.sessions.unidentified.as_ref().map(|u| u.profile.clone()))
-        .or_else(|| cfg.profiles.keys().next().cloned())
-        .ok_or_else(|| anyhow::anyhow!("no profiles are defined"))?;
-    anyhow::ensure!(chains.contains_key(fallback.as_str()), "unknown profile `{fallback}`");
-
-    let sessions = Arc::new(build_sessions(&cfg, &fallback)?);
+    let (runtime, cfg, injector) = build()?;
+    let handle = Arc::new(marshal_proxy::runtime::RuntimeHandle::new(runtime));
 
     let guard = UpstreamGuard::new(&cfg.upstream.deny_cidrs, cfg.upstream.allow_private)?;
 
-    // Interception needs a CA. If none has been created, run as a tunnel and say so rather
-    // than refusing to start — a proxy that sees destinations is still enforcing policy.
-    let (cert_path, key_path) = ca_paths(config_path).unwrap_or_default();
-    let tls = if cert_path.exists() && key_path.exists() {
-        let ca = marshal_tls::CertificateAuthority::load(&cert_path, &key_path)?;
-        let minter = Arc::new(marshal_tls::LeafMinter::new(
-            Arc::new(ca),
-            cfg.tls.cert_cache_size,
-            cfg.tls.leaf_expiry_hours,
-        ));
-        let mut extra_roots = Vec::new();
-        for path in &cfg.tls.upstream_ca_certs {
-            let path = expand_tilde(path);
-            extra_roots.push(std::fs::read_to_string(&path).map_err(|e| {
-                anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
-            })?);
-        }
-        Some(Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(minter, &extra_roots)?))
-    } else {
-        None
-    };
-
-    let passthrough = marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?;
-
-    // Secret swaps are built from the fallback profile. Per-profile transforms need the
-    // transform set to be selected alongside the chain, which is a wider change than M4.
-    let effective = marshal_policy::resolve_profile(&cfg, &fallback)?;
-    let injector = build_injector(&effective, &cfg)?;
+    // Resolve secrets once so the redactor knows the real values before a single record can
+    // be written. Seeding after the first request would leave a window in which a secret
+    // could reach the audit log.
     let resolved = injector.resolve_all().await;
     let secret_names: Vec<String> = resolved.iter().map(|(n, _)| n.clone()).collect();
     if !resolved.is_empty() {
@@ -296,7 +240,6 @@ async fn serve(
         .as_ref()
         .and_then(|e| e.unix_socket.as_ref())
         .map(|p| expand_tilde(p));
-
     let transparent = cfg
         .listeners
         .transparent
@@ -305,20 +248,47 @@ async fn serve(
         .map(|t| t.listen.clone())
         .unwrap_or_default();
 
-    let mut transforms: Vec<Arc<dyn marshal_core::RequestTransform>> = Vec::new();
-    if !injector.is_empty() {
-        transforms.push(Arc::new(injector));
-    }
-
     let server = Server::new(
-        ServerConfig { listen, unix_socket, transparent, tls, passthrough },
-        chains,
-        sessions,
+        ServerConfig { listen, unix_socket, transparent },
+        Arc::clone(&handle),
         Arc::new(guard),
         audit,
-    )
-    .with_request_transforms(transforms)
-    .with_response_transforms(response_transforms);
+    );
+    let stats = server.stats();
+
+    // The management API rebuilds through the same closure, and only swaps on success.
+    let management = match cfg.listeners.management.clone() {
+        Some(m) => {
+            let token = std::env::var(&m.api_key_env).ok();
+            if token.is_none() {
+                tracing::warn!(
+                    var = %m.api_key_env,
+                    "management.api_key_env is not set; the management API will be open"
+                );
+            }
+            let builder: marshal_proxy::management::RuntimeBuilder = {
+                let build = build.clone();
+                Arc::new(move || build().map(|(rt, _, _)| rt).map_err(|e| format!("{e:#}")))
+            };
+            Some((m.listen.clone(), builder, token))
+        }
+        None => None,
+    };
+
+    let management_task = async {
+        match management {
+            Some((listen, builder, token)) => marshal_proxy::management::serve(
+                &listen,
+                Arc::clone(&handle),
+                stats,
+                builder,
+                token,
+            )
+            .await
+            .map_err(anyhow::Error::from),
+            None => std::future::pending().await,
+        }
+    };
 
     // DNS interception, when configured. Started alongside the proxy rather than as a
     // separate process, because a resolver pointing at a proxy that is not running turns
@@ -327,7 +297,6 @@ async fn serve(
         Some(dns_cfg) => Some(start_dns(dns_cfg).await?),
         None => None,
     };
-
     let dns_task = async move {
         match dns {
             Some(mut server) => server.block_until_done().await.map_err(anyhow::Error::from),
@@ -338,11 +307,106 @@ async fn serve(
     tokio::select! {
         r = server.run(|_| {}) => r.map_err(Into::into),
         r = dns_task => r,
+        r = management_task => r,
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutting down");
             Ok(())
         }
     }
+}
+
+/// Load the config and build everything derived from it.
+///
+/// Fallible as a unit: the runtime is complete before it is returned, so a caller swapping it
+/// in can never half-apply a broken configuration.
+#[allow(clippy::type_complexity)]
+fn build_runtime(
+    config_path: &std::path::Path,
+    profile_override: Option<String>,
+) -> anyhow::Result<(marshal_proxy::runtime::Runtime, marshal_config::model::Config, SecretInjector)>
+{
+    let cfg = marshal_config::load(config_path)?;
+
+    // Refuse to start on an invalid config. A proxy that boots with a chain the operator did
+    // not write is worse than one that does not boot.
+    let diagnostics = validate(&cfg);
+    let mut errors = Vec::new();
+    for d in &diagnostics {
+        match d.severity {
+            Severity::Error => errors.push(d.to_string()),
+            Severity::Warning => tracing::warn!("{d}"),
+        }
+    }
+    anyhow::ensure!(errors.is_empty(), "configuration has errors:\n{}", errors.join("\n"));
+
+    // Every profile gets a chain, because which one applies is decided per connection.
+    // Building them all up front means a broken profile fails here rather than when the
+    // first agent that uses it connects.
+    let mut chains: HashMap<Arc<str>, Arc<marshal_policy::Chain>> = HashMap::new();
+    let mut response_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>> =
+        HashMap::new();
+    for name in cfg.profiles.keys() {
+        chains.insert(
+            Arc::from(name.as_str()),
+            Arc::new(build_chain(&cfg, name, Arc::new(DenyingDecider))?),
+        );
+        let transforms = marshal_policy::build_response_transforms(&cfg, name)?;
+        if !transforms.is_empty() {
+            response_transforms.insert(Arc::from(name.as_str()), transforms);
+        }
+    }
+
+    let fallback = profile_override
+        .or_else(|| cfg.sessions.unidentified.as_ref().map(|u| u.profile.clone()))
+        .or_else(|| cfg.profiles.keys().next().cloned())
+        .ok_or_else(|| anyhow::anyhow!("no profiles are defined"))?;
+    anyhow::ensure!(chains.contains_key(fallback.as_str()), "unknown profile `{fallback}`");
+
+    let sessions = Arc::new(build_sessions(&cfg, &fallback)?);
+
+    let (cert_path, key_path) = ca_paths(config_path).unwrap_or_default();
+    let tls = if cert_path.exists() && key_path.exists() {
+        let ca = marshal_tls::CertificateAuthority::load(&cert_path, &key_path)?;
+        let minter = Arc::new(marshal_tls::LeafMinter::new(
+            Arc::new(ca),
+            cfg.tls.cert_cache_size,
+            cfg.tls.leaf_expiry_hours,
+        ));
+        let mut extra_roots = Vec::new();
+        for path in &cfg.tls.upstream_ca_certs {
+            let path = expand_tilde(path);
+            extra_roots.push(std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
+            })?);
+        }
+        Some(Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(minter, &extra_roots)?))
+    } else {
+        None
+    };
+
+    let passthrough = marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?;
+
+    // Secret swaps come from the fallback profile. Per-profile transform sets need the
+    // transform selection to follow the chain, which is a wider change than this.
+    let effective = marshal_policy::resolve_profile(&cfg, &fallback)?;
+    let injector = build_injector(&effective, &cfg)?;
+    let mut request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>> = Vec::new();
+    if !injector.is_empty() {
+        request_transforms.push(Arc::new(build_injector(&effective, &cfg)?));
+    }
+
+    Ok((
+        marshal_proxy::runtime::Runtime {
+            chains,
+            response_transforms,
+            request_transforms,
+            sessions,
+            passthrough,
+            tls,
+        },
+        cfg,
+        injector,
+    ))
 }
 
 /// Build and bind the DNS interceptor.
@@ -361,8 +425,8 @@ async fn start_dns(
 
     let policy = marshal_dns::DnsPolicy::new(proxy_ip, &cfg.passthrough, records)?;
 
-    // The system resolver handles passthrough names. Reading the host's own configuration
-    // means "passthrough" genuinely means what the host would have answered.
+    // The system resolver handles passthrough names, so "passthrough" genuinely means what
+    // the host itself would have answered.
     let upstream = Arc::new(
         hickory_resolver::Resolver::builder_tokio()
             .map_err(|e| anyhow::anyhow!("reading the system resolver configuration: {e}"))?

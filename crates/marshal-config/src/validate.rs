@@ -74,6 +74,20 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
             });
         }
 
+        // Warn mode is a rollout tool, not a setting to forget about. Saying so on every
+        // `config check` is the cheapest way to stop a profile living there indefinitely
+        // while somebody believes it is enforcing.
+        if profile.mode == crate::model::Mode::Warn {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                location: format!("{at}.mode"),
+                message: "this profile is in WARN mode: refusals are recorded but every \
+                          request is forwarded. Audit records carry `would_deny: true`; use \
+                          them to build the allowlist, then set `mode: enforce`."
+                    .into(),
+            });
+        }
+
         if profile.policy.is_empty() {
             out.push(Diagnostic {
                 severity: Severity::Warning,

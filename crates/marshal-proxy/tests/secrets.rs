@@ -103,19 +103,11 @@ async fn harness(yaml: &str, swaps: Vec<SecretSwap>, redact: &[&str]) -> Harness
     }
 
     let server = Server::new(
-        ServerConfig {
-            listen: "127.0.0.1:0".into(),
-            unix_socket: None,
-            transparent: Vec::new(),
-            tls: Some(engine),
-            passthrough: HostMatcher::default(),
-        },
-        single_profile_chains(chain),
-        no_resolvers(),
+        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        handle(runtime_with(chain, Some(engine), HostMatcher::default(), transforms, Vec::new())),
         Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
         audit_sink,
-    )
-    .with_request_transforms(transforms);
+    );
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {

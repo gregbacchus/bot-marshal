@@ -22,6 +22,7 @@ tokio-util.workspace = true
 futures.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+axum.workspace = true
 http.workspace = true
 bytes.workspace = true
 tokio-rustls.workspace = true

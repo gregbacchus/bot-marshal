@@ -169,6 +169,9 @@ pub struct Profile {
     /// Required acknowledgement when `default_action` is `allow`.
     #[serde(default)]
     pub i_understand_this_is_allow_by_default: bool,
+    /// Whether refusals are acted on or merely recorded.
+    #[serde(default)]
+    pub mode: Mode,
     /// Ordered chain. First terminal verdict wins.
     #[serde(default)]
     pub policy: Vec<LayerConfig>,
@@ -178,6 +181,23 @@ pub struct Profile {
     /// Applied on the way back to the agent.
     #[serde(default)]
     pub response_transforms: ResponseTransforms,
+}
+
+/// Whether a profile enforces its policy or only reports on it.
+///
+/// Turning default-deny on for an existing agent breaks everything it was quietly relying on,
+/// and the list of what that is cannot be known in advance. `warn` runs the whole chain,
+/// records exactly what *would* have been refused, and forwards the request anyway — so the
+/// allowlist can be assembled from evidence rather than guesswork.
+///
+/// It is deliberately noisy: a proxy silently in warn mode is worse than no proxy, because
+/// somebody believes it is protecting them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Enforce,
+    Warn,
 }
 
 /// Rewrites applied to an allowed request before it leaves.

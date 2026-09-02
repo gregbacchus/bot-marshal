@@ -71,6 +71,53 @@ some other way and is trying to send out, which destination filtering cannot see
 Without a CA the proxy still runs as a tunnel, sees destinations only, and says so at startup
 — including a warning naming any layer that will therefore never evaluate.
 
+## Rolling it out
+
+Turning default-deny on for an existing agent breaks everything it was quietly relying on,
+and that list cannot be known in advance. Warn mode is how it gets discovered:
+
+```yaml
+profiles:
+  coding-agent:
+    mode: warn      # run the whole chain, record refusals, forward anyway
+```
+
+Audit records then carry `would_deny: true` while `action` stays `allow`. Filter on it to
+build the allowlist from real traffic, then set `mode: enforce`. It is deliberately noisy —
+a startup warning, a `config check` warning, a log line per request, and a
+`warn_only_profiles` field in `/v1/healthz` — because a proxy silently in warn mode is worse
+than no proxy: somebody believes it is protecting them.
+
+## Operating it
+
+```yaml
+listeners:
+  management:
+    listen: "127.0.0.1:9092"
+    api_key_env: "MARSHAL_MANAGEMENT_KEY"
+```
+
+| endpoint | auth | purpose |
+|---|---|---|
+| `GET /v1/healthz` | none | alive, generation, profiles, warn-mode profiles |
+| `GET /v1/metrics` | none | Prometheus counters by profile and session |
+| `GET /v1/sessions` | bearer | what each agent has done |
+| `POST /v1/reload` | bearer | re-read config and swap atomically |
+
+Reload builds the entire new configuration — every chain, transform and resolver — before
+swapping a single pointer. **A reload that fails changes nothing**, and says so:
+
+```json
+{ "status": "rejected",
+  "error": "profiles.base.policy[0]: references unknown bundle `does-not-exist`",
+  "note": "the previously loaded configuration is still in effect" }
+```
+
+A connection reads the runtime once and keeps that view, so a reload never changes the rules
+under a request already in flight.
+
+¹ OpenTelemetry export is not implemented — see *Not built* below.
+
 ## Capture
 
 Three ways traffic reaches the proxy, in decreasing order of how much the client must
@@ -207,7 +254,7 @@ strictly.
 | M4.5 | LLM judge layer | |
 | M5 | MCP tool-level policy | done |
 | M6 | Transparent (nftables) and DNS interception | done |
-| M7 | Management API, hot reload, OTEL | |
+| M7 | Management API, hot reload, warn mode, metrics | done¹ |
 
 ## Try it
 
@@ -249,6 +296,21 @@ curl --socks5-hostname 127.0.0.1:8080 https://api.github.com/zen
 Starting `--profile coding-agent` deliberately fails: that profile names `rules`, `dlp` and
 `judge` layers that do not exist yet, and running it without them would enforce a chain more
 permissive than the one written.
+
+## Not built
+
+**OpenTelemetry export.** The audit log is already structured JSON carrying the full layer
+trail, session attribution, status and timing, and `/v1/metrics` covers scraping. OTLP would
+add correlation with an agent's own traces, which is genuinely useful — but it is a large
+dependency tree for something a log shipper largely covers, so it is left as a deliberate
+decision rather than assumed.
+
+**An interactive approval decider.** The `Defer` verdict and the `Decider` trait exist and
+the chain resolves them; the only implementation refuses. A human-in-the-loop approval flow
+plugs in without touching the chain.
+
+**Rate limits and budgets.** Per-session counters exist and are exported, which is the
+groundwork; enforcement does not.
 
 ## Layout
 

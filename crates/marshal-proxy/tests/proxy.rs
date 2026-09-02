@@ -14,7 +14,7 @@ use marshal_config::model::Config;
 use marshal_core::{AuditSink, DenyingDecider};
 use marshal_policy::build_chain;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
-use support::{no_resolvers, single_profile_chains, start_upstream};
+use support::{handle, single_profile_runtime, start_upstream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -38,17 +38,10 @@ async fn start_proxy_with_guard(
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
 
     let server = Server::new(
-        ServerConfig {
-            listen: "127.0.0.1:0".into(),
-            unix_socket: None,
-            transparent: Vec::new(),
-            // No CA: these tests cover the tunnel path, where policy sees only the
-            // destination. Interception is covered in tests/mitm.rs.
-            tls: None,
-            passthrough: marshal_policy::HostMatcher::default(),
-        },
-        single_profile_chains(chain),
-        no_resolvers(),
+        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        // No CA: these tests cover the tunnel path, where policy sees only the destination.
+        // Interception is covered in tests/mitm.rs.
+        handle(single_profile_runtime(chain, None)),
         Arc::new(guard),
         audit,
     );

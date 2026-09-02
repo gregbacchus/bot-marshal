@@ -89,6 +89,7 @@ pub fn resolve_profile(
         let p = &cfg.profiles[ancestor];
         effective.default_action = p.default_action;
         effective.i_understand_this_is_allow_by_default = p.i_understand_this_is_allow_by_default;
+        effective.mode = p.mode;
         if !p.policy.is_empty() {
             effective.policy = p.policy.clone();
         }
@@ -203,7 +204,8 @@ pub fn build_chain(
         });
     }
 
-    Ok(Chain::new(profile_name, layers, profile.default_action, decider))
+    Ok(Chain::new(profile_name, layers, profile.default_action, decider)
+        .warn_only(profile.mode == marshal_config::model::Mode::Warn))
 }
 
 /// Response transforms implied by a profile's policy.

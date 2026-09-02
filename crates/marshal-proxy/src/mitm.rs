@@ -119,6 +119,10 @@ pub struct MitmHandler {
     pub request_transforms: Vec<Arc<dyn RequestTransform>>,
     /// Applied to the response on its way back to the agent.
     pub response_transforms: Vec<Arc<dyn ResponseTransform>>,
+    /// Counters. Intercepted requests must be recorded here too: once TLS is terminated a
+    /// single CONNECT carries many requests, and counting only tunnels understates an agent's
+    /// activity by whatever its connection reuse happens to be.
+    pub stats: Arc<crate::stats::SessionStats>,
     /// Whether a resolver matched. Recorded so an unattributed request never looks
     /// attributed in the audit trail.
     pub attributed: bool,
@@ -264,8 +268,10 @@ async fn handle_request(
     };
 
     let outcome = handler.chain.evaluate(&cx).await;
+    let would_deny = outcome.would_deny;
     if outcome.action == Action::Deny {
-        emit(&handler, &cx, &outcome.reason, Action::Deny, outcome.evidence, None, started).await;
+        emit(&handler, &cx, &outcome.reason, Action::Deny, outcome.evidence, None, started, false)
+            .await;
         return Ok(denial_response(&outcome.reason, &cx, jsonrpc_id));
     }
 
@@ -276,7 +282,8 @@ async fn handle_request(
             // without its credential swap would leak the placeholder upstream and fail in a
             // way that looks like an upstream problem.
             let reason = Reason::new(transform.name(), "transform_failed", e.to_string());
-            emit(&handler, &cx, &reason, Action::Deny, outcome.evidence, None, started).await;
+            emit(&handler, &cx, &reason, Action::Deny, outcome.evidence, None, started, false)
+                .await;
             return Ok(denial_response(&reason, &cx, jsonrpc_id));
         }
     }
@@ -319,6 +326,7 @@ async fn handle_request(
         outcome.evidence,
         Some(status.as_u16()),
         started,
+        would_deny,
     )
     .await;
 
@@ -607,7 +615,9 @@ async fn emit(
     evidence: Evidence,
     status_code: Option<u16>,
     started: std::time::Instant,
+    would_deny: bool,
 ) {
+    handler.stats.record(&cx.session, &cx.profile, action == Action::Allow, would_deny);
     handler
         .audit
         .emit(AuditRecord {
@@ -621,6 +631,7 @@ async fn emit(
             path: cx.uri.path().to_string(),
             action,
             reason: reason.clone(),
+            would_deny,
             trail: evidence.trail,
             status_code,
             duration_ms: started.elapsed().as_millis() as u64,

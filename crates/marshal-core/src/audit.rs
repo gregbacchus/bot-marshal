@@ -30,6 +30,12 @@ pub struct AuditRecord {
     pub action: Action,
     /// Which layer produced the terminal verdict, and why.
     pub reason: Reason,
+    /// True when the profile is in warn mode and this request *would* have been refused.
+    ///
+    /// `action` is then `allow` — the request was forwarded — and this field is the entire
+    /// signal that policy disagreed. Filter on it to build an allowlist from real traffic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub would_deny: bool,
     /// Every layer's verdict, in order.
     pub trail: Vec<LayerOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]

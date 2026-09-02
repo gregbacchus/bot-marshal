@@ -8,8 +8,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use std::collections::HashMap;
-
 use marshal_core::{
     Action, AuditRecord, AuditSink, Authority, BodyHandle, ConnInfo, Evidence, IngressMode, Reason,
     RequestContext, Resolved,
@@ -20,9 +18,9 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::guard::{GuardError, UpstreamGuard};
 use crate::httpfront::{self, ProxyRequest};
-use crate::mitm::{self, MitmHandler, TlsEngine};
+use crate::mitm::{self, MitmHandler};
 use crate::rewind::Rewind;
-use crate::sessions::SessionRegistry;
+use crate::runtime::{Runtime, RuntimeHandle};
 use crate::sniff::{self, Protocol};
 use crate::socks5::{self, Reply};
 use crate::stats::SessionStats;
@@ -34,17 +32,10 @@ pub struct ServerConfig {
     /// Optional Unix-domain listener. Worth having because `SO_PEERCRED` on it is the only
     /// unspoofable, race-free identity available on a single host.
     pub unix_socket: Option<std::path::PathBuf>,
-    /// Present when a CA is configured. Without it the proxy still runs, but sees only the
-    /// tunnel destination — which is the honest behaviour when no CA has been created, not a
-    /// degraded mode to hide.
-    pub tls: Option<Arc<TlsEngine>>,
     /// Transparent listeners. Each carries its own address so `listener_port` identity —
     /// nftables steering different uids or cgroups to different ports — has something to key
     /// on.
     pub transparent: Vec<String>,
-    /// Hosts tunnelled without interception. Certificate-pinned clients belong here, as does
-    /// anything whose traffic must demonstrably not be read.
-    pub passthrough: marshal_policy::HostMatcher,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -52,7 +43,7 @@ impl std::fmt::Debug for ServerConfig {
         f.debug_struct("ServerConfig")
             .field("listen", &self.listen)
             .field("unix_socket", &self.unix_socket)
-            .field("intercepting", &self.tls.is_some())
+            .field("transparent", &self.transparent)
             .finish()
     }
 }
@@ -79,14 +70,11 @@ impl std::fmt::Debug for Session {
 
 pub struct Server {
     config: ServerConfig,
-    /// One chain per profile. Which one applies is decided per connection.
-    chains: HashMap<Arc<str>, Arc<Chain>>,
-    /// Response transforms per profile, alongside the chains.
-    response_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>>,
-    sessions: Arc<SessionRegistry>,
+    /// Everything derived from configuration, swappable as a unit so a reload cannot be
+    /// observed half-applied.
+    runtime: Arc<RuntimeHandle>,
     guard: Arc<UpstreamGuard>,
     audit: Arc<dyn AuditSink>,
-    request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
     stats: Arc<SessionStats>,
 }
 
@@ -99,21 +87,16 @@ impl std::fmt::Debug for Server {
 impl Server {
     pub fn new(
         config: ServerConfig,
-        chains: HashMap<Arc<str>, Arc<Chain>>,
-        sessions: Arc<SessionRegistry>,
+        runtime: Arc<RuntimeHandle>,
         guard: Arc<UpstreamGuard>,
         audit: Arc<dyn AuditSink>,
     ) -> Self {
-        Self {
-            config,
-            chains,
-            response_transforms: HashMap::new(),
-            sessions,
-            guard,
-            audit,
-            request_transforms: Vec::new(),
-            stats: Arc::new(SessionStats::default()),
-        }
+        Self { config, runtime, guard, audit, stats: Arc::new(SessionStats::default()) }
+    }
+
+    /// The handle a reload writes through.
+    pub fn runtime(&self) -> Arc<RuntimeHandle> {
+        Arc::clone(&self.runtime)
     }
 
     pub fn stats(&self) -> Arc<SessionStats> {
@@ -124,12 +107,12 @@ impl Server {
     ///
     /// A resolver naming a profile that does not exist is a configuration error caught at
     /// startup; reaching it here means falling back rather than serving an arbitrary chain.
-    async fn session_for(&self, conn: &ConnInfo) -> Option<Session> {
-        let resolved = self.sessions.resolve(conn).await;
-        match self.chains.get(&resolved.profile) {
+    async fn session_for(&self, conn: &ConnInfo, runtime: &Runtime) -> Option<Session> {
+        let resolved = runtime.sessions.resolve(conn).await;
+        match runtime.chains.get(&resolved.profile) {
             Some(chain) => {
                 let response_transforms =
-                    self.response_transforms.get(&resolved.profile).cloned().unwrap_or_default();
+                    runtime.response_transforms.get(&resolved.profile).cloned().unwrap_or_default();
                 Some(Session { resolved, chain: Arc::clone(chain), response_transforms })
             }
             None => {
@@ -142,44 +125,37 @@ impl Server {
         }
     }
 
-    /// Transforms applied to allowed requests. Only reachable when TLS is intercepted: a
-    /// tunnelled connection has no request to rewrite.
-    pub fn with_request_transforms(
-        mut self,
-        transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
-    ) -> Self {
-        self.request_transforms = transforms;
-        self
-    }
-
-    /// Response transforms, keyed by profile.
-    pub fn with_response_transforms(
-        mut self,
-        transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>>,
-    ) -> Self {
-        self.response_transforms = transforms;
-        self
-    }
-
     /// Bind and serve until cancelled. Returns the bound address via `on_bind`, which lets
     /// tests use port 0 and discover what they got.
     pub async fn run(self, on_bind: impl FnOnce(std::net::SocketAddr)) -> std::io::Result<()> {
         let listener = TcpListener::bind(&self.config.listen).await?;
         let local = listener.local_addr()?;
+        let runtime = self.runtime.load();
         tracing::info!(
             listen = %local,
-            profiles = ?self.chains.keys().map(|k| &**k).collect::<Vec<_>>(),
-            resolvers = ?self.sessions.resolver_names(),
-            intercepting = self.config.tls.is_some(),
+            profiles = ?runtime.chains.keys().map(|k| &**k).collect::<Vec<_>>(),
+            resolvers = ?runtime.sessions.resolver_names(),
+            intercepting = runtime.tls.is_some(),
             "explicit proxy listening"
         );
-        if self.config.tls.is_none() {
+
+        // A proxy silently in warn mode is worse than no proxy, because somebody believes it
+        // is protecting them. Say so at startup as well as on every affected request.
+        let warn_only = runtime.warn_only_profiles();
+        if !warn_only.is_empty() {
+            tracing::warn!(
+                profiles = ?warn_only,
+                "WARN MODE: these profiles record refusals but forward every request"
+            );
+        }
+
+        if runtime.tls.is_none() {
             tracing::warn!(
                 "no CA configured: TLS is tunnelled, so policy sees the destination host but \
                  not the request. Run `marshal ca init` to intercept."
             );
             let skipped: Vec<&str> =
-                self.chains.values().flat_map(|c| c.request_only_layers()).collect();
+                runtime.chains.values().flat_map(|c| c.request_only_layers()).collect();
             if !skipped.is_empty() {
                 // Silently not enforcing a configured layer is the worst available outcome:
                 // the operator believes the rule is live.
@@ -314,12 +290,13 @@ impl Server {
         let authority = intercepted.authority();
         let mut client = Rewind::new(stream, opening);
 
+        let runtime = self.runtime.load();
         let mut conn = self.conn_info(peer, local);
         conn.ingress = IngressMode::Transparent;
-        self.sessions.attach_peer_cred(&mut conn);
+        runtime.sessions.attach_peer_cred(&mut conn);
 
-        let Some(session) = self.session_for(&conn).await else { return Ok(()) };
-        if !session.resolved.attributed && self.sessions.deny_unidentified() {
+        let Some(session) = self.session_for(&conn, &runtime).await else { return Ok(()) };
+        if !session.resolved.attributed && runtime.sessions.deny_unidentified() {
             return Ok(());
         }
 
@@ -347,6 +324,7 @@ impl Server {
                 outcome.evidence,
                 None,
                 started,
+                outcome.would_deny,
             )
             .await;
             return Ok(());
@@ -372,6 +350,7 @@ impl Server {
             outcome.evidence,
             None,
             started,
+            outcome.would_deny,
         )
         .await;
 
@@ -387,7 +366,7 @@ impl Server {
     ) -> std::io::Result<()> {
         let cred = crate::sessions::peercred::peer_cred_for_unix(
             &stream,
-            self.sessions.needs_enrichment(),
+            self.runtime.load().sessions.needs_enrichment(),
         );
 
         // A Unix socket has no meaningful addresses; synthetic loopback ones keep the rest of
@@ -450,15 +429,16 @@ impl Server {
         };
         let authority = request.authority;
 
+        let runtime = self.runtime.load();
         let mut conn = self.conn_info(peer, local);
         conn.proxy_auth = request.credential;
-        self.sessions.attach_peer_cred(&mut conn);
+        runtime.sessions.attach_peer_cred(&mut conn);
 
-        let Some(session) = self.session_for(&conn).await else {
+        let Some(session) = self.session_for(&conn, &runtime).await else {
             let _ = socks5::reply(&mut client, Reply::GeneralFailure).await;
             return Ok(());
         };
-        if !session.resolved.attributed && self.sessions.deny_unidentified() {
+        if !session.resolved.attributed && runtime.sessions.deny_unidentified() {
             let _ = socks5::reply(&mut client, Reply::NotAllowed).await;
             return Ok(());
         }
@@ -483,6 +463,7 @@ impl Server {
                 outcome.evidence,
                 None,
                 started,
+                outcome.would_deny,
             )
             .await;
             return Ok(());
@@ -506,6 +487,7 @@ impl Server {
             outcome.evidence,
             None,
             started,
+            outcome.would_deny,
         )
         .await;
 
@@ -545,12 +527,13 @@ impl Server {
             }
         };
 
+        let runtime = self.runtime.load();
         let mut conn = self.conn_info(peer, local);
         conn.proxy_auth = request.proxy_auth.clone();
         conn.peer_cred = peer_cred;
-        self.sessions.attach_peer_cred(&mut conn);
+        runtime.sessions.attach_peer_cred(&mut conn);
 
-        let Some(session) = self.session_for(&conn).await else {
+        let Some(session) = self.session_for(&conn, &runtime).await else {
             let _ = httpfront::write_status(
                 &mut client,
                 "500 Internal Server Error",
@@ -559,7 +542,7 @@ impl Server {
             .await;
             return Ok(());
         };
-        if !session.resolved.attributed && self.sessions.deny_unidentified() {
+        if !session.resolved.attributed && runtime.sessions.deny_unidentified() {
             let reason = Reason::new(
                 "sessions",
                 "unidentified",
@@ -608,7 +591,7 @@ impl Server {
         if request.is_connect
             && outcome.action == Action::Deny
             && outcome.reason.layer == "default_action"
-            && self.intercepts(&request.authority)
+            && self.intercepts(&request.authority, &runtime)
             && !session.chain.request_only_layers().is_empty()
         {
             outcome.action = Action::Allow;
@@ -640,6 +623,7 @@ impl Server {
                 outcome.evidence,
                 None,
                 started,
+                outcome.would_deny,
             )
             .await;
             return Ok(());
@@ -670,8 +654,8 @@ impl Server {
             let authority = request.authority.clone();
 
             let intercept = self
-                .intercepts(&authority)
-                .then(|| Arc::clone(self.config.tls.as_ref().expect("checked by intercepts")));
+                .intercepts(&authority, &runtime)
+                .then(|| Arc::clone(runtime.tls.as_ref().expect("checked by intercepts")));
 
             if let Some(engine) = intercept {
                 // The CONNECT itself is allowed here; each request inside the tunnel is
@@ -684,6 +668,7 @@ impl Server {
                     outcome.evidence,
                     None,
                     started,
+                    outcome.would_deny,
                 )
                 .await;
 
@@ -694,7 +679,8 @@ impl Server {
                     session: cx.session.clone(),
                     profile: Arc::clone(&session.resolved.profile),
                     client_addr: peer,
-                    request_transforms: self.request_transforms.clone(),
+                    request_transforms: runtime.request_transforms.clone(),
+                    stats: Arc::clone(&self.stats),
                     response_transforms: session.response_transforms.clone(),
                     attributed: session.resolved.attributed,
                     resolver: session.resolved.resolver.clone(),
@@ -723,6 +709,7 @@ impl Server {
                 outcome.evidence,
                 None,
                 started,
+                outcome.would_deny,
             )
             .await;
 
@@ -742,6 +729,7 @@ impl Server {
                     Evidence::new(),
                     None,
                     started,
+                    false,
                 )
                 .await;
             }
@@ -761,6 +749,7 @@ impl Server {
             outcome.evidence,
             None,
             started,
+            outcome.would_deny,
         )
         .await;
         let _ = tunnel::relay(&mut client, &mut upstream).await;
@@ -768,8 +757,8 @@ impl Server {
     }
 
     /// Whether this destination will have its TLS intercepted.
-    fn intercepts(&self, authority: &Authority) -> bool {
-        self.config.tls.is_some() && self.config.passthrough.matches(&authority.host).is_none()
+    fn intercepts(&self, authority: &Authority, runtime: &Runtime) -> bool {
+        runtime.tls.is_some() && runtime.passthrough.matches(&authority.host).is_none()
     }
 
     /// What a resolver gets to look at. Kernel credentials are attached separately, since
@@ -818,8 +807,9 @@ impl Server {
         evidence: Evidence,
         status_code: Option<u16>,
         started: Instant,
+        would_deny: bool,
     ) {
-        self.stats.record(&cx.session, action == Action::Allow);
+        self.stats.record(&cx.session, &cx.profile, action == Action::Allow, would_deny);
         self.audit
             .emit(AuditRecord {
                 session: cx.session.to_string(),
@@ -832,6 +822,7 @@ impl Server {
                 path: cx.uri.to_string(),
                 action,
                 reason: reason.clone(),
+                would_deny,
                 trail: evidence.trail,
                 status_code,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -855,7 +846,7 @@ impl Server {
             GuardError::Connect { .. } => "upstream_unreachable",
         };
         let reason = Reason::new("upstream_guard", code, e.to_string());
-        self.emit_session(session, cx, &reason, Action::Deny, evidence, None, started).await;
+        self.emit_session(session, cx, &reason, Action::Deny, evidence, None, started, false).await;
     }
 }
 

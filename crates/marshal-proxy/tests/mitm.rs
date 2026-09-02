@@ -56,15 +56,14 @@ async fn harness(yaml: &str, passthrough: &[&str]) -> Harness {
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
 
     let server = Server::new(
-        ServerConfig {
-            listen: "127.0.0.1:0".into(),
-            unix_socket: None,
-            transparent: Vec::new(),
-            tls: Some(engine),
-            passthrough: HostMatcher::new(passthrough.iter(), Vec::<&str>::new()).unwrap(),
-        },
-        single_profile_chains(chain),
-        no_resolvers(),
+        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        handle(runtime_with(
+            chain,
+            Some(engine),
+            HostMatcher::new(passthrough.iter(), Vec::<&str>::new()).unwrap(),
+            Vec::new(),
+            Vec::new(),
+        )),
         Arc::new(guard),
         audit,
     );
@@ -276,15 +275,14 @@ async fn passthrough_hosts_are_tunnelled_not_intercepted() {
     let cfg: Config = serde_yaml_ng::from_str(ALLOW_LOOPBACK).unwrap();
     let chain = build_chain(&cfg, "p", Arc::new(DenyingDecider)).unwrap();
     let server = Server::new(
-        ServerConfig {
-            listen: "127.0.0.1:0".into(),
-            unix_socket: None,
-            transparent: Vec::new(),
-            tls: Some(engine),
-            passthrough: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
-        },
-        single_profile_chains(chain),
-        no_resolvers(),
+        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        handle(runtime_with(
+            chain,
+            Some(engine),
+            HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
+            Vec::new(),
+            Vec::new(),
+        )),
         Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
         Arc::new(JsonSink::new(tokio::io::sink())),
     );

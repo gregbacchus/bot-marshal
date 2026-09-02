@@ -159,6 +159,7 @@ mod tests {
             path: String::new(),
             action: Action::Deny,
             reason: Reason::new("allowlist", "host_not_allowlisted", "nope"),
+            would_deny: false,
             trail: vec![LayerOutcome {
                 layer: "denylist".into(),
                 verdict: "pass".into(),
