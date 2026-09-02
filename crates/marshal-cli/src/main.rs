@@ -26,25 +26,38 @@ struct Cli {
     #[arg(long, global = true, env = "MARSHAL_LOG", default_value = "info")]
     log: String,
 
-    /// Where the general trace stream goes — startup messages, warnings, and a
-    /// human-readable mirror of each audit record. Distinct from `--audit-sink-file`, which is the
-    /// canonical structured (JSON) audit trail. `auto` (default) picks the first of journald,
-    /// syslog, or stdout that's actually reachable; the others force one, failing if it isn't
-    /// available rather than silently falling back — useful for debugging under a supervisor
-    /// that sets `JOURNAL_STREAM` but where you want plain stdout anyway.
-    #[arg(long, global = true, env = "MARSHAL_TRACE_SINK", default_value = "auto")]
-    trace_sink: TraceSink,
+    /// Where logs go — every message, including one line per allow/deny. `auto` (default)
+    /// picks the first of journald, syslog, or stdout that's actually reachable; the others
+    /// force one, failing if it isn't available rather than silently falling back — useful
+    /// for debugging under a supervisor that sets `JOURNAL_STREAM` but where you want plain
+    /// stdout anyway.
+    #[arg(long, global = true, env = "MARSHAL_LOG_SINK", default_value = "auto")]
+    log_sink: LogSink,
+
+    /// How stdout is formatted (journald and syslog format themselves and ignore this).
+    /// `auto` (default) is `pretty` on a terminal and `json` otherwise — piping to a file,
+    /// `docker logs`, or anything else non-interactive gets the machine-readable form
+    /// automatically, with no flag needed.
+    #[arg(long, global = true, env = "MARSHAL_LOG_FORMAT", default_value = "auto")]
+    log_format: LogFormat,
 
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum TraceSink {
+enum LogSink {
     Auto,
     Stdout,
     Journald,
     Syslog,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum LogFormat {
+    Auto,
+    Pretty,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -112,29 +125,12 @@ enum Command {
         #[arg(long)]
         listen: Option<String>,
 
-        /// Where audit records go: `trace` is a one-line human-readable summary through the
-        /// trace stream (see `--trace-sink`) — no evidence trail, no status code. `file` is
-        /// the canonical structured JSON record with everything, written to
-        /// `--audit-sink-file` (requires it). Comma-separated; defaults to `trace` alone, or
-        /// `trace,file` once `--audit-sink-file` is given.
-        #[arg(long, value_delimiter = ',')]
-        audit_sink: Option<Vec<AuditSinkKind>>,
-
-        /// Where the `file` audit sink writes full JSON audit records to (append mode,
-        /// created if missing). Pass `-` for stdout, to get the full structured record on
-        /// the console instead of just the trace mirror's summary. Also implies `file` in
-        /// `--audit-sink` if that wasn't given explicitly.
+        /// Also write the full structured JSON audit record (the one line per allow/deny
+        /// already going to the log always carries a summary, not the full evidence trail
+        /// or status code) to this file, in addition. Append mode, created if missing.
         #[arg(long)]
-        audit_sink_file: Option<PathBuf>,
+        audit_log: Option<PathBuf>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum AuditSinkKind {
-    /// The human-readable mirror already going through `--trace-sink`.
-    Trace,
-    /// The canonical structured JSON trail, written to `--audit-sink-file`.
-    File,
 }
 
 #[derive(Debug, Subcommand)]
@@ -163,7 +159,7 @@ enum CaCommand {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if let Err(e) = init_tracing(&cli.log, cli.trace_sink) {
+    if let Err(e) = init_tracing(&cli.log, cli.log_sink, cli.log_format) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
@@ -234,18 +230,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Serve { profile, listen, audit_sink, audit_sink_file } => {
-            let audit_sink = audit_sink.unwrap_or_else(|| {
-                let mut kinds = vec![AuditSinkKind::Trace];
-                if audit_sink_file.is_some() {
-                    kinds.push(AuditSinkKind::File);
-                }
-                kinds
-            });
-            if audit_sink.contains(&AuditSinkKind::File) && audit_sink_file.is_none() {
-                eprintln!("error: --audit-sink file requires --audit-sink-file <path>");
-                return ExitCode::FAILURE;
-            }
+        Command::Serve { profile, listen, audit_log } => {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
                 Err(e) => {
@@ -253,7 +238,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match rt.block_on(serve(&config_path, profile, listen, audit_sink, audit_sink_file)) {
+            match rt.block_on(serve(&config_path, profile, listen, audit_log)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
@@ -268,8 +253,7 @@ async fn serve(
     config_path: &std::path::Path,
     profile_override: Option<String>,
     listen: Option<String>,
-    audit_sink: Vec<AuditSinkKind>,
-    audit_sink_file: Option<PathBuf>,
+    audit_log: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // Startup and reload go through the same builder, so a reload cannot succeed on a
     // config the proxy would have refused to start with — or the reverse.
@@ -305,30 +289,20 @@ async fn serve(
     let redactor = marshal_core::Redactor::new(secret_values.clone());
     let tracing_redactor = marshal_core::Redactor::new(secret_values);
 
-    // `--audit-sink` picks which of these run; by default that's the trace-stream mirror
-    // alone, or plus the JSON file once `--audit-sink-file` is given (main() already rejected
-    // `file` without a path). Neither is forced on: a deployment that wants a quiet console
-    // and only the audit file can ask for exactly that.
-    let mut sinks: Vec<Arc<dyn AuditSink>> = Vec::new();
-    if audit_sink.contains(&AuditSinkKind::Trace) {
-        sinks.push(Arc::new(TracingSink::redacting(tracing_redactor)));
-    }
-    if audit_sink.contains(&AuditSinkKind::File) {
-        let path = audit_sink_file.as_ref().expect("checked in main()");
-        // `-` is the conventional stdout placeholder — it's what makes the full structured
-        // record (the Evidence trail, status code, etc. that the trace mirror leaves out)
-        // available on the console without a real file.
-        if path.as_os_str() == "-" {
-            sinks.push(Arc::new(JsonSink::new(tokio::io::stdout()).redacting(redactor)));
-        } else {
-            let file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await
-                .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;
-            sinks.push(Arc::new(JsonSink::new(file).redacting(redactor)));
-        }
+    // Every record always goes through the log (as a one-line summary, formatted per
+    // --log-format/--log-sink like everything else); --audit-log is purely additive, for a
+    // durable copy of the full structured record — evidence trail, status code — that the
+    // summary line doesn't carry.
+    let mut sinks: Vec<Arc<dyn AuditSink>> =
+        vec![Arc::new(TracingSink::redacting(tracing_redactor))];
+    if let Some(path) = &audit_log {
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;
+        sinks.push(Arc::new(JsonSink::new(file).redacting(redactor)));
     }
     let audit: Arc<dyn AuditSink> = Arc::new(MultiSink::new(sinks));
 
@@ -897,11 +871,25 @@ fn try_syslog(filter: tracing_subscriber::EnvFilter) -> bool {
     }
 }
 
-fn init_stdout(filter: tracing_subscriber::EnvFilter) {
-    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+/// `auto` is the whole point: a human at a terminal gets colour and short lines, and
+/// anything reading the stream programmatically — `docker logs`, a file redirect, a
+/// supervisor that doesn't set `JOURNAL_STREAM` — gets one JSON object per line with no
+/// flag required. journald and syslog format themselves and never reach this function.
+fn init_stdout(filter: tracing_subscriber::EnvFilter, format: LogFormat) {
+    use std::io::IsTerminal;
+    let json = match format {
+        LogFormat::Json => true,
+        LogFormat::Pretty => false,
+        LogFormat::Auto => !std::io::stdout().is_terminal(),
+    };
+    if json {
+        tracing_subscriber::fmt().with_env_filter(filter).json().init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+    }
 }
 
-fn init_tracing(filter: &str, sink: TraceSink) -> anyhow::Result<()> {
+fn init_tracing(filter: &str, sink: LogSink, format: LogFormat) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
     let parsed = || EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -911,11 +899,11 @@ fn init_tracing(filter: &str, sink: TraceSink) -> anyhow::Result<()> {
     // stdout — which is itself already captured by Docker, most init scripts, or an
     // interactive terminal. Each tier is a real connection attempt, not a guess from
     // `/proc`, so a machine that merely looks like it has journald but doesn't actually
-    // accept the connection still falls through correctly. A forced sink (`--trace-sink`)
+    // accept the connection still falls through correctly. A forced sink (`--log-sink`)
     // skips the fallback chain entirely and errors out if that one sink isn't reachable,
     // rather than silently landing somewhere else — the point of forcing it.
     match sink {
-        TraceSink::Auto => {
+        LogSink::Auto => {
             #[cfg(target_os = "linux")]
             {
                 // systemd sets JOURNAL_STREAM for any unit whose stdout/stderr is connected
@@ -929,31 +917,31 @@ fn init_tracing(filter: &str, sink: TraceSink) -> anyhow::Result<()> {
                     return Ok(());
                 }
             }
-            init_stdout(parsed());
+            init_stdout(parsed(), format);
         }
-        TraceSink::Stdout => init_stdout(parsed()),
+        LogSink::Stdout => init_stdout(parsed(), format),
         #[cfg(target_os = "linux")]
-        TraceSink::Journald => {
+        LogSink::Journald => {
             if !try_journald(parsed()) {
                 anyhow::bail!(
-                    "--trace-sink journald was requested but the journal socket isn't reachable \
+                    "--log-sink journald was requested but the journal socket isn't reachable \
                      (not running under systemd, or JOURNAL_STREAM's target rejected the \
                      connection)"
                 );
             }
         }
         #[cfg(target_os = "linux")]
-        TraceSink::Syslog => {
+        LogSink::Syslog => {
             if !try_syslog(parsed()) {
                 anyhow::bail!(
-                    "--trace-sink syslog was requested but neither /dev/log nor /var/run/syslog \
+                    "--log-sink syslog was requested but neither /dev/log nor /var/run/syslog \
                      is reachable"
                 );
             }
         }
         #[cfg(not(target_os = "linux"))]
-        TraceSink::Journald | TraceSink::Syslog => {
-            anyhow::bail!("--trace-sink journald/syslog are only supported on Linux");
+        LogSink::Journald | LogSink::Syslog => {
+            anyhow::bail!("--log-sink journald/syslog are only supported on Linux");
         }
     }
     Ok(())

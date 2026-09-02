@@ -107,6 +107,8 @@ Every subcommand accepts two global flags, before the subcommand name:
 |---|---|---|---|
 | `--config`, `-c <path>` | `MARSHAL_CONFIG` | `$XDG_CONFIG_HOME/bot-marshal/config.yaml` | usually `~/.config/bot-marshal/config.yaml`; a system service should pass an explicit path (see [Running as a service](#running-as-a-service)) |
 | `--log <level>` | `MARSHAL_LOG` | `info` | `error`, `warn`, `info`, `debug`, or `trace` |
+| `--log-sink <dest>` | `MARSHAL_LOG_SINK` | `auto` | `auto`, `stdout`, `journald`, `syslog` — see [Watching activity](#watching-activity) |
+| `--log-format <fmt>` | `MARSHAL_LOG_FORMAT` | `auto` | `auto`, `pretty`, `json` — stdout only; see [Watching activity](#watching-activity) |
 
 ```bash
 marshal --config /etc/bot-marshal/marshal.yaml --log debug serve
@@ -128,15 +130,13 @@ which governs the much shorter-lived per-host leaves the CA signs while it is va
 the same trust instructions `ca init` prints. Useful for piping into a container image build
 or a trust store update without regenerating anything.
 
-**`marshal serve [--profile <name>] [--listen <addr>] [--audit-sink <kinds>] [--audit-sink-file <path>]`**
-— runs the proxy until `Ctrl-C`. `--profile` overrides `sessions.unidentified.profile` for
-the unattributed fallback; it does not select a single profile to run — every profile in the
+**`marshal serve [--profile <name>] [--listen <addr>] [--audit-log <path>]`** — runs the
+proxy until `Ctrl-C`. `--profile` overrides `sessions.unidentified.profile` for the
+unattributed fallback; it does not select a single profile to run — every profile in the
 config gets built and is reachable by whatever resolves a session into it. `--listen`
-overrides `listeners.explicit.listen`. `--audit-sink` (comma-separated: `trace`, `file`)
-picks where audit records go — see [Watching activity](#watching-activity) for the default
-and the distinction from `--trace-sink`. `--audit-sink-file <path>` is the file `--audit-sink file`
-writes JSON lines to (append mode, created if missing) and implies `file` if `--audit-sink`
-wasn't given explicitly.
+overrides `listeners.explicit.listen`. `--audit-log <path>` additionally writes the full
+structured JSON record (evidence trail, status code — more than the log's one-line summary)
+to a file, append mode, created if missing — see [Watching activity](#watching-activity).
 
 **`marshal run --profile <name> [--isolation netns|cgroup|none] [--proxy <url>] [--dry-run] -- <command...>`**
 — launches an agent under a profile. `--isolation` defaults to `netns` (see
@@ -167,7 +167,7 @@ What bot-marshal writes to disk, and only what it writes:
 | CA certificate | `tls.ca_cert` | created by `ca init`; world-readable is fine, it is a certificate |
 | CA private key | `tls.ca_key` | created by `ca init` at mode `0600`; whoever holds it can impersonate every site the agent talks to |
 | Unix socket | `listeners.explicit.unix_socket` | recreated on every start — a leftover socket from a previous run is removed automatically, never left to block a restart |
-| Audit log | `--audit-sink-file <path>`, optional | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
+| Audit log | `--audit-log <path>`, optional | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
 
 That is the complete list. There is no database, no cache directory, and no other state
 persisted between runs — `/v1/sessions` and `/v1/metrics` counters, and the judge's response
@@ -228,27 +228,10 @@ everywhere else identity is involved.
 
 ## Watching activity
 
-There are two separate streams, controlled by two separate flags, and it's worth being clear
-about which is which before either one's options make sense:
-
-* **The trace stream** — startup messages, warnings, and a human-readable mirror of each
-  audit record (`allow session=... host=...`). Controlled by `--trace-sink`.
-* **The audit trail** — the canonical structured record per request, with the full
-  `Evidence` trail, redacted, meant to answer "what did this agent do." Controlled by
-  `--audit-sink`, and (when it includes `file`) written to `--audit-sink-file <path>`.
-
-By default the audit trail's only destination *is* the trace stream's human-readable mirror
-— `--audit-sink` defaults to `trace`, or `trace,file` once `--audit-sink-file` is given. That
-mirror leaves out the evidence trail and status code, so pass `--audit-sink-file -` (`-` for
-stdout) to get the full structured JSON record on the console too — `--audit-sink trace,file
---audit-sink-file -` reproduces the original two-things-per-request output (a summary line
-plus the full JSON) on stdout. Pass `--audit-sink file` alone (with a real path) to get only
-the structured file and a quiet console — useful once something else is already consuming
-the JSON file and the mirrored lines are just duplication.
-
-bot-marshal doesn't ship its own log storage, rotation, or `tail -f`-style command for the
-trace stream — it hands every event to `tracing` and, on Linux, auto-detects and defers to
-whatever OS-level log system is already running, trying each in turn at startup:
+Every log line, including one per allow/deny, goes to one place — `--log-sink` picks it, and
+it's auto-detected by default. bot-marshal doesn't ship its own log storage, rotation, or
+`tail -f`-style command; it hands every event to `tracing` and, on Linux, defers to whatever
+OS-level log system is already running, trying each in turn at startup:
 
 1. **journald**, if `JOURNAL_STREAM` is set (true for any systemd unit whose stdout/stderr is
    the journal) *and* the connection to the journal socket actually succeeds. Fields land as
@@ -267,14 +250,26 @@ whatever OS-level log system is already running, trying each in turn at startup:
    (`error`→`err`, `warn`→`warning`, …) so denials still stand out to whatever consumes
    syslog, and rotation/forwarding are that daemon's job, not bot-marshal's.
 
-3. **Plain stdout**, formatted for a human, if neither is available — an interactive
-   terminal, or any supervisor (Docker, an init script) that already captures stdout into its
-   own log system.
+3. **Plain stdout**, if neither is available — an interactive terminal, or any supervisor
+   (Docker, an init script) that already captures stdout into its own log system. Here,
+   `--log-format` also matters (it's a no-op for journald and syslog, which format
+   themselves): `auto` (default) checks whether stdout is actually a terminal and switches
+   automatically — a human watching `marshal serve` in a shell gets short, coloured lines;
+   anything reading the stream programmatically (`docker logs`, a file redirect, a collector
+   that doesn't set `JOURNAL_STREAM`) gets one JSON object per line, unprompted. `pretty` or
+   `json` forces one regardless of what stdout actually is.
 
-This selection happens automatically and needs no flag — but `--trace-sink auto|stdout|journald|syslog`
-(`MARSHAL_TRACE_SINK`) forces one, erroring out if it isn't actually reachable rather than
-silently falling back; useful when you want plain stdout while running under something that
-sets `JOURNAL_STREAM`.
+Both selections happen automatically and need no flag — `--log-sink auto|stdout|journald|syslog`
+(`MARSHAL_LOG_SINK`) forces a destination, erroring out if it isn't actually reachable rather
+than silently falling back to another (useful when you want plain stdout while running under
+something that sets `JOURNAL_STREAM`); `--log-format auto|pretty|json` (`MARSHAL_LOG_FORMAT`)
+forces stdout's rendering.
+
+Every log line — audit or otherwise — is one summary, not the full record: an `allow`/`deny`
+line carries `session`, `host`, `method`, `profile`, and which `layer` decided, but not the
+full `Evidence` trail or response status code. For that, `--audit-log <path>` additionally
+writes the complete structured JSON record to a file (append mode, created if missing) —
+durable, and independent of whatever `--log-sink`/`--log-format` chose for the console.
 
 ## The policy chain
 
