@@ -179,6 +179,51 @@ cache, all live in memory and reset on restart. A config `include` glob and any 
 source paths) expands against `$HOME`. Nothing else is expanded — no `~user/`, no
 environment variable substitution inside a path string.
 
+## Splitting the config into multiple files
+
+One `config.yaml` is fine to start, but a base file plus one file per profile scales better as
+profiles multiply — each is independently readable, reviewable in its own PR, and easy to hand
+to someone who owns just that agent. The base file lists `include` globs, and each matched file
+is a complete config document using the same schema, merged in:
+
+```yaml
+# config.yaml
+include:
+  - "profiles/*.yaml"
+  - "bundles/*.yaml"           # the same mechanism ships curated allowlists (see below)
+
+tls:
+  ca_cert: "~/.config/bot-marshal/ca.crt"
+  ca_key: "~/.config/bot-marshal/ca.key"
+```
+
+```yaml
+# profiles/coding-agent.yaml
+profiles:
+  coding-agent:
+    default_action: deny
+    policy:
+      - layer: allowlist
+        allow: { bundles: [github, npm] }
+        on_match: allow
+```
+
+Globs are resolved relative to the file that lists them, so `profiles/*.yaml` here means the
+`profiles/` directory next to `config.yaml`. Matches are read in sorted order for a
+deterministic merge, and **the base file always wins**: it's merged in last, so a profile it
+also defines under the same key replaces (not deep-merges with) whatever an include set for
+that key — splitting is by *whole profile*, not by field, so put a profile entirely in one
+file or entirely in the base, not split across both. Includes don't recurse — a file matched
+by `include` can't list its own `include` and have it followed — which keeps the merge order
+easy to reason about at a glance rather than needing to trace a chain of files.
+
+`profiles:` and `bundles:` merge by key across every matched file (that's what makes one
+profile per file work at all); `listeners:`/`tls:`/`upstream:`/`sessions:` are wholesale —
+whichever file sets one last wins in full, they don't merge field-by-field either. Bundles
+(`config/bundles/*.yaml` in this repo — `github.yaml`, `npm.yaml`, …) are the same mechanism
+used for a different purpose: named, reusable allow-lists a policy references by name
+(`allow: { bundles: [github] }`) rather than repeating domains in every profile that needs them.
+
 ## Running as a service
 
 The proxy itself, and the agents `marshal run` launches, are two separate concerns that can
