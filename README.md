@@ -24,19 +24,25 @@ cargo build --release
 alias marshal=./target/release/marshal   # or install it onto PATH
 ```
 
-This walkthrough uses a minimal config you create yourself, deliberately not the fuller
-example shipped at `config/marshal.yaml` — that one also defines profiles using the judge
-layer, and **`serve` builds every profile in the config up front, not just the one `--profile`
+With no `--config`, every subcommand looks in one default place:
+`$XDG_CONFIG_HOME/bot-marshal/config.yaml`, which on almost every Linux setup is
+`~/.config/bot-marshal/config.yaml`. Nothing creates it for you — write it yourself first,
+same as you would for any other tool that follows this convention.
+
+This walkthrough's config is deliberately minimal, not the fuller example shipped in this
+repo at `config/marshal.yaml` — that one also defines profiles using the judge layer, and
+**`serve` builds every profile in the config up front, not just the one `--profile`
 selects**, so it refuses to start at all without `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` set.
 Once you have the basics working, `config/marshal.yaml` is worth reading as a fuller example;
-just export those variables first if you want to run it as-is.
+just export those variables first if you want to run it as-is with a `--config` pointed at
+this checkout.
 
 ```bash
-mkdir -p ~/.bot-marshal-quickstart
-cat > ~/.bot-marshal-quickstart/marshal.yaml <<'CFG'
+mkdir -p ~/.config/bot-marshal
+cat > ~/.config/bot-marshal/config.yaml <<'CFG'
 tls:
-  ca_cert: "~/.bot-marshal-quickstart/ca.crt"
-  ca_key: "~/.bot-marshal-quickstart/ca.key"
+  ca_cert: "~/.config/bot-marshal/ca.crt"
+  ca_key: "~/.config/bot-marshal/ca.key"
 profiles:
   base:
     default_action: deny
@@ -51,7 +57,7 @@ CFG
 Check it's valid before anything else — this catches most mistakes before they matter:
 
 ```bash
-marshal --config ~/.bot-marshal-quickstart/marshal.yaml config check
+marshal config check
 ```
 
 Generate a CA. `ca init` writes the cert and key to the paths named by `tls.ca_cert` /
@@ -59,20 +65,20 @@ Generate a CA. `ca init` writes the cert and key to the paths named by `tls.ca_c
 variables over touching the system store:
 
 ```bash
-marshal --config ~/.bot-marshal-quickstart/marshal.yaml ca init
+marshal ca init
 ```
 
 Start the proxy:
 
 ```bash
-marshal --config ~/.bot-marshal-quickstart/marshal.yaml serve --listen 127.0.0.1:8080
+marshal serve --listen 127.0.0.1:8080
 ```
 
 Point something at it, trusting the CA you just generated (`--cacert` here is standing in for
 whichever of `ca init`'s printed trust instructions fits your setup):
 
 ```bash
-curl --cacert ~/.bot-marshal-quickstart/ca.crt -x http://127.0.0.1:8080 https://api.github.com/zen
+curl --cacert ~/.config/bot-marshal/ca.crt -x http://127.0.0.1:8080 https://api.github.com/zen
 ```
 
 That succeeds — `api.github.com` is explicitly allowlisted above. Anything not allowlisted
@@ -80,13 +86,13 @@ comes back as a 403 whose body says which layer refused and why, a bare 403 just
 retry-loop:
 
 ```bash
-curl --cacert ~/.bot-marshal-quickstart/ca.crt -x http://127.0.0.1:8080 https://example.com/
+curl --cacert ~/.config/bot-marshal/ca.crt -x http://127.0.0.1:8080 https://example.com/
 ```
 
 SOCKS5 works on the same port; the protocol is sniffed from the first byte:
 
 ```bash
-curl --cacert ~/.bot-marshal-quickstart/ca.crt --socks5-hostname 127.0.0.1:8080 https://api.github.com/zen
+curl --cacert ~/.config/bot-marshal/ca.crt --socks5-hostname 127.0.0.1:8080 https://api.github.com/zen
 ```
 
 From here, `config/marshal.yaml` in the repo is worth reading as the fuller example — bundles,
@@ -99,7 +105,7 @@ Every subcommand accepts two global flags, before the subcommand name:
 
 | flag | env var | default | |
 |---|---|---|---|
-| `--config`, `-c <path>` | `MARSHAL_CONFIG` | `config/marshal.yaml` | relative to the current directory — pass an absolute path for anything other than local development |
+| `--config`, `-c <path>` | `MARSHAL_CONFIG` | `$XDG_CONFIG_HOME/bot-marshal/config.yaml` | usually `~/.config/bot-marshal/config.yaml`; a system service should pass an explicit path (see [Running as a service](#running-as-a-service)) |
 | `--log <level>` | `MARSHAL_LOG` | `info` | `error`, `warn`, `info`, `debug`, or `trace` |
 
 ```bash
@@ -108,7 +114,10 @@ marshal --config /etc/bot-marshal/marshal.yaml --log debug serve
 
 **`marshal config check`** — loads and validates the config, prints every diagnostic, exits
 non-zero on any error. Warnings do not fail the check but are worth reading; `serve` logs
-them at startup and refuses to start on an error the same way.
+them at startup and refuses to start on an error the same way. Every subcommand — this one
+included — checks the config file exists before doing anything else, and says so clearly
+(naming the exact path it looked at) rather than surfacing a bare I/O error, since the first
+thing most people hit is the default path they never typed.
 
 **`marshal ca init [--common-name <name>] [--days <n>]`** — generates a CA at the paths named
 by `tls.ca_cert` / `tls.ca_key`. Refuses to overwrite an existing one. `--days` is the CA's
@@ -141,11 +150,12 @@ inside the network namespace.
 
 ## Configuration and storage
 
-There is no built-in default location beyond the relative path `config/marshal.yaml` — that
-default exists for running from a checkout during development, not as a system convention.
-In anything other than that, pass `--config` or set `MARSHAL_CONFIG` explicitly. A
-conventional system layout looks like `/etc/bot-marshal/marshal.yaml`, with bundle includes
-and any secret files it references kept alongside or under it.
+With no `--config`, bot-marshal looks in `$XDG_CONFIG_HOME/bot-marshal/config.yaml` — usually
+`~/.config/bot-marshal/config.yaml` — which is the right default for a normal user running
+this interactively (`ca init`, `marshal run`, trying things out) and the wrong one for a
+long-running service: pass `--config` explicitly there. A conventional system layout looks
+like `/etc/bot-marshal/marshal.yaml`, with bundle includes and any secret files it references
+kept alongside or under it — see [Running as a service](#running-as-a-service).
 
 What bot-marshal writes to disk, and only what it writes:
 

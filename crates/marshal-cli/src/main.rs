@@ -17,15 +17,10 @@ use marshal_secrets::{MatchSites, SecretInjector, SecretSwap};
 #[derive(Debug, Parser)]
 #[command(name = "marshal", version, about = "Egress firewall for agents and bots")]
 struct Cli {
-    /// Path to the configuration file.
-    #[arg(
-        long,
-        short,
-        global = true,
-        env = "MARSHAL_CONFIG",
-        default_value = "config/marshal.yaml"
-    )]
-    config: PathBuf,
+    /// Path to the configuration file. Defaults to `$XDG_CONFIG_HOME/bot-marshal/config.yaml`
+    /// (usually `~/.config/bot-marshal/config.yaml`) when not given.
+    #[arg(long, short, global = true, env = "MARSHAL_CONFIG")]
+    config: Option<PathBuf>,
 
     /// Log level filter (`error`, `warn`, `info`, `debug`, `trace`).
     #[arg(long, global = true, env = "MARSHAL_LOG", default_value = "info")]
@@ -134,11 +129,46 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing(&cli.log);
 
+    // `Sandbox` needs no config file at all — it gets everything through its own flags — so
+    // resolution happens for every other subcommand rather than unconditionally, and a
+    // missing HOME does not block the one path that never needed it.
+    let was_explicit = cli.config.is_some();
+    let config_path = if matches!(cli.command, Command::Sandbox { .. }) {
+        PathBuf::new()
+    } else {
+        match resolve_config_path(cli.config.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    // The config has to exist before any subcommand can do anything — including `ca init`,
+    // which reads `tls.ca_cert` / `tls.ca_key` from it. That makes "the file is missing" the
+    // universal first-run state, worth one clear message here rather than a generic I/O error
+    // from whichever subcommand happens to load it first — especially when the path was never
+    // typed by the user and they may not know where to look.
+    if !matches!(cli.command, Command::Sandbox { .. }) && !config_path.exists() {
+        if was_explicit {
+            eprintln!("error: no config file at {}", config_path.display());
+        } else {
+            eprintln!(
+                "error: no config file at {} (the default location; pass --config to use a \
+                 different one)\n\nCreate one there — see the Quickstart in the README — then \
+                 re-run this command.",
+                config_path.display()
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+
     match cli.command {
-        Command::Config(ConfigCommand::Check) => config_check(&cli.config),
-        Command::Ca(cmd) => ca_command(&cli.config, cmd),
+        Command::Config(ConfigCommand::Check) => config_check(&config_path),
+        Command::Ca(cmd) => ca_command(&config_path, cmd),
         Command::Run { profile, isolation, proxy, dry_run, command } => {
-            run_command(&cli.config, &profile, &isolation, &proxy, dry_run, &command)
+            run_command(&config_path, &profile, &isolation, &proxy, dry_run, &command)
         }
         Command::Sandbox { socket, listen, ca, command } => {
             let listen = match listen.parse() {
@@ -173,7 +203,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match rt.block_on(serve(&cli.config, profile, listen, audit_log)) {
+            match rt.block_on(serve(&config_path, profile, listen, audit_log)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
@@ -696,6 +726,33 @@ fn run_command(
             eprintln!("error: launching {}: {e}", cmd.get_program().to_string_lossy());
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Where the config lives when `--config` / `MARSHAL_CONFIG` was not given.
+///
+/// The XDG user config directory — `$XDG_CONFIG_HOME/bot-marshal/config.yaml`, or
+/// `~/.config/bot-marshal/config.yaml` when `XDG_CONFIG_HOME` is unset — because that is the
+/// sane default for a normal user running this interactively, which is the common case: `ca
+/// init` and `marshal run` are inherently things a person types. A long-running system
+/// service should not rely on this default at all and should pass `--config` explicitly
+/// (see the README's "Running as a service") — this function is never consulted when it does.
+fn default_config_path() -> anyhow::Result<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot determine a default config location: neither XDG_CONFIG_HOME nor HOME                  is set. Pass --config explicitly."
+            )
+        })?;
+    Ok(base.join("bot-marshal").join("config.yaml"))
+}
+
+fn resolve_config_path(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => default_config_path(),
     }
 }
 
