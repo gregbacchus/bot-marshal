@@ -8,7 +8,9 @@ use marshal_core::{Decider, PolicyLayer};
 
 use crate::chain::Chain;
 use crate::hosts::{HostMatcher, PatternError};
-use crate::layers::{Allowlist, Denylist};
+use crate::layers::dlp::Oversize as DlpOversize;
+use crate::layers::{Allowlist, Denylist, Dlp, Rules};
+use crate::patterns;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -31,6 +33,16 @@ pub enum BuildError {
 
     #[error("profile `{profile}`: `{layer}` is not implemented yet")]
     Unimplemented { profile: String, layer: &'static str },
+
+    #[error("profile `{profile}`: unknown dlp pattern `{pattern}`. Known patterns: {known}")]
+    UnknownPattern { profile: String, pattern: String, known: String },
+
+    #[error("profile `{profile}`: {source}")]
+    Rule {
+        profile: String,
+        #[source]
+        source: crate::layers::rules::RuleCompileError,
+    },
 }
 
 /// Resolve a profile's `extends` chain into an effective profile.
@@ -110,6 +122,52 @@ pub fn build_chain(
             LayerConfig::Allowlist { allow, on_match, on_miss } => {
                 let m = matcher(cfg, profile_name, "allowlist", allow)?;
                 layers.push(Arc::new(Allowlist::new(m, *on_match, *on_miss)));
+            }
+            LayerConfig::Dlp {
+                scan_request,
+                patterns: names,
+                on_match,
+                annotate,
+                max_body_bytes,
+                on_oversize,
+                ..
+            } => {
+                // An unknown pattern name is an error rather than a skip: a profile that
+                // believes it scans for GitHub tokens and silently does not is worse than one
+                // that refuses to start.
+                let mut compiled = Vec::new();
+                for name in names {
+                    compiled.push(patterns::builtin(name).ok_or_else(|| {
+                        BuildError::UnknownPattern {
+                            profile: profile_name.to_owned(),
+                            pattern: name.clone(),
+                            known: patterns::builtin_names().join(", "),
+                        }
+                    })?);
+                }
+                layers.push(Arc::new(Dlp::new(
+                    compiled,
+                    *scan_request,
+                    *on_match,
+                    annotate.flags.clone(),
+                    *max_body_bytes,
+                    match on_oversize {
+                        marshal_config::layer::Oversize::Deny => DlpOversize::Deny,
+                        marshal_config::layer::Oversize::PassUnscanned => {
+                            DlpOversize::PassUnscanned
+                        }
+                    },
+                )));
+            }
+            LayerConfig::Rules { expressions } => {
+                let specs = expressions
+                    .iter()
+                    .map(|e| (e.when.clone(), e.verdict, e.annotate.flags.clone()));
+                let rules = Rules::compile(specs).map_err(|source| BuildError::Rule {
+                    profile: profile_name.to_owned(),
+                    source,
+                })?;
+                layers.push(Arc::new(rules));
             }
             other => {
                 return Err(BuildError::Unimplemented {

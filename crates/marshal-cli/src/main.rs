@@ -11,6 +11,7 @@ use marshal_config::{Severity, validate};
 use marshal_core::{AuditSink, DenyingDecider};
 use marshal_policy::build_chain;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
+use marshal_secrets::{MatchSites, SecretInjector, SecretSwap};
 
 #[derive(Debug, Parser)]
 #[command(name = "marshal", version, about = "Egress firewall for agents and bots")]
@@ -138,6 +139,21 @@ async fn serve(
     let chain = build_chain(&cfg, profile, Arc::new(DenyingDecider))?;
     let guard = UpstreamGuard::new(&cfg.upstream.deny_cidrs, cfg.upstream.allow_private)?;
 
+    // Build secret swaps, then resolve them once so the redactor knows the real values
+    // before a single record can be written. Seeding after the first request would leave a
+    // window in which a secret could reach the audit log.
+    let effective = marshal_policy::resolve_profile(&cfg, profile)?;
+    let injector = build_injector(&effective, &cfg)?;
+    let resolved = injector.resolve_all().await;
+    let secret_names: Vec<String> = resolved.iter().map(|(n, _)| n.clone()).collect();
+    if !resolved.is_empty() {
+        tracing::info!(secrets = ?secret_names, "boundary secret injection active");
+    }
+    let secret_values: Vec<String> =
+        resolved.into_iter().map(|(_, v)| v.expose().to_owned()).collect();
+    let redactor = marshal_core::Redactor::new(secret_values.clone());
+    let tracing_redactor = marshal_core::Redactor::new(secret_values);
+
     let json: Arc<dyn AuditSink> = match &audit_log {
         Some(path) => {
             let file = tokio::fs::OpenOptions::new()
@@ -146,11 +162,12 @@ async fn serve(
                 .open(path)
                 .await
                 .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;
-            Arc::new(JsonSink::new(file))
+            Arc::new(JsonSink::new(file).redacting(redactor))
         }
-        None => JsonSink::stdout(),
+        None => Arc::new(JsonSink::new(tokio::io::stdout()).redacting(redactor)),
     };
-    let audit: Arc<dyn AuditSink> = Arc::new(MultiSink::new(vec![json, Arc::new(TracingSink)]));
+    let audit: Arc<dyn AuditSink> =
+        Arc::new(MultiSink::new(vec![json, Arc::new(TracingSink::redacting(tracing_redactor))]));
 
     // Interception needs a CA. If none has been created, run as a tunnel and say so rather
     // than refusing to start — a proxy that sees destinations is still enforcing policy.
@@ -180,12 +197,18 @@ async fn serve(
         .or_else(|| cfg.listeners.explicit.as_ref().map(|e| e.listen.clone()))
         .unwrap_or_else(|| "127.0.0.1:8080".to_owned());
 
+    let mut transforms: Vec<Arc<dyn marshal_core::RequestTransform>> = Vec::new();
+    if !injector.is_empty() {
+        transforms.push(Arc::new(injector));
+    }
+
     let server = Server::new(
         ServerConfig { listen, profile: Arc::from(profile), tls, passthrough },
         Arc::new(chain),
         Arc::new(guard),
         audit,
-    );
+    )
+    .with_request_transforms(transforms);
 
     tokio::select! {
         r = server.run(|_| {}) => r.map_err(Into::into),
@@ -307,4 +330,104 @@ fn ca_command(config_path: &std::path::Path, cmd: CaCommand) -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+/// Build the secret swaps declared by a profile's `request_transforms.secrets`.
+fn build_injector(
+    profile: &marshal_config::model::Profile,
+    cfg: &marshal_config::model::Config,
+) -> anyhow::Result<SecretInjector> {
+    use marshal_core::SecretSource;
+
+    let mut swaps = Vec::new();
+    for (i, raw) in profile.request_transforms.secrets.iter().enumerate() {
+        let spec: SecretSpec = serde_json::from_value(raw.clone())
+            .map_err(|e| anyhow::anyhow!("request_transforms.secrets[{i}]: {e}"))?;
+
+        let source: Arc<dyn SecretSource> = match &spec.source {
+            SecretSourceSpec::Env { var } => Arc::new(marshal_secrets::EnvSource::new(var)),
+            SecretSourceSpec::File { path, ttl, json_key } => {
+                Arc::new(marshal_secrets::FileSource::new(
+                    expand_tilde(path),
+                    ttl.unwrap_or(std::time::Duration::from_secs(300)),
+                    json_key.clone(),
+                ))
+            }
+        };
+
+        let name = spec.name.clone().unwrap_or_else(|| source.name().to_owned());
+        let hosts = build_host_matcher(&spec.rules, cfg)?;
+
+        swaps.push(SecretSwap {
+            name,
+            source,
+            proxy_value: spec.proxy_value,
+            sites: MatchSites {
+                headers: if spec.match_headers.is_empty() {
+                    vec!["authorization".into()]
+                } else {
+                    spec.match_headers
+                },
+                query: spec.match_query,
+                body: spec.match_body,
+            },
+            require: spec.require,
+            hosts,
+        });
+    }
+    Ok(SecretInjector::new(swaps))
+}
+
+fn build_host_matcher(
+    rules: &[HostRule],
+    _cfg: &marshal_config::model::Config,
+) -> anyhow::Result<marshal_policy::HostMatcher> {
+    let domains: Vec<String> = rules.iter().filter_map(|r| r.host.clone()).collect();
+    let cidrs: Vec<String> = rules.iter().filter_map(|r| r.cidr.clone()).collect();
+    Ok(marshal_policy::HostMatcher::new(&domains, &cidrs)?)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretSpec {
+    /// Label used in the audit trail. Defaults to the source's own name.
+    #[serde(default)]
+    name: Option<String>,
+    source: SecretSourceSpec,
+    /// What the agent sends in place of the credential.
+    proxy_value: String,
+    #[serde(default)]
+    match_headers: Vec<String>,
+    #[serde(default)]
+    match_body: bool,
+    #[serde(default)]
+    match_query: bool,
+    #[serde(default)]
+    require: bool,
+    #[serde(default)]
+    rules: Vec<HostRule>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SecretSourceSpec {
+    Env {
+        var: String,
+    },
+    File {
+        path: String,
+        #[serde(default, with = "humantime_serde")]
+        ttl: Option<std::time::Duration>,
+        #[serde(default)]
+        json_key: Option<String>,
+    },
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostRule {
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    cidr: Option<String>,
 }

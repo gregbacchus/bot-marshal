@@ -21,6 +21,7 @@ fn request(host: &str) -> RequestContext {
         session: SessionId::new("test"),
         profile: Arc::from("p"),
         ingress: IngressMode::Explicit,
+        phase: marshal_core::Phase::Request,
         client_addr: "127.0.0.1:1234".parse().unwrap(),
         authority: marshal_core::Authority { host: host.to_owned(), port: 443 },
         method: http::Method::GET,

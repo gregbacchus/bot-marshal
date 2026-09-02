@@ -38,15 +38,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-marshal-audit.workspace = true
 serde_yaml_ng.workspace = true
-http-body-util.workspace = true
-rustls.workspace = true
-rustls-pemfile.workspace = true
-webpki-roots.workspace = true
-serde_json.workspace = true
 rcgen = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server", "client"] }
-tokio-rustls.workspace = true
-futures.workspace = true
 tokio-stream.workspace = true

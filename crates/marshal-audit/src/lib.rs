@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use marshal_core::{Action, AuditRecord, AuditSink};
+use marshal_core::{Action, AuditRecord, AuditSink, Redactor};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -16,11 +16,21 @@ use tokio::sync::Mutex;
 #[derive(Debug)]
 pub struct JsonSink<W> {
     writer: Mutex<W>,
+    redactor: Redactor,
 }
 
 impl<W: AsyncWrite + Unpin + Send> JsonSink<W> {
     pub fn new(writer: W) -> Self {
-        Self { writer: Mutex::new(writer) }
+        Self { writer: Mutex::new(writer), redactor: Redactor::default() }
+    }
+
+    /// Scrub the given real secret values from every record before it is written.
+    ///
+    /// Applied to the serialised document rather than to named fields, so a field added to
+    /// `AuditRecord` later cannot quietly become a new way for a credential to escape.
+    pub fn redacting(mut self, redactor: Redactor) -> Self {
+        self.redactor = redactor;
+        self
     }
 }
 
@@ -33,9 +43,27 @@ impl JsonSink<tokio::io::Stdout> {
 #[async_trait::async_trait]
 impl<W: AsyncWrite + Unpin + Send + std::fmt::Debug> AuditSink for JsonSink<W> {
     async fn emit(&self, record: AuditRecord) {
-        let Ok(mut line) = serde_json::to_vec(&record) else {
-            tracing::error!("failed to serialise an audit record; dropping it");
-            return;
+        let mut line = if self.redactor.is_empty() {
+            match serde_json::to_vec(&record) {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::error!("failed to serialise an audit record; dropping it");
+                    return;
+                }
+            }
+        } else {
+            let Ok(mut value) = serde_json::to_value(&record) else {
+                tracing::error!("failed to serialise an audit record; dropping it");
+                return;
+            };
+            self.redactor.redact_json(&mut value);
+            match serde_json::to_vec(&value) {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::error!("failed to serialise an audit record; dropping it");
+                    return;
+                }
+            }
         };
         line.push(b'\n');
 
@@ -52,12 +80,26 @@ impl<W: AsyncWrite + Unpin + Send + std::fmt::Debug> AuditSink for JsonSink<W> {
 
 /// Mirrors records into `tracing` in addition to the JSON stream, at a level chosen by the
 /// outcome: denials are warnings, because they are the events a human wants surfaced.
-#[derive(Debug)]
-pub struct TracingSink;
+#[derive(Debug, Default)]
+pub struct TracingSink {
+    redactor: Redactor,
+}
+
+impl TracingSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn redacting(redactor: Redactor) -> Self {
+        Self { redactor }
+    }
+}
 
 #[async_trait::async_trait]
 impl AuditSink for TracingSink {
     async fn emit(&self, r: AuditRecord) {
+        // The message is the only free-text field, and so the only one a secret could reach.
+        let message = self.redactor.redact(&r.reason.message);
         match r.action {
             Action::Allow => tracing::info!(
                 session = %r.session,
@@ -75,8 +117,7 @@ impl AuditSink for TracingSink {
                 method = %r.method,
                 layer = %r.reason.layer,
                 code = %r.reason.code,
-                "deny: {}",
-                r.reason.message
+                "deny: {message}",
             ),
         }
     }
@@ -128,6 +169,46 @@ mod tests {
             status_code: None,
             duration_ms: 7,
         }
+    }
+
+    #[tokio::test]
+    async fn redaction_removes_secrets_from_anywhere_in_the_record() {
+        // The end-to-end proxy test asserts the secret is absent from the audit stream, but
+        // no field carries a header value today, so it would pass with redaction disabled.
+        // This one puts the secret where a future change might: in the free-text message,
+        // in a structured rule field, and in the layer trail.
+        const SECRET: &str = "ghp_realsecretvalue0000000000000000000000";
+
+        let mut r = record();
+        r.reason.message = format!("upstream rejected {SECRET}");
+        r.reason.rule = Some(SECRET.to_string());
+        r.trail[0].detail = Some(format!("saw {SECRET} in a header"));
+        r.path = format!("/callback?token={SECRET}");
+
+        let sink = JsonSink::new(Vec::new()).redacting(Redactor::new([SECRET.to_string()]));
+        sink.emit(r).await;
+
+        let text = String::from_utf8(sink.writer.into_inner()).unwrap();
+        assert!(!text.contains(SECRET), "{text}");
+        assert_eq!(text.matches(marshal_core::redact::PLACEHOLDER).count(), 4);
+
+        // Redaction must not be indiscriminate: the record is still usable.
+        let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(parsed["host"], "api.github.com");
+        assert_eq!(parsed["reason"]["code"], "host_not_allowlisted");
+    }
+
+    #[tokio::test]
+    async fn without_a_redactor_records_pass_through_verbatim() {
+        // The control for the test above: proves the assertion there is doing work.
+        const SECRET: &str = "ghp_realsecretvalue0000000000000000000000";
+        let mut r = record();
+        r.reason.message = format!("upstream rejected {SECRET}");
+
+        let sink = JsonSink::new(Vec::new());
+        sink.emit(r).await;
+        let text = String::from_utf8(sink.writer.into_inner()).unwrap();
+        assert!(text.contains(SECRET));
     }
 
     #[tokio::test]

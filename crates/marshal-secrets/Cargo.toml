@@ -13,8 +13,15 @@ workspace = true
 [dependencies]
 marshal-core.workspace = true
 marshal-config.workspace = true
+marshal-policy.workspace = true
+http.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 moka.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

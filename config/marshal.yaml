@@ -79,10 +79,15 @@ profiles:
             annotate:
               flags: ["WriteOperation"]
 
+      # The inverse of injection: catches a real credential the agent obtained some other
+      # way and is trying to send out. Scanning bodies means requests it applies to stop
+      # streaming, hence the explicit cap and oversize rule.
       - layer: dlp
         scan_request: true
-        patterns: ["aws-access-key", "github-pat", "private-key-pem"]
+        patterns: ["aws-access-key", "github-pat", "private-key-pem", "openai-key"]
         on_match: deny
+        max_body_bytes: 1048576
+        on_oversize: deny
 
       - layer: judge                  # expensive, so it caches and circuit-breaks
         provider:
@@ -111,10 +116,14 @@ profiles:
     request_transforms:
       headers:
         allow: ["accept*", "content-*", "user-agent", "authorization"]
+      # The agent holds only the placeholder. It can still authenticate to hosts the chain
+      # allows, but the real credential never exists in the agent's process, environment or
+      # filesystem — so compromising the agent no longer costs a rotation.
       secrets:
-        - source: { type: env, var: GITHUB_TOKEN }
+        - name: GITHUB_TOKEN
+          source: { type: env, var: GITHUB_TOKEN }
           proxy_value: "marshal-github-placeholder"
-          inject: { header: "Authorization", template: "Bearer {secret}" }
+          match_headers: ["authorization"]
           require: true
           rules: [{ host: "api.github.com" }]
 

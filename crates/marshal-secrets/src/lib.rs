@@ -1,3 +1,7 @@
-//! Secret sources, boundary injection and redaction.
-//!
-//! Stub: implemented in M3.
+//! Secret sources, boundary injection, and redaction.
+
+pub mod source;
+pub mod swap;
+
+pub use source::{EnvSource, FileSource};
+pub use swap::{MatchSites, SecretInjector, SecretSwap};

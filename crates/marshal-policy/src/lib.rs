@@ -9,6 +9,7 @@ pub mod build;
 pub mod chain;
 pub mod hosts;
 pub mod layers;
+pub mod patterns;
 
 pub use build::{BuildError, build_chain, resolve_profile};
 pub use chain::{Chain, Outcome};

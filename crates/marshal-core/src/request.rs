@@ -18,6 +18,21 @@ pub enum IngressMode {
     Dns,
 }
 
+/// Which decision point this context represents.
+///
+/// A `CONNECT` names a destination and nothing else — there is no method, path or body to
+/// judge yet. Layers that need a real request are skipped in that phase and evaluate later,
+/// once TLS has been terminated and the actual request is visible. Without this distinction a
+/// rule written for real traffic would refuse the tunnel before interception could happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// Deciding whether to open a tunnel to a destination.
+    Connect,
+    /// Deciding on a real request.
+    Request,
+}
+
 /// `host:port` for the upstream, recovered from `CONNECT`, SNI, or the `Host` header.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Authority {
@@ -62,6 +77,7 @@ pub struct RequestContext {
     /// depends on this crate, so it is referenced by name here to keep the dependency acyclic.
     pub profile: Arc<str>,
     pub ingress: IngressMode,
+    pub phase: Phase,
     pub client_addr: SocketAddr,
     pub authority: Authority,
     pub method: http::Method,

@@ -23,8 +23,8 @@ use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use marshal_core::{
-    Action, AuditRecord, AuditSink, Authority, BodyHandle, Evidence, IngressMode, Reason,
-    RequestContext, SessionId,
+    Action, AuditRecord, AuditSink, Authority, BodyHandle, BodyRequirement, Evidence, IngressMode,
+    Reason, RequestContext, RequestTransform, SessionId,
 };
 use marshal_policy::Chain;
 use rustls::pki_types::ServerName;
@@ -111,6 +111,18 @@ pub struct MitmHandler {
     pub session: SessionId,
     pub profile: Arc<str>,
     pub client_addr: std::net::SocketAddr,
+    /// Applied after the chain allows. Rewriting is not deciding.
+    pub request_transforms: Vec<Arc<dyn RequestTransform>>,
+}
+
+impl MitmHandler {
+    /// The strongest body requirement across the chain and the transforms.
+    fn body_requirement(&self) -> BodyRequirement {
+        self.request_transforms
+            .iter()
+            .map(|t| t.body_requirement())
+            .fold(self.chain.body_requirement(), |acc, r| acc.combine(r))
+    }
 }
 
 impl std::fmt::Debug for MitmHandler {
@@ -182,30 +194,9 @@ where
 async fn handle_request(
     req: Request<Incoming>,
     handler: Arc<MitmHandler>,
-    sender: Arc<tokio::sync::Mutex<hyper::client::conn::http1::SendRequest<Incoming>>>,
+    sender: Arc<tokio::sync::Mutex<hyper::client::conn::http1::SendRequest<ProxyBody>>>,
 ) -> Result<Response<ProxyBody>, MitmError> {
     let started = std::time::Instant::now();
-
-    // Policy now sees the real request, not just the tunnel destination.
-    let cx = RequestContext {
-        session: handler.session.clone(),
-        profile: Arc::clone(&handler.profile),
-        ingress: IngressMode::Explicit,
-        client_addr: handler.client_addr,
-        authority: handler.authority.clone(),
-        method: req.method().clone(),
-        uri: req.uri().clone(),
-        headers: req.headers().clone(),
-        // Streaming: the body is not materialised, and no layer at M2 asks for it.
-        body: BodyHandle::Streaming,
-        evidence: Evidence::new(),
-    };
-
-    let outcome = handler.chain.evaluate(&cx).await;
-    if outcome.action == Action::Deny {
-        emit(&handler, &cx, &outcome.reason, Action::Deny, outcome.evidence, None, started).await;
-        return Ok(denial_response(&outcome.reason, &cx));
-    }
 
     let mut req = req;
     let is_upgrade = req.headers().contains_key(hyper::header::UPGRADE);
@@ -215,10 +206,70 @@ async fn handle_request(
     // it this early is safe and is the intended proxy pattern.
     let client_upgrade = is_upgrade.then(|| hyper::upgrade::on(&mut req));
 
-    let (mut parts, body) = req.into_parts();
-    parts.uri = origin_form(&parts.uri);
+    let (mut parts, incoming) = req.into_parts();
+
+    // Buffer only if something actually asks for it. Buffering by default would quietly stop
+    // uploads streaming, and an upgrade has no body to buffer in the first place.
+    let requirement =
+        if is_upgrade { BodyRequirement::Streaming } else { handler.body_requirement() };
+    let (body_handle, forward_body) = materialise(incoming, requirement).await?;
+
+    // Policy now sees the real request, not just the tunnel destination.
+    let mut cx = RequestContext {
+        session: handler.session.clone(),
+        profile: Arc::clone(&handler.profile),
+        ingress: IngressMode::Explicit,
+        phase: marshal_core::Phase::Request,
+        client_addr: handler.client_addr,
+        authority: handler.authority.clone(),
+        method: parts.method.clone(),
+        uri: parts.uri.clone(),
+        headers: parts.headers.clone(),
+        body: body_handle,
+        evidence: Evidence::new(),
+    };
+
+    let outcome = handler.chain.evaluate(&cx).await;
+    if outcome.action == Action::Deny {
+        emit(&handler, &cx, &outcome.reason, Action::Deny, outcome.evidence, None, started).await;
+        return Ok(denial_response(&outcome.reason, &cx));
+    }
+
+    // Transforms run only once the chain has allowed.
+    for transform in &handler.request_transforms {
+        if let Err(e) = transform.apply(&mut cx).await {
+            // A transform that cannot do its job must not be skipped: a request forwarded
+            // without its credential swap would leak the placeholder upstream and fail in a
+            // way that looks like an upstream problem.
+            let reason = Reason::new(transform.name(), "transform_failed", e.to_string());
+            emit(&handler, &cx, &reason, Action::Deny, outcome.evidence, None, started).await;
+            return Ok(denial_response(&reason, &cx));
+        }
+    }
+
+    parts.uri = origin_form(&cx.uri);
+    parts.headers = cx.headers.clone();
     strip_hop_by_hop(&mut parts.headers, is_upgrade);
-    let upstream_req = Request::from_parts(parts, body);
+
+    // A transform may have rewritten a buffered body; if so, send what it produced.
+    let forward_body = match &cx.body {
+        BodyHandle::Buffered(bytes) => {
+            if let Some(len) = parts.headers.get(hyper::header::CONTENT_LENGTH)
+                && len.to_str().ok().and_then(|v| v.parse::<usize>().ok()) != Some(bytes.len())
+            {
+                // A swap changes the byte count; a stale Content-Length would desynchronise
+                // the upstream connection.
+                parts.headers.insert(
+                    hyper::header::CONTENT_LENGTH,
+                    hyper::header::HeaderValue::from(bytes.len()),
+                );
+            }
+            Full::new(bytes.clone()).map_err(|e: std::convert::Infallible| match e {}).boxed()
+        }
+        _ => forward_body,
+    };
+
+    let upstream_req = Request::from_parts(parts, forward_body);
 
     let mut response = {
         let mut sender = sender.lock().await;
@@ -266,6 +317,59 @@ async fn handle_request(
     // `Incoming` straight through: the response streams, and Content-Encoding is untouched
     // because nothing here decodes it.
     Ok(Response::from_parts(parts, body.boxed()))
+}
+
+/// Turn an incoming body into what policy sees plus what gets forwarded.
+///
+/// When buffering is asked for, the body is collected up to the cap. If it exceeds the cap,
+/// policy is told the body is still streaming — so a layer like DLP applies its own
+/// oversize rule rather than silently scanning a truncated prefix — while the bytes already
+/// read are put back in front of the remainder so nothing is lost or reordered.
+async fn materialise(
+    incoming: Incoming,
+    requirement: BodyRequirement,
+) -> Result<(BodyHandle, ProxyBody), MitmError> {
+    let BodyRequirement::Buffered { cap } = requirement else {
+        return Ok((BodyHandle::Streaming, incoming.boxed()));
+    };
+
+    use futures::StreamExt;
+    use http_body_util::BodyStream;
+
+    let mut stream = BodyStream::new(incoming);
+    let mut collected: Vec<hyper::body::Frame<Bytes>> = Vec::new();
+    let mut total = 0usize;
+    let mut overflowed = false;
+
+    while let Some(frame) = stream.next().await {
+        let frame = frame?;
+        if let Some(d) = frame.data_ref() {
+            total += d.len();
+        }
+        collected.push(frame);
+        if total > cap {
+            overflowed = true;
+            break;
+        }
+    }
+
+    if overflowed {
+        let prefix = futures::stream::iter(collected.into_iter().map(Ok));
+        let rejoined = http_body_util::StreamBody::new(prefix.chain(stream));
+        return Ok((BodyHandle::Streaming, BodyExt::boxed(rejoined)));
+    }
+
+    let mut bytes = bytes::BytesMut::with_capacity(total);
+    for frame in &collected {
+        if let Some(d) = frame.data_ref() {
+            bytes.extend_from_slice(d);
+        }
+    }
+    let bytes = bytes.freeze();
+
+    let forward =
+        Full::new(bytes.clone()).map_err(|e: std::convert::Infallible| match e {}).boxed();
+    Ok((BodyHandle::Buffered(bytes), forward))
 }
 
 fn origin_form(uri: &hyper::Uri) -> hyper::Uri {

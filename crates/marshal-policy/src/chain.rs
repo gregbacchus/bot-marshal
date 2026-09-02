@@ -48,10 +48,29 @@ impl Chain {
         self.layers.iter().map(|l| l.name()).collect()
     }
 
+    /// Layers that only ever run on an intercepted request.
+    pub fn request_only_layers(&self) -> Vec<&str> {
+        self.layers.iter().filter(|l| l.needs_request()).map(|l| l.name()).collect()
+    }
+
+    /// The strongest body requirement any layer declares.
+    pub fn body_requirement(&self) -> marshal_core::BodyRequirement {
+        self.layers
+            .iter()
+            .map(|l| l.body_requirement())
+            .fold(marshal_core::BodyRequirement::Streaming, |acc, r| acc.combine(r))
+    }
+
     pub async fn evaluate(&self, cx: &RequestContext) -> Outcome {
         let mut evidence = cx.evidence.clone();
 
         for layer in &self.layers {
+            // A layer that needs a real request has nothing to say about a CONNECT; it will
+            // evaluate once the tunnel is intercepted.
+            if layer.needs_request() && cx.phase == marshal_core::Phase::Connect {
+                continue;
+            }
+
             let started = Instant::now();
             let result = layer.evaluate(cx, &evidence).await;
             let elapsed_us = started.elapsed().as_micros() as u64;

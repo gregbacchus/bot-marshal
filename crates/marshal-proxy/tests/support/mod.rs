@@ -147,6 +147,28 @@ async fn upstream_service(
                 .unwrap())
         }
 
+        // Reports exactly what arrived, so a test can assert on what the *upstream* saw
+        // rather than on what the proxy claims to have sent.
+        "/reflect" => {
+            let auth = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let query = req.uri().query().unwrap_or("").to_owned();
+            let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+            let doc = serde_json::json!({
+                "authorization": auth,
+                "query": query,
+                "body": String::from_utf8_lossy(&body),
+            });
+            Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body(full(serde_json::to_vec(&doc).unwrap()))
+                .unwrap())
+        }
+
         _ => Ok(Response::builder().status(StatusCode::OK).body(full(b"ok".to_vec())).unwrap()),
     }
 }

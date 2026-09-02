@@ -109,6 +109,32 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
             }
         }
 
+        // An unconditional terminal verdict makes everything after it dead config. This is
+        // easy to write by accident: an allowlist with `on_match: allow` reads like "permit
+        // these hosts", but in a short-circuiting chain it also means "and skip every check
+        // that follows". Use `on_match: pass` when later layers should still run.
+        let mut terminal_at: Option<(usize, &str)> = None;
+        for (i, layer) in profile.policy.iter().enumerate() {
+            if let Some((terminal_index, culprit)) = terminal_at {
+                out.push(Diagnostic {
+                    severity: Severity::Warning,
+                    location: format!("{at}.policy[{i}]"),
+                    message: format!(
+                        "`{}` is unreachable for allowed requests: `{culprit}` at policy[{terminal_index}] \
+                         returns a terminal ALLOW on match, which stops the chain. Set that \
+                         layer's `on_match` to `pass` if later layers should still run.",
+                        layer.name()
+                    ),
+                });
+                break;
+            }
+            if let crate::layer::LayerConfig::Allowlist { on_match, .. } = layer
+                && *on_match == crate::layer::Outcome::Allow
+            {
+                terminal_at = Some((i, layer.name()));
+            }
+        }
+
         // Body transforms force the whole response into memory. That is a real behaviour
         // change, not a detail: an SSE or WebSocket response cannot survive it, so the
         // operator should be told rather than discovering it when an agent's stream stalls.
@@ -198,6 +224,51 @@ mod tests {
                 .iter()
                 .any(|d| d.severity == Severity::Error && d.location == "profiles.p.extends")
         );
+    }
+
+    #[test]
+    fn a_terminal_allowlist_makes_later_layers_unreachable() {
+        use crate::layer::{HostSet, LayerConfig, Outcome};
+        let allow_terminal = LayerConfig::Allowlist {
+            allow: HostSet::default(),
+            on_match: Outcome::Allow,
+            on_miss: Outcome::Pass,
+        };
+        let dlp = LayerConfig::Dlp {
+            scan_request: true,
+            scan_response: false,
+            patterns: vec![],
+            on_match: Outcome::Deny,
+            annotate: Default::default(),
+            max_body_bytes: 1024,
+            on_oversize: Default::default(),
+        };
+
+        let bad = cfg_with(Profile {
+            policy: vec![allow_terminal.clone(), dlp.clone()],
+            ..Default::default()
+        });
+        assert!(
+            validate(&bad)
+                .iter()
+                .any(|d| d.location == "profiles.p.policy[1]" && d.message.contains("unreachable")),
+            "{:?}",
+            validate(&bad)
+        );
+
+        // With `on_match: pass` the later layer does run, so there is nothing to warn about.
+        let good = cfg_with(Profile {
+            policy: vec![
+                LayerConfig::Allowlist {
+                    allow: HostSet::default(),
+                    on_match: Outcome::Pass,
+                    on_miss: Outcome::Deny,
+                },
+                dlp,
+            ],
+            ..Default::default()
+        });
+        assert!(!validate(&good).iter().any(|d| d.message.contains("unreachable")));
     }
 
     #[test]

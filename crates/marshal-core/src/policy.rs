@@ -48,6 +48,27 @@ pub trait PolicyLayer: Send + Sync + std::fmt::Debug {
 
     fn cost(&self) -> CostClass;
 
+    /// Whether this layer needs a real request — method, path, headers, body — rather than
+    /// just a destination.
+    ///
+    /// Such a layer is skipped during the `Connect` phase, because it has nothing to judge
+    /// there. It also means the layer only ever runs when TLS is intercepted, which the proxy
+    /// warns about at startup if no CA is configured: a rule that silently never evaluates is
+    /// worse than one that fails loudly.
+    fn needs_request(&self) -> bool {
+        false
+    }
+
+    /// How much of the request body this layer needs materialised.
+    ///
+    /// A layer that scans bodies cannot work on a stream, and the runner uses this to decide
+    /// whether to buffer before evaluating. Declaring it is how a layer says "requests I
+    /// apply to stop streaming", which is a real cost and should be visible in config rather
+    /// than discovered when an upload stalls.
+    fn body_requirement(&self) -> BodyRequirement {
+        BodyRequirement::Streaming
+    }
+
     /// What the chain applies if `evaluate` returns `Err` or exceeds its timeout.
     fn on_error(&self) -> FailureMode {
         FailureMode::default()
@@ -87,6 +108,18 @@ pub enum BodyRequirement {
 impl BodyRequirement {
     pub fn buffers(&self) -> bool {
         matches!(self, BodyRequirement::Buffered { .. })
+    }
+
+    /// Combine two requirements. Buffering wins over streaming, and the larger cap wins:
+    /// if one participant needs 1MiB and another 64KiB, buffering only 64KiB would leave the
+    /// first silently working on a truncated body.
+    pub fn combine(self, other: Self) -> Self {
+        use BodyRequirement::*;
+        match (self, other) {
+            (Streaming, Streaming) => Streaming,
+            (Buffered { cap }, Streaming) | (Streaming, Buffered { cap }) => Buffered { cap },
+            (Buffered { cap: a }, Buffered { cap: b }) => Buffered { cap: a.max(b) },
+        }
     }
 }
 

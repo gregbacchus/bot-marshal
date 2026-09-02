@@ -8,6 +8,7 @@ pub mod audit;
 pub mod error;
 pub mod evidence;
 pub mod policy;
+pub mod redact;
 pub mod request;
 pub mod secret;
 pub mod session;
@@ -19,7 +20,8 @@ pub use evidence::{Evidence, Fact, Flag, LayerOutcome};
 pub use policy::{
     BodyRequirement, CostClass, FailureMode, PolicyLayer, RequestTransform, ResponseTransform,
 };
-pub use request::{Authority, BodyHandle, IngressMode, RequestContext, ResponseParts};
+pub use redact::Redactor;
+pub use request::{Authority, BodyHandle, IngressMode, Phase, RequestContext, ResponseParts};
 pub use secret::{SecretSource, SecretValue};
 pub use session::{ConnInfo, Credential, PeerCred, Resolved, SessionId, SessionResolver};
 pub use verdict::{ApprovalRequest, Decider, Decision, DenyingDecider, Reason, Verdict};

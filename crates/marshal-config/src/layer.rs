@@ -50,6 +50,8 @@ pub enum LayerConfig {
     },
     /// Scans for real credentials trying to leave the boundary.
     Dlp {
+        /// Scan the request body. Bodies must be buffered to be scanned, so this stops
+        /// requests it applies to from streaming.
         #[serde(default)]
         scan_request: bool,
         #[serde(default)]
@@ -60,6 +62,13 @@ pub enum LayerConfig {
         on_match: Outcome,
         #[serde(default)]
         annotate: Annotate,
+        /// Largest body the layer will buffer in order to scan it.
+        #[serde(default = "default_scan_cap")]
+        max_body_bytes: usize,
+        /// What to do with a body too large to scan. Defaults to refusing: an unscanned body
+        /// is exactly where a credential would hide.
+        #[serde(default)]
+        on_oversize: Oversize,
     },
     /// MCP tool-level policy.
     Mcp {
@@ -78,6 +87,19 @@ fn outcome_pass() -> Outcome {
 }
 fn outcome_deny() -> Outcome {
     Outcome::Deny
+}
+
+fn default_scan_cap() -> usize {
+    1024 * 1024
+}
+
+/// What to do with a body larger than the scan cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Oversize {
+    #[default]
+    Deny,
+    PassUnscanned,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

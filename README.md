@@ -63,14 +63,31 @@ relays that survive idle periods, and `Content-Encoding` passes through byte-ide
 are the tests worth having: buffering never surfaces as an error, only as an agent whose
 stream goes quiet and then delivers everything at once.
 
-Without a CA the proxy still runs as a tunnel, sees destinations only, and says so at startup.
+M3 adds boundary secret injection, egress credential scanning, and CEL rules. The agent holds
+only a placeholder; the real credential is swapped in at the boundary and scrubbed from the
+audit trail. The DLP layer catches the inverse case — a real credential the agent obtained
+some other way and is trying to send out, which destination filtering cannot see.
+
+Without a CA the proxy still runs as a tunnel, sees destinations only, and says so at startup
+— including a warning naming any layer that will therefore never evaluate.
+
+### A note on CONNECT
+
+A `CONNECT` names a destination and nothing else. When TLS will be intercepted it is treated
+as a pre-filter: a destination no host-level layer *refused* proceeds to interception, where
+`rules` and `dlp` make the real call on the actual request. Otherwise the natural
+configuration is impossible — a short-circuiting chain means an allowlist with
+`on_match: allow` terminates before those layers run, while `on_match: pass` leaves nothing
+to permit the tunnel. Nothing reaches the upstream until a request-level verdict allows it,
+and in tunnel mode the CONNECT is the only decision point, so `default_action` governs it
+strictly.
 
 | Milestone | Contents | State |
 |---|---|---|
 | M0 | Workspace, core traits, config load + validate, CI | done |
 | M1 | Explicit proxy (CONNECT + SOCKS5), chain runner, denylist + allowlist, upstream guard, audit | done |
 | M2 | TLS MITM, streaming (WebSocket / SSE / chunked) | done |
-| M3 | Secret injection, egress DLP, CEL rules layer | |
+| M3 | Secret injection, egress DLP, CEL rules layer | done |
 | M4 | Session identity, profiles, `marshal run` | |
 | M4.5 | LLM judge layer | |
 | M5 | MCP tool-level policy | |

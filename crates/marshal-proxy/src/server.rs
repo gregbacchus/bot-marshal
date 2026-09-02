@@ -55,6 +55,7 @@ pub struct Server {
     chain: Arc<Chain>,
     guard: Arc<UpstreamGuard>,
     audit: Arc<dyn AuditSink>,
+    request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
 }
 
 impl std::fmt::Debug for Server {
@@ -70,7 +71,17 @@ impl Server {
         guard: Arc<UpstreamGuard>,
         audit: Arc<dyn AuditSink>,
     ) -> Self {
-        Self { config, chain, guard, audit }
+        Self { config, chain, guard, audit, request_transforms: Vec::new() }
+    }
+
+    /// Transforms applied to allowed requests. Only reachable when TLS is intercepted: a
+    /// tunnelled connection has no request to rewrite.
+    pub fn with_request_transforms(
+        mut self,
+        transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
+    ) -> Self {
+        self.request_transforms = transforms;
+        self
     }
 
     /// Bind and serve until cancelled. Returns the bound address via `on_bind`, which lets
@@ -90,6 +101,15 @@ impl Server {
                 "no CA configured: TLS is tunnelled, so policy sees the destination host but \
                  not the request. Run `marshal ca init` to intercept."
             );
+            let skipped = self.chain.request_only_layers();
+            if !skipped.is_empty() {
+                // Silently not enforcing a configured layer is the worst available outcome:
+                // the operator believes the rule is live.
+                tracing::warn!(
+                    layers = ?skipped,
+                    "these layers need a decrypted request and will NEVER evaluate without a CA"
+                );
+            }
         }
         on_bind(local);
 
@@ -151,7 +171,7 @@ impl Server {
             }
         };
 
-        let cx = self.context(peer, authority.clone(), "CONNECT", "");
+        let cx = self.context(peer, authority.clone(), "CONNECT", "", marshal_core::Phase::Connect);
         let outcome = self.chain.evaluate(&cx).await;
 
         if outcome.action == Action::Deny {
@@ -198,8 +218,47 @@ impl Server {
             request.authority.clone(),
             &request.method,
             if request.is_connect { "" } else { &request.path },
+            if request.is_connect {
+                marshal_core::Phase::Connect
+            } else {
+                // Plaintext absolute-form: method and path are visible, so request-level
+                // layers do apply. The body is not parsed on this path, so a layer that
+                // scans bodies applies its own oversize rule rather than seeing nothing.
+                marshal_core::Phase::Request
+            },
         );
-        let outcome = self.chain.evaluate(&cx).await;
+        let mut outcome = self.chain.evaluate(&cx).await;
+
+        // A CONNECT is a pre-filter, not the decision.
+        //
+        // When TLS will be intercepted, a destination that no host-level layer *refused*
+        // proceeds to interception, where the request-level layers make the real call. The
+        // alternative makes the natural configuration impossible: a short-circuiting chain
+        // means an allowlist with `on_match: allow` terminates before `dlp` or `rules` ever
+        // run, while `on_match: pass` leaves nothing to permit the tunnel. Reading `pass` as
+        // "not decided yet, keep going" is faithful to what it says.
+        //
+        // Default-deny is not weakened: no request is forwarded to the upstream until the
+        // request-level chain allows one. In tunnel mode the CONNECT *is* the only decision
+        // point, so `default_action` governs it strictly.
+        if request.is_connect
+            && outcome.action == Action::Deny
+            && outcome.reason.layer == "default_action"
+            && self.intercepts(&request.authority)
+            && !self.chain.request_only_layers().is_empty()
+        {
+            outcome.action = Action::Allow;
+            outcome.reason = Reason::new(
+                "default_action",
+                "connect_provisional",
+                format!(
+                    "no host-level layer refused `{}`; the decision is deferred to the \
+                     request-level layers {:?} once TLS is intercepted",
+                    request.authority.host,
+                    self.chain.request_only_layers()
+                ),
+            );
+        }
 
         if outcome.action == Action::Deny {
             let _ = httpfront::write_denial(
@@ -237,12 +296,9 @@ impl Server {
             let mut stream = Rewind::new(client.into_inner(), leftover);
             let authority = request.authority.clone();
 
-            let intercept = match &self.config.tls {
-                Some(engine) if self.config.passthrough.matches(&authority.host).is_none() => {
-                    Some(Arc::clone(engine))
-                }
-                _ => None,
-            };
+            let intercept = self
+                .intercepts(&authority)
+                .then(|| Arc::clone(self.config.tls.as_ref().expect("checked by intercepts")));
 
             if let Some(engine) = intercept {
                 // The CONNECT itself is allowed here; each request inside the tunnel is
@@ -257,6 +313,7 @@ impl Server {
                     session: cx.session.clone(),
                     profile: Arc::clone(&self.config.profile),
                     client_addr: peer,
+                    request_transforms: self.request_transforms.clone(),
                 });
 
                 if let Err(e) = mitm::intercept(stream, upstream, engine, handler).await {
@@ -299,17 +356,24 @@ impl Server {
         Ok(())
     }
 
+    /// Whether this destination will have its TLS intercepted.
+    fn intercepts(&self, authority: &Authority) -> bool {
+        self.config.tls.is_some() && self.config.passthrough.matches(&authority.host).is_none()
+    }
+
     fn context(
         &self,
         peer: std::net::SocketAddr,
         authority: Authority,
         method: &str,
         path: &str,
+        phase: marshal_core::Phase,
     ) -> RequestContext {
         RequestContext {
             session: SessionId::unidentified(),
             profile: Arc::clone(&self.config.profile),
             ingress: IngressMode::Explicit,
+            phase,
             client_addr: peer,
             authority,
             method: http::Method::from_bytes(method.as_bytes()).unwrap_or(http::Method::CONNECT),
