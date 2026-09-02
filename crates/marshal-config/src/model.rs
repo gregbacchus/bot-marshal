@@ -1,6 +1,6 @@
 //! The configuration document.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use marshal_core::Decision;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,13 @@ pub struct Config {
     /// Named host sets importable by profiles via `allow.bundles`.
     #[serde(default)]
     pub bundles: BTreeMap<String, crate::layer::HostSet>,
+    /// Names of profiles sourced from a file under `profiles/`, as opposed to defined inline
+    /// in this document. Not part of the YAML schema — populated by `load`, and read by
+    /// `validate` to require that `sessions.unidentified.profile` names a profile defined
+    /// inline: the fallback applied to unattributed traffic is important enough that it
+    /// should be visible in the file someone opens first, not one they have to go find.
+    #[serde(skip)]
+    pub file_backed_profiles: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

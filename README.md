@@ -223,6 +223,16 @@ not to need the split (that's what `config/marshal.yaml` in this repo does). The
 treats that as a load error rather than picking a winner, since silently preferring one over
 the other is exactly the ambiguity this convention exists to avoid.
 
+One profile is required to be inline regardless: whatever `sessions.unidentified.profile`
+names — the fallback applied to every request nobody could attribute — must be defined
+directly in the base config, not sourced from `profiles/`. It's the profile that matters most
+to see without having to go looking, and `marshal config check` rejects it otherwise:
+
+```
+error: sessions.unidentified.profile: `coding-agent` is defined in profiles/, but the
+fallback profile for unattributed traffic must be defined inline in the base config
+```
+
 ## Running as a service
 
 The proxy itself, and the agents `marshal run` launches, are two separate concerns that can

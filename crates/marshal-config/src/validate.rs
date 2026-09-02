@@ -271,14 +271,27 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
         }
     }
 
-    if let Some(u) = &cfg.sessions.unidentified
-        && !cfg.profiles.contains_key(&u.profile)
-    {
-        out.push(Diagnostic {
-            severity: Severity::Error,
-            location: "sessions.unidentified.profile".into(),
-            message: format!("unknown profile `{}`", u.profile),
-        });
+    if let Some(u) = &cfg.sessions.unidentified {
+        if !cfg.profiles.contains_key(&u.profile) {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: "sessions.unidentified.profile".into(),
+                message: format!("unknown profile `{}`", u.profile),
+            });
+        } else if cfg.file_backed_profiles.contains(&u.profile) {
+            // The fallback applied to every request nobody could attribute is significant
+            // enough that it belongs in the file someone opens first, not one they have to
+            // go find under profiles/.
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: "sessions.unidentified.profile".into(),
+                message: format!(
+                    "`{}` is defined in profiles/, but the fallback profile for \
+                     unattributed traffic must be defined inline in the base config",
+                    u.profile
+                ),
+            });
+        }
     }
 
     out
@@ -287,7 +300,7 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Profile;
+    use crate::model::{Profile, Unidentified, UnidentifiedAction};
 
     fn cfg_with(profile: Profile) -> Config {
         let mut cfg = Config::default();
@@ -424,5 +437,22 @@ mod tests {
                 .iter()
                 .any(|d| d.severity == Severity::Warning && d.location == "profiles.p.policy[1]")
         );
+    }
+
+    #[test]
+    fn the_unidentified_fallback_profile_must_be_defined_inline() {
+        let mut cfg = cfg_with(Profile::default());
+        cfg.sessions.unidentified =
+            Some(Unidentified { profile: "p".into(), action: UnidentifiedAction::default() });
+
+        // Defined inline (as `cfg_with` always does): fine.
+        assert!(!validate(&cfg).iter().any(|d| d.severity == Severity::Error));
+
+        // The same name, but sourced from profiles/ instead: rejected, even though the
+        // profile itself is perfectly valid and referenced correctly.
+        cfg.file_backed_profiles.insert("p".into());
+        assert!(validate(&cfg).iter().any(
+            |d| d.severity == Severity::Error && d.location == "sessions.unidentified.profile"
+        ));
     }
 }

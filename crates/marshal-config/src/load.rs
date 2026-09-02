@@ -56,6 +56,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Config, LoadError> {
         if cfg.profiles.insert(name.clone(), profile).is_some() {
             return Err(LoadError::DuplicateProfile { name, path });
         }
+        cfg.file_backed_profiles.insert(name);
     }
     for (name, path, bundle) in load_dir::<HostSet>(&dir.join("bundles"))? {
         if cfg.bundles.insert(name.clone(), bundle).is_some() {
@@ -129,6 +130,17 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn file_backed_profiles_are_recorded_as_such() {
+        let dir = TempDir::new("profiles-tracked");
+        dir.write("config.yaml", "tls: {}\nprofiles:\n  base:\n    default_action: deny\n");
+        dir.write("profiles/coding-agent.yaml", "default_action: deny\n");
+
+        let cfg = load(dir.0.join("config.yaml")).unwrap();
+        assert!(cfg.file_backed_profiles.contains("coding-agent"));
+        assert!(!cfg.file_backed_profiles.contains("base"));
     }
 
     #[test]
