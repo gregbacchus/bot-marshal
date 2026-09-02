@@ -148,6 +148,11 @@ be back to the coarse filtering this project exists to improve on. `deploy/nftab
 ships the ruleset, including the `filter` chain that makes the redirect binding rather than
 advisory — without it, an agent using a non-standard port or QUIC walks straight past.
 
+`SO_ORIGINAL_DST` is exercised against a real kernel redirect, not just its parsing — an
+unprivileged network namespace (`unshare --net --map-root-user`) grants full `CAP_NET_ADMIN`
+*inside* itself with no root needed, the same mechanism `--isolation netns` already relies on,
+and a loopback-only redirect proves the identical code path a deployed ruleset uses.
+
 **DNS** mode resolves every name to the proxy so unconfigured workloads arrive on their own.
 Static records beat passthrough, which beats interception; TTLs are short so a stale answer
 cannot outlive a policy change. `examples/docker/` shows two containers captured with no
