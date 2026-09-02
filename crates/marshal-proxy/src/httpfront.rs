@@ -38,6 +38,8 @@ pub struct ProxyRequest {
     /// upstream without us having re-serialised (and possibly altered) it.
     pub raw_head: Vec<u8>,
     pub is_connect: bool,
+    /// `Proxy-Authorization`, when present. Selects a session.
+    pub proxy_auth: Option<marshal_core::Credential>,
 }
 
 /// Read and parse the request head. `first_byte` is the byte already consumed by the sniffer.
@@ -72,10 +74,16 @@ where
     let method = parts.next().ok_or(HttpError::MalformedRequestLine)?.to_owned();
     let target = parts.next().ok_or(HttpError::MalformedRequestLine)?;
 
-    let host_header = lines.find_map(|l| {
-        let (k, v) = l.split_once(':')?;
-        k.trim().eq_ignore_ascii_case("host").then(|| v.trim().to_owned())
-    });
+    let headers: Vec<(&str, &str)> =
+        lines.filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim(), v.trim()))).collect();
+
+    let host_header =
+        headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("host")).map(|(_, v)| (*v).to_owned());
+
+    let proxy_auth = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("proxy-authorization"))
+        .and_then(|(_, v)| parse_basic(v));
 
     let is_connect = method.eq_ignore_ascii_case("CONNECT");
 
@@ -101,7 +109,46 @@ where
         (parse_authority(&host, 80)?, target.to_owned())
     };
 
-    Ok(ProxyRequest { authority, method, path, raw_head: head, is_connect })
+    Ok(ProxyRequest { authority, method, path, raw_head: head, is_connect, proxy_auth })
+}
+
+/// Parse `Proxy-Authorization: Basic <base64(user:pass)>`.
+///
+/// Only Basic is supported. Digest buys nothing here: the credential is client-asserted
+/// either way, and the connection to the proxy is local or already trusted.
+fn parse_basic(value: &str) -> Option<marshal_core::Credential> {
+    let encoded = value.strip_prefix("Basic ").or_else(|| value.strip_prefix("basic "))?;
+    let decoded = base64_decode(encoded.trim())?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (user, password) = text.split_once(':')?;
+    Some(marshal_core::Credential { user: user.to_owned(), password: password.to_owned() })
+}
+
+/// Minimal standard-alphabet base64 decoder. Pulling in a dependency for one header would be
+/// more surface than the twenty lines it replaces.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for b in input.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            b'\r' | b'\n' => continue,
+            _ => return None,
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn parse_authority(s: &str, default_port: u16) -> Result<Authority, HttpError> {
@@ -197,6 +244,31 @@ mod tests {
             b[0]
         };
         read_request(&mut r, first).await
+    }
+
+    #[test]
+    fn decodes_basic_credentials() {
+        // "agent-a:hunter2"
+        let cred = parse_basic("Basic YWdlbnQtYTpodW50ZXIy").unwrap();
+        assert_eq!(cred.user, "agent-a");
+        assert_eq!(cred.password, "hunter2");
+
+        assert!(parse_basic("Bearer xyz").is_none());
+        assert!(parse_basic("Basic !!!not-base64!!!").is_none());
+        // No colon means no credential, rather than a user with an empty password.
+        assert!(parse_basic("Basic bm9jb2xvbg==").is_none());
+    }
+
+    #[tokio::test]
+    async fn parses_proxy_authorization_from_the_head() {
+        let r = parse(
+            b"CONNECT api.github.com:443 HTTP/1.1\r\n\
+              Proxy-Authorization: Basic YWdlbnQtYTpodW50ZXIy\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let cred = r.proxy_auth.expect("credential parsed");
+        assert_eq!(cred.user, "agent-a");
     }
 
     #[tokio::test]

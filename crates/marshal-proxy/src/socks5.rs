@@ -37,12 +37,22 @@ pub enum Reply {
     AddressTypeNotSupported = 0x08,
 }
 
-/// Complete the greeting and read the CONNECT request, returning the requested authority.
+/// What the handshake established.
+#[derive(Debug)]
+pub struct Socks5Request {
+    pub authority: Authority,
+    /// Present when the client authenticated with username/password (RFC 1929). Used to
+    /// select a session, so a single port can serve several agents.
+    pub credential: Option<marshal_core::Credential>,
+}
+
+/// Complete the greeting and read the CONNECT request.
 ///
-/// Authentication is `NO AUTH` for now. Username/password lands with session identity in M4,
-/// where the credential actually selects a profile; offering it earlier would imply an
-/// identity guarantee that nothing downstream honours yet.
-pub async fn handshake<S>(stream: &mut S) -> Result<Authority, Socks5Error>
+/// Both `NO AUTH` and username/password are offered. Username/password is preferred when the
+/// client supports it, because a credential selects a profile — but it is not required, since
+/// stronger identity (uid, source address) is available without the client's cooperation and
+/// a credential the agent holds is the weakest of the three anyway.
+pub async fn handshake<S>(stream: &mut S) -> Result<Socks5Request, Socks5Error>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -52,11 +62,16 @@ where
     let mut methods = vec![0u8; nmethods];
     stream.read_exact(&mut methods).await?;
 
-    if !methods.contains(&0x00) {
+    let credential = if methods.contains(&0x02) {
+        stream.write_all(&[0x05, 0x02]).await?;
+        Some(read_userpass(stream).await?)
+    } else if methods.contains(&0x00) {
+        stream.write_all(&[0x05, 0x00]).await?;
+        None
+    } else {
         stream.write_all(&[0x05, 0xff]).await?;
         return Err(Socks5Error::NoAcceptableAuth);
-    }
-    stream.write_all(&[0x05, 0x00]).await?;
+    };
 
     // Request: ver(1) cmd(1) rsv(1) atyp(1) addr(..) port(2)
     let mut head = [0u8; 4];
@@ -93,7 +108,35 @@ where
     };
 
     let port = stream.read_u16().await?;
-    Ok(Authority { host, port })
+    Ok(Socks5Request { authority: Authority { host, port }, credential })
+}
+
+/// RFC 1929 username/password sub-negotiation.
+///
+/// Always answered with success: the credential selects a session, and an unknown one simply
+/// fails to match any resolver and lands in the unidentified fallback. Rejecting here would
+/// turn a profile-selection miss into an opaque transport error.
+async fn read_userpass<S>(stream: &mut S) -> Result<marshal_core::Credential, Socks5Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let version = stream.read_u8().await?;
+    if version != 0x01 {
+        return Err(Socks5Error::Malformed);
+    }
+    let ulen = stream.read_u8().await? as usize;
+    let mut user = vec![0u8; ulen];
+    stream.read_exact(&mut user).await?;
+    let plen = stream.read_u8().await? as usize;
+    let mut pass = vec![0u8; plen];
+    stream.read_exact(&mut pass).await?;
+
+    stream.write_all(&[0x01, 0x00]).await?;
+
+    Ok(marshal_core::Credential {
+        user: String::from_utf8(user).map_err(|_| Socks5Error::Malformed)?,
+        password: String::from_utf8(pass).map_err(|_| Socks5Error::Malformed)?,
+    })
 }
 
 /// Send a reply. The bound address is reported as `0.0.0.0:0`: the real upstream address is
@@ -113,7 +156,7 @@ mod tests {
     use super::*;
     use tokio::io::duplex;
 
-    async fn drive(client_bytes: &[u8]) -> (Result<Authority, Socks5Error>, Vec<u8>) {
+    async fn drive(client_bytes: &[u8]) -> (Result<Socks5Request, Socks5Error>, Vec<u8>) {
         let (mut client, mut server) = duplex(4096);
         client.write_all(client_bytes).await.unwrap();
         let result = handshake(&mut server).await;
@@ -133,8 +176,9 @@ mod tests {
 
         let (auth, replied) = drive(&req).await;
         let auth = auth.unwrap();
-        assert_eq!(auth.host, "example.com");
-        assert_eq!(auth.port, 443);
+        assert_eq!(auth.authority.host, "example.com");
+        assert_eq!(auth.authority.port, 443);
+        assert!(auth.credential.is_none());
         assert_eq!(&replied[..2], &[0x05, 0x00], "method selection must be NO_AUTH");
     }
 
@@ -143,7 +187,7 @@ mod tests {
         let mut req = vec![0x01, 0x00];
         req.extend([0x05, 0x01, 0x00, 0x01, 140, 82, 121, 4]);
         req.extend(443u16.to_be_bytes());
-        assert_eq!(drive(&req).await.0.unwrap().host, "140.82.121.4");
+        assert_eq!(drive(&req).await.0.unwrap().authority.host, "140.82.121.4");
     }
 
     #[tokio::test]
@@ -158,10 +202,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_when_no_auth_is_not_offered() {
+    async fn refuses_when_no_supported_method_is_offered() {
         // Offers only GSSAPI (0x01).
         let (r, replied) = drive(&[0x01, 0x01]).await;
         assert!(matches!(r, Err(Socks5Error::NoAcceptableAuth)));
         assert_eq!(&replied[..2], &[0x05, 0xff]);
+    }
+
+    #[tokio::test]
+    async fn username_password_selects_a_credential() {
+        // methods: NO_AUTH and USER/PASS; the server must prefer the one that identifies.
+        let mut req = vec![0x02, 0x00, 0x02];
+        req.extend([0x01, 7]);
+        req.extend(b"agent-a");
+        req.push(7);
+        req.extend(b"hunter2");
+        req.extend([0x05, 0x01, 0x00, 0x03, 11]);
+        req.extend(b"example.com");
+        req.extend(443u16.to_be_bytes());
+
+        let (r, replied) = drive(&req).await;
+        let r = r.unwrap();
+        assert_eq!(&replied[..2], &[0x05, 0x02], "user/pass must be selected when offered");
+        let cred = r.credential.expect("credential parsed");
+        assert_eq!(cred.user, "agent-a");
+        assert_eq!(cred.password, "hunter2");
     }
 }

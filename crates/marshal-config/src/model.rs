@@ -256,9 +256,83 @@ pub struct HeaderAllowlist {
 pub struct Sessions {
     /// Tried in order; first match wins.
     #[serde(default)]
-    pub resolvers: Vec<serde_json::Value>,
+    pub resolvers: Vec<ResolverConfig>,
     #[serde(default)]
     pub unidentified: Option<Unidentified>,
+}
+
+/// A session resolver. Ordering is significant, and so is strength: `peer_cred` uid is
+/// kernel-supplied, `source_ip` is as trustworthy as the network, and `proxy_auth` is
+/// client-asserted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResolverConfig {
+    ProxyAuth {
+        #[serde(default)]
+        credentials: Vec<ProxyAuthEntry>,
+    },
+    SourceIp {
+        #[serde(default)]
+        map: Vec<SourceIpEntry>,
+    },
+    PeerCred {
+        /// Resolve pid/cgroup as well as uid. Costs a `/proc` walk and is racy for
+        /// short-lived processes, so uid-only matching does not need it.
+        #[serde(default)]
+        enrich: bool,
+        #[serde(default)]
+        map: Vec<PeerCredEntry>,
+    },
+    /// Sessions created by `marshal run`, identified by the cgroup scope it names.
+    Launched,
+    /// Identity by which listener accepted. Needs multi-listener binding, which is M6.
+    ListenerPort {
+        #[serde(default)]
+        map: Vec<serde_json::Value>,
+    },
+}
+
+impl ResolverConfig {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ResolverConfig::ProxyAuth { .. } => "proxy_auth",
+            ResolverConfig::SourceIp { .. } => "source_ip",
+            ResolverConfig::PeerCred { .. } => "peer_cred",
+            ResolverConfig::Launched => "launched",
+            ResolverConfig::ListenerPort { .. } => "listener_port",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyAuthEntry {
+    pub user: String,
+    /// Read from the environment rather than written in the file, so the config can be
+    /// committed.
+    pub password_env: String,
+    pub session: String,
+    pub profile: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceIpEntry {
+    pub cidr: String,
+    pub session: String,
+    pub profile: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerCredEntry {
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// Glob over the cgroup path. Requires `enrich: true`.
+    #[serde(default)]
+    pub cgroup: Option<String>,
+    pub session: String,
+    pub profile: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

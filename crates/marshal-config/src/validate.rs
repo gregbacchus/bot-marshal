@@ -171,6 +171,44 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
         }
     }
 
+    // Resolvers must name profiles that exist, or a matching connection resolves to nothing
+    // and falls through to the fallback — silently, and under the wrong policy.
+    for (i, resolver) in cfg.sessions.resolvers.iter().enumerate() {
+        let at = format!("sessions.resolvers[{i}]");
+        let referenced: Vec<&String> = match resolver {
+            crate::model::ResolverConfig::ProxyAuth { credentials } => {
+                credentials.iter().map(|c| &c.profile).collect()
+            }
+            crate::model::ResolverConfig::SourceIp { map } => {
+                map.iter().map(|e| &e.profile).collect()
+            }
+            crate::model::ResolverConfig::PeerCred { enrich, map } => {
+                if !*enrich && map.iter().any(|e| e.cgroup.is_some()) {
+                    out.push(Diagnostic {
+                        severity: Severity::Error,
+                        location: format!("{at}.enrich"),
+                        message: "this resolver matches on `cgroup` but has `enrich: false`, \
+                                  so the cgroup is never read and those entries can never \
+                                  match"
+                            .into(),
+                    });
+                }
+                map.iter().map(|e| &e.profile).collect()
+            }
+            crate::model::ResolverConfig::Launched => Vec::new(),
+            crate::model::ResolverConfig::ListenerPort { .. } => Vec::new(),
+        };
+        for profile in referenced {
+            if !cfg.profiles.contains_key(profile) {
+                out.push(Diagnostic {
+                    severity: Severity::Error,
+                    location: at.clone(),
+                    message: format!("names unknown profile `{profile}`"),
+                });
+            }
+        }
+    }
+
     if let Some(u) = &cfg.sessions.unidentified
         && !cfg.profiles.contains_key(&u.profile)
     {

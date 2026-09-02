@@ -5,6 +5,8 @@
 //! is legible to the agent, that a CONNECT cannot be laundered into a different host — all
 //! live in the interaction between parsing, policy, and the network.
 
+mod support;
+
 use std::sync::Arc;
 
 use marshal_audit::JsonSink;
@@ -12,6 +14,7 @@ use marshal_config::model::Config;
 use marshal_core::{AuditSink, DenyingDecider};
 use marshal_policy::build_chain;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
+use support::{no_resolvers, single_profile_chains, start_upstream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -37,13 +40,14 @@ async fn start_proxy_with_guard(
     let server = Server::new(
         ServerConfig {
             listen: "127.0.0.1:0".into(),
-            profile: Arc::from(profile),
+            unix_socket: None,
             // No CA: these tests cover the tunnel path, where policy sees only the
             // destination. Interception is covered in tests/mitm.rs.
             tls: None,
             passthrough: marshal_policy::HostMatcher::default(),
         },
-        Arc::new(chain),
+        single_profile_chains(chain),
+        no_resolvers(),
         Arc::new(guard),
         audit,
     );
@@ -58,26 +62,6 @@ async fn start_proxy_with_guard(
             .await;
     });
     rx.await.expect("server bound")
-}
-
-/// A TCP server that greets and echoes, standing in for an upstream.
-async fn start_upstream(greeting: &'static [u8]) -> std::net::SocketAddr {
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut s, _)) = l.accept().await {
-            tokio::spawn(async move {
-                let _ = s.write_all(greeting).await;
-                let mut buf = [0u8; 1024];
-                while let Ok(n) = s.read(&mut buf).await {
-                    if n == 0 || s.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-    });
-    addr
 }
 
 /// Allows the loopback upstreams the tests spin up.

@@ -8,8 +8,10 @@ pub mod httpfront;
 pub mod mitm;
 pub mod rewind;
 pub mod server;
+pub mod sessions;
 pub mod sniff;
 pub mod socks5;
+pub mod stats;
 pub mod tunnel;
 
 pub use guard::{GuardError, UpstreamGuard};

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -44,12 +45,36 @@ enum Command {
     #[command(subcommand)]
     Ca(CaCommand),
 
+    /// Launch an agent so the proxy can identify it.
+    Run {
+        /// Profile the agent runs under.
+        #[arg(long)]
+        profile: String,
+
+        /// How the agent is isolated: `cgroup` (identity by cgroup, inherited by children)
+        /// or `none` (identity by proxy credential).
+        #[arg(long, default_value = "cgroup")]
+        isolation: String,
+
+        /// Proxy address the agent should use.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        proxy: String,
+
+        /// Print the command and environment instead of running anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// The command to launch.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+
     /// Run the proxy.
     Serve {
-        /// Profile to enforce. Session-based profile selection arrives in M4; until then one
-        /// profile applies to every connection.
-        #[arg(long, default_value = "base")]
-        profile: String,
+        /// Fallback profile for connections no resolver attributes. Overrides
+        /// `sessions.unidentified.profile`.
+        #[arg(long)]
+        profile: Option<String>,
 
         /// Override the listen address from the config file.
         #[arg(long)]
@@ -92,6 +117,9 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Config(ConfigCommand::Check) => config_check(&cli.config),
         Command::Ca(cmd) => ca_command(&cli.config, cmd),
+        Command::Run { profile, isolation, proxy, dry_run, command } => {
+            run_command(&cli.config, &profile, &isolation, &proxy, dry_run, &command)
+        }
         Command::Serve { profile, listen, audit_log } => {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
@@ -100,7 +128,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match rt.block_on(serve(&cli.config, &profile, listen, audit_log)) {
+            match rt.block_on(serve(&cli.config, profile, listen, audit_log)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
@@ -113,7 +141,7 @@ fn main() -> ExitCode {
 
 async fn serve(
     config_path: &std::path::Path,
-    profile: &str,
+    profile_override: Option<String>,
     listen: Option<String>,
     audit_log: Option<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -136,13 +164,52 @@ async fn serve(
         anyhow::bail!("configuration has errors; refusing to start");
     }
 
-    let chain = build_chain(&cfg, profile, Arc::new(DenyingDecider))?;
+    // Every profile gets a chain, because which one applies is now decided per connection.
+    // Building them all up front means a broken profile fails at startup rather than when the
+    // first agent that uses it connects.
+    let mut chains: HashMap<Arc<str>, Arc<marshal_policy::Chain>> = HashMap::new();
+    for name in cfg.profiles.keys() {
+        let chain = build_chain(&cfg, name, Arc::new(DenyingDecider))?;
+        chains.insert(Arc::from(name.as_str()), Arc::new(chain));
+    }
+
+    let fallback = profile_override
+        .or_else(|| cfg.sessions.unidentified.as_ref().map(|u| u.profile.clone()))
+        .or_else(|| cfg.profiles.keys().next().cloned())
+        .ok_or_else(|| anyhow::anyhow!("no profiles are defined"))?;
+    anyhow::ensure!(chains.contains_key(fallback.as_str()), "unknown profile `{fallback}`");
+
+    let sessions = Arc::new(build_sessions(&cfg, &fallback)?);
+
     let guard = UpstreamGuard::new(&cfg.upstream.deny_cidrs, cfg.upstream.allow_private)?;
 
-    // Build secret swaps, then resolve them once so the redactor knows the real values
-    // before a single record can be written. Seeding after the first request would leave a
-    // window in which a secret could reach the audit log.
-    let effective = marshal_policy::resolve_profile(&cfg, profile)?;
+    // Interception needs a CA. If none has been created, run as a tunnel and say so rather
+    // than refusing to start — a proxy that sees destinations is still enforcing policy.
+    let (cert_path, key_path) = ca_paths(config_path).unwrap_or_default();
+    let tls = if cert_path.exists() && key_path.exists() {
+        let ca = marshal_tls::CertificateAuthority::load(&cert_path, &key_path)?;
+        let minter = Arc::new(marshal_tls::LeafMinter::new(
+            Arc::new(ca),
+            cfg.tls.cert_cache_size,
+            cfg.tls.leaf_expiry_hours,
+        ));
+        let mut extra_roots = Vec::new();
+        for path in &cfg.tls.upstream_ca_certs {
+            let path = expand_tilde(path);
+            extra_roots.push(std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
+            })?);
+        }
+        Some(Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(minter, &extra_roots)?))
+    } else {
+        None
+    };
+
+    let passthrough = marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?;
+
+    // Secret swaps are built from the fallback profile. Per-profile transforms need the
+    // transform set to be selected alongside the chain, which is a wider change than M4.
+    let effective = marshal_policy::resolve_profile(&cfg, &fallback)?;
     let injector = build_injector(&effective, &cfg)?;
     let resolved = injector.resolve_all().await;
     let secret_names: Vec<String> = resolved.iter().map(|(n, _)| n.clone()).collect();
@@ -169,33 +236,15 @@ async fn serve(
     let audit: Arc<dyn AuditSink> =
         Arc::new(MultiSink::new(vec![json, Arc::new(TracingSink::redacting(tracing_redactor))]));
 
-    // Interception needs a CA. If none has been created, run as a tunnel and say so rather
-    // than refusing to start — a proxy that sees destinations is still enforcing policy.
-    let (cert_path, key_path) = ca_paths(config_path).unwrap_or_default();
-    let tls = if cert_path.exists() && key_path.exists() {
-        let ca = marshal_tls::CertificateAuthority::load(&cert_path, &key_path)?;
-        let minter = Arc::new(marshal_tls::LeafMinter::new(
-            Arc::new(ca),
-            cfg.tls.cert_cache_size,
-            cfg.tls.leaf_expiry_hours,
-        ));
-        let mut extra_roots = Vec::new();
-        for path in &cfg.tls.upstream_ca_certs {
-            let path = expand_tilde(path);
-            extra_roots.push(std::fs::read_to_string(&path).map_err(|e| {
-                anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
-            })?);
-        }
-        Some(Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(minter, &extra_roots)?))
-    } else {
-        None
-    };
-
-    let passthrough = marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?;
-
     let listen = listen
         .or_else(|| cfg.listeners.explicit.as_ref().map(|e| e.listen.clone()))
         .unwrap_or_else(|| "127.0.0.1:8080".to_owned());
+    let unix_socket = cfg
+        .listeners
+        .explicit
+        .as_ref()
+        .and_then(|e| e.unix_socket.as_ref())
+        .map(|p| expand_tilde(p));
 
     let mut transforms: Vec<Arc<dyn marshal_core::RequestTransform>> = Vec::new();
     if !injector.is_empty() {
@@ -203,8 +252,9 @@ async fn serve(
     }
 
     let server = Server::new(
-        ServerConfig { listen, profile: Arc::from(profile), tls, passthrough },
-        Arc::new(chain),
+        ServerConfig { listen, unix_socket, tls, passthrough },
+        chains,
+        sessions,
         Arc::new(guard),
         audit,
     )
@@ -215,6 +265,171 @@ async fn serve(
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutting down");
             Ok(())
+        }
+    }
+}
+
+/// Build the resolver chain from config.
+fn build_sessions(
+    cfg: &marshal_config::model::Config,
+    fallback: &str,
+) -> anyhow::Result<marshal_proxy::sessions::SessionRegistry> {
+    use marshal_config::model::ResolverConfig;
+    use marshal_proxy::sessions::{
+        LaunchedResolver, PeerCredResolver, ProxyAuthResolver, SessionRegistry, SourceIpResolver,
+    };
+
+    let mut resolvers: Vec<Arc<dyn marshal_core::SessionResolver>> = Vec::new();
+    let mut enrich = false;
+
+    for resolver in &cfg.sessions.resolvers {
+        match resolver {
+            ResolverConfig::ProxyAuth { credentials } => {
+                let mut entries = Vec::new();
+                for c in credentials {
+                    // A credential whose environment variable is unset is a configuration
+                    // error, not an entry to skip: skipping it would silently downgrade that
+                    // agent to the fallback profile.
+                    let password = std::env::var(&c.password_env).map_err(|_| {
+                        anyhow::anyhow!(
+                            "sessions.resolvers: `{}` is not set, so the credential for `{}` \
+                             cannot be built",
+                            c.password_env,
+                            c.user
+                        )
+                    })?;
+                    entries.push((c.user.clone(), password, c.session.clone(), c.profile.clone()));
+                }
+                let r = ProxyAuthResolver::new(entries);
+                if !r.is_empty() {
+                    resolvers.push(Arc::new(r));
+                }
+            }
+            ResolverConfig::SourceIp { map } => {
+                resolvers.push(Arc::new(SourceIpResolver::new(
+                    map.iter().map(|e| (e.cidr.clone(), e.session.clone(), e.profile.clone())),
+                )?));
+            }
+            ResolverConfig::PeerCred { enrich: e, map } => {
+                enrich |= *e;
+                let uids = map
+                    .iter()
+                    .filter_map(|m| m.uid.map(|u| (u, m.session.clone(), m.profile.clone())));
+                let cgroups = map.iter().filter_map(|m| {
+                    m.cgroup.clone().map(|c| (c, m.session.clone(), m.profile.clone()))
+                });
+                resolvers.push(Arc::new(PeerCredResolver::new(uids, cgroups)?));
+            }
+            ResolverConfig::Launched => {
+                // The launcher's identity lives in the cgroup name, so this resolver only
+                // works with enrichment on.
+                enrich = true;
+                resolvers.push(Arc::new(LaunchedResolver::new(cfg.profiles.keys().cloned())));
+            }
+            ResolverConfig::ListenerPort { .. } => {
+                anyhow::bail!(
+                    "the `listener_port` resolver needs multi-listener binding, which is not \
+                     implemented yet. Remove it rather than leaving a resolver configured \
+                     that never matches."
+                );
+            }
+        }
+    }
+
+    let deny_unidentified = matches!(
+        cfg.sessions.unidentified.as_ref().map(|u| u.action),
+        Some(marshal_config::model::UnidentifiedAction::Deny)
+    );
+
+    Ok(SessionRegistry::new(resolvers, fallback, deny_unidentified, enrich))
+}
+
+/// `marshal run`: launch an agent under a profile.
+fn run_command(
+    config_path: &std::path::Path,
+    profile: &str,
+    isolation: &str,
+    proxy: &str,
+    dry_run: bool,
+    command: &[String],
+) -> ExitCode {
+    let isolation: marshal_launch::Isolation = match isolation.parse() {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let cfg = match marshal_config::load(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !cfg.profiles.contains_key(profile) {
+        eprintln!(
+            "error: unknown profile `{profile}`; {} is configured with: {}",
+            config_path.display(),
+            cfg.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+        return ExitCode::FAILURE;
+    }
+
+    if isolation == marshal_launch::Isolation::Cgroup && !marshal_launch::systemd_available() {
+        eprintln!(
+            "error: `--isolation cgroup` needs systemd-run, which is not available here. Use \
+             `--isolation none` to launch with proxy environment variables only, accepting \
+             that identity then rests on a credential the agent holds."
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let (cert_path, _) = ca_paths(config_path).unwrap_or_default();
+    let endpoint = marshal_launch::ProxyEndpoint {
+        url: proxy.to_owned(),
+        ca_cert: cert_path.exists().then_some(cert_path),
+        credential: None,
+    };
+
+    let id = std::process::id();
+    let mut cmd = match marshal_launch::build_command(isolation, profile, id, &endpoint, command) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if dry_run {
+        println!("scope:   {}", marshal_launch::scope_name(profile, id));
+        println!(
+            "command: {} {:?}",
+            cmd.get_program().to_string_lossy(),
+            cmd.get_args().collect::<Vec<_>>()
+        );
+        for (k, v) in marshal_launch::proxy_env(&endpoint) {
+            println!("env:     {k}={v}");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    tracing::info!(
+        profile,
+        scope = %marshal_launch::scope_name(profile, id),
+        "launching agent"
+    );
+
+    match cmd.status() {
+        Ok(status) => {
+            // Propagate the agent's exit code: `marshal run` should be transparent to
+            // whatever launched it.
+            ExitCode::from(status.code().unwrap_or(1) as u8)
+        }
+        Err(e) => {
+            eprintln!("error: launching {}: {e}", cmd.get_program().to_string_lossy());
+            ExitCode::FAILURE
         }
     }
 }
@@ -243,7 +458,7 @@ fn config_check(path: &std::path::Path) -> ExitCode {
     }
 
     if errors > 0 {
-        eprintln!("\n{} error(s), {warnings} warning(s)", errors);
+        eprintln!("\n{errors} error(s), {warnings} warning(s)");
         return ExitCode::FAILURE;
     }
 

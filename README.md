@@ -71,6 +71,45 @@ some other way and is trying to send out, which destination filtering cannot see
 Without a CA the proxy still runs as a tunnel, sees destinations only, and says so at startup
 — including a warning naming any layer that will therefore never evaluate.
 
+## Identity
+
+Which policy applies depends on *which agent* is connecting, and identity is derived from the
+connection rather than asserted by the client — transparent and DNS ingress give a client no
+way to present a credential. Resolvers are tried in order, and they are not equal in strength:
+
+| resolver | strength | limitation |
+|---|---|---|
+| `peer_cred` uid | kernel-supplied, unspoofable | only separates agents running as different users |
+| `launched` | cgroup naming from `marshal run`, inherited by child processes | a process can move itself between delegated cgroups |
+| `source_ip` | as trustworthy as the network | collapses when two agents share a namespace |
+| `proxy_auth` | client-asserted | an agent that can read another token can pick another profile |
+
+Anything unresolved gets a synthetic session, the most restrictive profile, and
+`attributed: false` in every audit record — never a silent inheritance of a permissive one.
+
+The Unix listener exists for `SO_PEERCRED`, which is the only same-host identity that is both
+unspoofable and free of a lookup race.
+
+### Launching an agent
+
+```bash
+marshal run --profile coding-agent -- claude
+```
+
+This places the agent in a transient systemd scope named `marshal-coding-agent-<id>.scope`
+and sets the proxy and CA environment for every runtime that consults its own trust store.
+The naming convention *is* the registration: the `launched` resolver reads the profile back
+out of the cgroup, so there is no control socket and nothing to get out of sync if the proxy
+restarts. Because cgroups are inherited, the `git`, `npm` and `curl` processes the agent
+spawns — which is where most of its egress actually comes from — are identified too.
+
+That gives distinct sessions for agents running as the *same* uid, which uid alone cannot do.
+
+`--isolation netns` is deliberately absent rather than half-implemented. It is the only option
+that prevents bypass rather than merely identifying traffic, but doing it unprivileged needs a
+forwarder inside the namespace; a flag that quietly did something weaker would be worse than
+no flag. Use a container with its own address and a `source_ip` resolver for that today.
+
 ### A note on CONNECT
 
 A `CONNECT` names a destination and nothing else. When TLS will be intercepted it is treated
@@ -88,7 +127,7 @@ strictly.
 | M1 | Explicit proxy (CONNECT + SOCKS5), chain runner, denylist + allowlist, upstream guard, audit | done |
 | M2 | TLS MITM, streaming (WebSocket / SSE / chunked) | done |
 | M3 | Secret injection, egress DLP, CEL rules layer | done |
-| M4 | Session identity, profiles, `marshal run` | |
+| M4 | Session identity, profiles, `marshal run` | done |
 | M4.5 | LLM judge layer | |
 | M5 | MCP tool-level policy | |
 | M6 | Transparent (nftables) and DNS interception | |

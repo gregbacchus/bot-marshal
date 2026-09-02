@@ -66,11 +66,14 @@ profiles:
         deny:
           domains: ["*.onion"]
 
+      # `pass`, not `allow`: being on the allowlist is necessary but not sufficient here, so
+      # the dlp and rules layers below still get to run. `on_match: allow` would terminate
+      # the chain and silently skip them.
       - layer: allowlist
         allow:
           bundles: [github, npm, pypi, crates-io]
-        on_match: allow
-        on_miss: pass
+        on_match: pass
+        on_miss: deny
 
       - layer: rules                  # CEL over the request and accumulated evidence
         expressions:
@@ -139,10 +142,33 @@ profiles:
           patterns: ["github-pat"]
 
 sessions:
-  # Tried in order; first match wins. Identity is derived from the connection, never
-  # asserted by the client — transparent and DNS ingress give the client no way to present
-  # a credential.
+  # Tried in order; first match wins. Identity is derived from the connection, never asserted
+  # by the client — transparent and DNS ingress give the client no way to present a
+  # credential. They are listed strongest-first, which is also the order they should be tried:
+  #
+  #   peer_cred uid  kernel-supplied, unspoofable; only separates agents running as
+  #                  different users
+  #   launched       cgroup naming convention from `marshal run`; inherited by child
+  #                  processes, which is what makes it work for agents that shell out
+  #   source_ip      as trustworthy as the network; holds when each agent owns a namespace
+  #   proxy_auth     client-asserted; an agent that can read another token can pick another
+  #                  profile
   resolvers:
+    - type: peer_cred
+      enrich: true                  # needed for cgroup matching; costs a /proc walk
+      map:
+        - uid: 1001
+          session: "bot-ci"
+          profile: base
+
+    - type: launched                # sessions created by `marshal run`
+
+    - type: source_ip               # containers / netns
+      map:
+        - cidr: "172.20.0.10/32"
+          session: "agent-a"
+          profile: coding-agent
+
     - type: proxy_auth
       credentials:
         - user: "agent-a"
@@ -150,21 +176,8 @@ sessions:
           session: "agent-a"
           profile: coding-agent
 
-    - type: source_ip                 # containers / netns
-      map:
-        - cidr: "172.20.0.10/32"
-          session: "agent-a"
-          profile: coding-agent
-
-    - type: peer_cred                 # kernel-supplied uid; safe to trust for policy
-      enrich: false                   # pid/cgroup/cmdline: racy, audit-only
-      map:
-        - uid: 1001
-          session: "bot-ci"
-          profile: base
-
-    - type: launched                  # registered dynamically by `marshal run`
-
+  # Nothing matched: synthetic session, most restrictive profile, flagged unattributed in
+  # every audit record. Set `action: deny` for a hard-fail posture.
   unidentified:
     profile: base
     action: allow_with_profile

@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 marshal-core.workspace = true
 marshal-config.workspace = true
+marshal-proxy.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

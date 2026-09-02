@@ -113,6 +113,10 @@ pub struct MitmHandler {
     pub client_addr: std::net::SocketAddr,
     /// Applied after the chain allows. Rewriting is not deciding.
     pub request_transforms: Vec<Arc<dyn RequestTransform>>,
+    /// Whether a resolver matched. Recorded so an unattributed request never looks
+    /// attributed in the audit trail.
+    pub attributed: bool,
+    pub resolver: Option<String>,
 }
 
 impl MitmHandler {
@@ -437,8 +441,8 @@ async fn emit(
         .audit
         .emit(AuditRecord {
             session: cx.session.to_string(),
-            attributed: false,
-            resolver: None,
+            attributed: handler.attributed,
+            resolver: handler.resolver.clone(),
             profile: cx.profile.to_string(),
             ingress: "explicit".into(),
             host: cx.authority.host.clone(),

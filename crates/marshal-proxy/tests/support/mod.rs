@@ -245,3 +245,39 @@ pub fn request(target: std::net::SocketAddr, path: &str) -> Request<TestBody> {
         .body(empty())
         .unwrap()
 }
+
+/// Wrap a single chain as the one-profile map the server expects.
+pub fn single_profile_chains(
+    chain: marshal_policy::Chain,
+) -> std::collections::HashMap<Arc<str>, Arc<marshal_policy::Chain>> {
+    let mut map = std::collections::HashMap::new();
+    map.insert(Arc::from("p"), Arc::new(chain));
+    map
+}
+
+/// A registry with no resolvers: everything lands in the unattributed fallback, which is what
+/// the pre-M4 tests assume.
+pub fn no_resolvers() -> Arc<marshal_proxy::sessions::SessionRegistry> {
+    Arc::new(marshal_proxy::sessions::SessionRegistry::new(vec![], "p", false, false))
+}
+
+/// A plain TCP upstream that greets and echoes, for tests that do not need TLS.
+pub async fn start_upstream(greeting: &'static [u8]) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let _ = s.write_all(greeting).await;
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}

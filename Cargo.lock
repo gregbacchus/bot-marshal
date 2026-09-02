@@ -1192,6 +1192,7 @@ version = "0.1.0"
 dependencies = [
  "marshal-config",
  "marshal-core",
+ "marshal-proxy",
  "thiserror",
  "tokio",
  "tracing",
@@ -1223,6 +1224,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "globset",
  "http",
  "http-body-util",
  "hyper",
