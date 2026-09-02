@@ -21,14 +21,13 @@ const REAL_SECRET: &str = "ghp_realsecretvalue0000000000000000000000";
 const PLACEHOLDER: &str = "marshal-github-placeholder";
 
 const ALLOW_LOOPBACK: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
 "#;
 
 /// A source that yields a fixed value, so the test does not depend on process environment.
@@ -86,7 +85,7 @@ async fn harness(yaml: &str, swaps: Vec<SecretSwap>, redact: &[&str]) -> Harness
         Arc::new(TlsEngine::with_extra_roots(minter, std::slice::from_ref(&pki.ca_pem)).unwrap());
 
     let cfg: Config = serde_yaml_ng::from_str(yaml).unwrap();
-    let chain = build_chain(&cfg, "p", Arc::new(DenyingDecider)).unwrap();
+    let chain = build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap();
 
     let buffer = Arc::new(AuditBuffer::default());
     let sink = {
@@ -285,24 +284,23 @@ async fn requests_to_other_hosts_are_not_touched() {
 }
 
 const WITH_DLP: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: pass
-        on_miss: deny
-      - layer: dlp
-        scan_request: true
-        patterns: ["github-pat", "aws-access-key", "private-key-pem"]
-        on_match: deny
-        max_body_bytes: 1024
-        on_oversize: deny
-      - layer: rules
-        expressions:
-          - when: 'req.method in ["GET", "POST"]'
-            verdict: allow
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: pass
+      on_miss: deny
+    - layer: dlp
+      scan_request: true
+      patterns: ["github-pat", "aws-access-key", "private-key-pem"]
+      on_match: deny
+      max_body_bytes: 1024
+      on_oversize: deny
+    - layer: rules
+      expressions:
+        - when: 'req.method in ["GET", "POST"]'
+          verdict: allow
 "#;
 
 #[tokio::test]
@@ -393,20 +391,19 @@ async fn a_body_too_large_to_scan_is_refused_rather_than_passed_unscanned() {
 async fn rules_can_refuse_a_method_inside_an_allowed_host() {
     // The thing a tunnel-only proxy could never do: allow a host but refuse an operation.
     let yaml = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: pass
-        on_miss: deny
-      - layer: rules
-        expressions:
-          - when: 'req.method == "DELETE"'
-            verdict: deny
-          - when: 'req.path.startsWith("/reflect")'
-            verdict: allow
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: pass
+      on_miss: deny
+    - layer: rules
+      expressions:
+        - when: 'req.method == "DELETE"'
+          verdict: deny
+        - when: 'req.path.startsWith("/reflect")'
+          verdict: allow
 "#;
     let h = harness(yaml, vec![], &[]).await;
 
@@ -434,18 +431,17 @@ profiles:
 async fn rules_can_read_evidence_left_by_an_earlier_layer() {
     // The chain's whole justification: a cheap layer records a fact, a later one acts on it.
     let yaml = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: pass
-        on_miss: deny
-      - layer: rules
-        expressions:
-          - when: 'ev.facts["allowlist.matched"] == "127.0.0.0/8"'
-            verdict: allow
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: pass
+      on_miss: deny
+    - layer: rules
+      expressions:
+        - when: 'ev.facts["allowlist.matched"] == "127.0.0.0/8"'
+          verdict: allow
 "#;
     let h = harness(yaml, vec![], &[]).await;
     let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;

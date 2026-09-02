@@ -43,14 +43,13 @@ cat > ~/.config/bot-marshal/config.yaml <<'CFG'
 tls:
   ca_cert: "~/.config/bot-marshal/ca.crt"
   ca_key: "~/.config/bot-marshal/ca.key"
-profiles:
-  base:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { domains: ["api.github.com"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { domains: ["api.github.com"] }
+      on_match: allow
+      on_miss: pass
 CFG
 ```
 
@@ -181,23 +180,34 @@ environment variable substitution inside a path string.
 
 ## Splitting the config into multiple files
 
-One `config.yaml` is fine to start, but a base file plus one file per profile scales better as
-profiles multiply — each is independently readable, reviewable in its own PR, and easy to hand
-to someone who owns just that agent. This is a **fixed convention, not an arbitrary include**:
-every `.yaml`/`.yml` file directly under a `profiles/` directory next to your config file is
-loaded automatically as one profile, keyed by its filename — no line in the base file has to
-name it.
+The base config has exactly one embedded profile, `profile:` — the fallback applied to
+traffic nobody could attribute. It's required, and it's not a name pointing at something
+else; it's the profile's fields directly, so it's impossible to miss in the file someone
+opens first:
 
 ```yaml
-# config.yaml — no profiles: block needed if every profile lives in profiles/
+# config.yaml
 tls:
   ca_cert: "~/.config/bot-marshal/ca.crt"
   ca_key: "~/.config/bot-marshal/ca.key"
+
+profile:
+  default_action: deny
+  policy:
+    - layer: denylist
+      deny: { domains: ["*.onion"] }
 ```
 
+Every other, *named* profile lives one-per-file under a `profiles/` directory next to the
+config file — there is no `profiles:` block in the schema to hold them inline. This is a
+**fixed convention, not an arbitrary include**: the filename is the profile's name, and each
+file's schema is scoped to a profile's own fields, so it structurally cannot also set
+`tls:`/`listeners:`/anything else — `marshal config check` rejects a stray field there as a
+parse error, not a silent no-op.
+
 ```yaml
-# profiles/coding-agent.yaml — the filename is the profile's name; no wrapping
-# `profiles:` / `coding-agent:` keys, just the profile's own fields directly
+# profiles/coding-agent.yaml — the filename is the name; just the profile's fields, no
+# wrapping `profiles:` / `coding-agent:` keys
 default_action: deny
 policy:
   - layer: allowlist
@@ -205,46 +215,57 @@ policy:
     on_match: allow
 ```
 
+A resolver (`sessions.resolvers`) or `marshal run --profile <name>` can only target a *named*
+profile this way — the embedded `profile:` has no name and can't be referenced from
+anywhere. A connection nothing resolves falls through to it automatically, or
+`sessions.unidentified.profile: <name>` can point that fallback at a named one instead:
+
+```yaml
+sessions:
+  unidentified:
+    action: allow_with_profile   # omit `profile:` to use the embedded one (the default);
+                                  # set it to use a named profile instead
+```
+
 A sibling `bundles/` directory works the same way for named allow-lists (`config/bundles/*.yaml`
 in this repo — `github.yaml`, `npm.yaml`, …), which a policy references by name
-(`allow: { bundles: [github] }`) instead of repeating domains in every profile that needs them.
+(`allow: { bundles: [github] }`) instead of repeating domains in every profile that needs them
+— except a bundle *can* also be declared inline under `bundles:` in the base file, since (unlike
+profiles) there's no embedded/named distinction to protect there; a name defined both inline
+and as a file is a load error, not a silent pick.
 
-`profiles_path`/`bundles_path` rename or relocate either directory, if `profiles/`/`bundles/`
-next to the config file doesn't fit — a shared bundle set kept outside this config's own tree,
-for instance:
+A third directory, `transforms/`, holds named *transform* bundles — `request_transforms`/
+`response_transforms` in one file, for a header allowlist or secret swap shared across
+profiles. A profile opts in with `transforms: <name>` instead of embedding
+`request_transforms:`/`response_transforms:` directly (the two are mutually exclusive on one
+profile):
+
+```yaml
+# transforms/default-headers.yaml
+request_transforms:
+  headers:
+    allow: ["accept*", "content-*", "user-agent", "authorization"]
+```
+
+```yaml
+# profiles/llm-agent.yaml
+default_action: deny
+transforms: default-headers
+policy: [...]
+```
+
+`profiles_path`/`bundles_path`/`transforms_path` rename or relocate any of the three
+directories, if the default name next to the config file doesn't fit — a bundle set shared
+outside this config's own tree, for instance:
 
 ```yaml
 profiles_path: "agent-profiles"     # relative to this file, like the default
 bundles_path: "~/.config/bot-marshal/shared-bundles"   # ~/ expands against $HOME
 ```
 
-Relocating the directory doesn't loosen anything: a file found there is still deserialised as
-nothing but a profile or bundle, so the same structural guarantees apply regardless of where
-`profiles_path` points it.
-
-The point of a fixed convention over a generic glob-of-full-documents is that each file's
-*schema* is scoped to what its directory promises: a file under `profiles/` deserialises
-directly as a profile, so it structurally cannot also set `tls:`/`listeners:`/anything else —
-`marshal config check` rejects an unknown field there as a parse error, not a silent no-op. And
-because the filename *is* the key, two profiles can't collide the way two arbitrary files both
-defining `profiles.coding-agent` once could — the filesystem itself won't let two files share a
-name in one directory.
-
-The base file may still define `profiles:`/`bundles:` inline too, for a config small enough
-not to need the split (that's what `config/marshal.yaml` in this repo does). The one thing
-**not** allowed is naming the same profile both inline and as a file — `marshal config check`
-treats that as a load error rather than picking a winner, since silently preferring one over
-the other is exactly the ambiguity this convention exists to avoid.
-
-One profile is required to be inline regardless: whatever `sessions.unidentified.profile`
-names — the fallback applied to every request nobody could attribute — must be defined
-directly in the base config, not sourced from `profiles/`. It's the profile that matters most
-to see without having to go looking, and `marshal config check` rejects it otherwise:
-
-```
-error: sessions.unidentified.profile: `coding-agent` is defined in profiles/, but the
-fallback profile for unattributed traffic must be defined inline in the base config
-```
+Relocating a directory doesn't loosen anything: a file found there is still deserialised as
+nothing but a profile, bundle, or transform bundle, so the same structural guarantees apply
+regardless of where the path points.
 
 ## Running as a service
 
@@ -414,9 +435,8 @@ Turning default-deny on for an existing agent breaks everything it was quietly r
 and that list cannot be known in advance. Warn mode is how it gets discovered:
 
 ```yaml
-profiles:
-  coding-agent:
-    mode: warn      # run the whole chain, record refusals, forward anyway
+# profiles/coding-agent.yaml
+mode: warn      # run the whole chain, record refusals, forward anyway
 ```
 
 Audit records then carry `would_deny: true` while `action` stays `allow`. Filter on it to
@@ -446,7 +466,7 @@ swapping a single pointer. **A reload that fails changes nothing**, and says so:
 
 ```json
 { "status": "rejected",
-  "error": "profiles.base.policy[0]: references unknown bundle `does-not-exist`",
+  "error": "profiles.coding-agent.policy[0]: references unknown bundle `does-not-exist`",
   "note": "the previously loaded configuration is still in effect" }
 ```
 
@@ -541,13 +561,13 @@ sessions:
       map:
         - uid: 1001                   # numeric, or...
           session: "bot-ci"
-          profile: base
+          profile: coding-agent
         - username: "bot-nightly"     # ...a name — resolved to a uid once at config load,
           session: "bot-nightly"      # so matching still happens on the numeric id the
-          profile: base                # kernel reports; exactly as strong as `uid:`
+          profile: coding-agent        # kernel reports; exactly as strong as `uid:`
         - groupname: "agents"         # same idea for `gid:`/`groupname:`
           session: "shared-agents"
-          profile: base
+          profile: llm-agent
 
     - type: launched                  # sessions `marshal run` registers — no map needed,
                                        # the cgroup naming convention *is* the registration
@@ -565,22 +585,23 @@ sessions:
           session: "agent-a"
           profile: coding-agent
 
-  unidentified:                       # nothing matched
-    profile: base                     # the most restrictive profile, never a permissive one
-    action: allow_with_profile        # or `deny`, for a hard-fail posture
+  unidentified:                       # nothing matched — falls through to the base config's
+    action: allow_with_profile        # embedded `profile:` (the most restrictive one) by
+                                       # default; or `deny`, for a hard-fail posture
 ```
 
 `uid`/`username` are mutually exclusive on one entry (same for `gid`/`groupname`) — `marshal
 config check` rejects setting both, and rejects an entry with none of `uid`, `username`,
 `gid`, `groupname`, `cgroup` set, since it could never match anything.
 
-A resolved `session`/`profile` pair doesn't have to be declared anywhere else — the profile
-just has to exist under `profiles:` (see [The policy chain](#the-policy-chain)). Every audit
-record carries the resolved `session`, which `resolver` matched, and `attributed: false` when
-none did — that's what makes `attributed: false` in a record a hard signal to look at, not
-noise: it means every resolver missed and the request got the fallback profile above.
+A resolver can only target a *named* profile — one defined under `profiles/`, like
+`coding-agent` and `llm-agent` above — never the embedded `profile:`, which has no name to
+reference (see [Splitting the config](#splitting-the-config-into-multiple-files)). Every
+audit record carries the resolved `session`, which `resolver` matched, and `attributed:
+false` when none did — that's what makes `attributed: false` in a record a hard signal to
+look at, not noise: it means every resolver missed and the request got the fallback profile.
 
-Anything unresolved gets a synthetic session, the most restrictive profile, and
+Anything unresolved gets a synthetic session, the embedded (most restrictive) profile, and
 `attributed: false` in every audit record — never a silent inheritance of a permissive one.
 
 The Unix listener exists for `SO_PEERCRED`, which is the only same-host identity that is both

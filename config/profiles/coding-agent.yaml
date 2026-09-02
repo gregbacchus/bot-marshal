@@ -1,0 +1,83 @@
+# The intended shape, and not yet runnable: `dlp`, `rules` and `judge` arrive in M3 and
+# M4.5. Starting with this profile fails loudly rather than silently running a chain more
+# permissive than the one written here.
+default_action: deny
+policy:
+  - layer: denylist
+    deny:
+      domains: ["*.onion"]
+
+  # `pass`, not `allow`: being on the allowlist is necessary but not sufficient here, so
+  # the dlp and rules layers below still get to run. `on_match: allow` would terminate
+  # the chain and silently skip them.
+  - layer: allowlist
+    allow:
+      bundles: [github, npm, pypi, crates-io]
+    on_match: pass
+    on_miss: deny
+
+  - layer: rules                  # CEL over the request and accumulated evidence
+    expressions:
+      - when: 'req.method in ["POST", "PATCH", "DELETE"]'
+        verdict: pass
+        annotate:
+          flags: ["WriteOperation"]
+
+  # The inverse of injection: catches a real credential the agent obtained some other
+  # way and is trying to send out. Scanning bodies means requests it applies to stop
+  # streaming, hence the explicit cap and oversize rule.
+  - layer: dlp
+    scan_request: true
+    patterns: ["aws-access-key", "github-pat", "private-key-pem", "openai-key"]
+    on_match: deny
+    max_body_bytes: 1048576
+    on_oversize: deny
+
+  - layer: judge                  # expensive, so it caches and circuit-breaks
+    provider:
+      type: anthropic
+      model: "claude-haiku-4-5-20251001"
+      api_key_env: ANTHROPIC_API_KEY
+    scope:
+      - host: "api.github.com"
+        methods: ["POST", "PATCH", "DELETE"]
+    cache:
+      ttl: "15m"
+      max_entries: 10000
+    timeout: "8s"
+    max_concurrent: 32
+    on_error: deny
+    on_timeout: deny
+    circuit_breaker:
+      consecutive_failures: 5
+      cooldown: "30s"
+    prompt: |
+      Allow only changes to repositories owned by gregbacchus. Deny anything that
+      modifies workflow files, repository secrets, or repository settings.
+
+# Applied on the way out, once the chain has allowed. Rewriting is not deciding, which
+# is why these are not policy layers.
+request_transforms:
+  headers:
+    allow: ["accept*", "content-*", "user-agent", "authorization"]
+  # The agent holds only the placeholder. It can still authenticate to hosts the chain
+  # allows, but the real credential never exists in the agent's process, environment or
+  # filesystem — so compromising the agent no longer costs a rotation.
+  secrets:
+    - name: GITHUB_TOKEN
+      source: { type: env, var: GITHUB_TOKEN }
+      proxy_value: "marshal-github-placeholder"
+      match_headers: ["authorization"]
+      require: true
+      rules: [{ host: "api.github.com" }]
+
+# Applied on the way back to the agent. Body transforms need the whole response in
+# memory, so a profile declaring one is stating that responses they apply to are no
+# longer streamable — keep them scoped away from SSE and WebSocket endpoints.
+response_transforms:
+  headers:
+    allow: ["content-*", "date", "etag", "cache-control", "retry-after"]
+  body:
+    # Never let an injected credential echo back to the agent through a response.
+    - transform: redact
+      patterns: ["github-pat"]

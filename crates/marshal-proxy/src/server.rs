@@ -112,6 +112,18 @@ impl Server {
     /// startup; reaching it here means falling back rather than serving an arbitrary chain.
     async fn session_for(&self, conn: &ConnInfo, runtime: &Runtime) -> Option<Session> {
         let resolved = runtime.sessions.resolve(conn).await;
+
+        // Unattributed, with no `sessions.unidentified.profile` override: the embedded
+        // `profile:` applies, which has no name and so isn't in `chains` at all.
+        if !resolved.attributed && runtime.sessions.uses_default_fallback() {
+            return Some(Session {
+                resolved,
+                chain: Arc::clone(&runtime.default_chain),
+                response_transforms: runtime.default_response_transforms.clone(),
+                request_transforms: runtime.default_request_transforms.clone(),
+            });
+        }
+
         match runtime.chains.get(&resolved.profile) {
             Some(chain) => {
                 let response_transforms =

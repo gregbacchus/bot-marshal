@@ -33,22 +33,21 @@ fn request(host: &str) -> RequestContext {
 }
 
 const BOTH: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: denylist
-        deny: { domains: ["blocked.example.com"] }
-      - layer: allowlist
-        allow: { domains: ["blocked.example.com", "ok.example.com"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: denylist
+      deny: { domains: ["blocked.example.com"] }
+    - layer: allowlist
+      allow: { domains: ["blocked.example.com", "ok.example.com"] }
+      on_match: allow
+      on_miss: pass
 "#;
 
 #[tokio::test]
 async fn denylist_before_allowlist_wins() {
     let c = cfg(BOTH);
-    let chain = build_chain(&c, "p", Arc::new(DenyingDecider)).unwrap();
+    let chain = build_chain(&c, "p", &c.profile, Arc::new(DenyingDecider)).unwrap();
 
     // The host is on BOTH lists. The denylist is first, so it decides — precedence comes
     // from ordering, not from a special rule.
@@ -65,7 +64,7 @@ async fn denylist_before_allowlist_wins() {
 #[tokio::test]
 async fn all_pass_falls_through_to_default_action() {
     let c = cfg(BOTH);
-    let chain = build_chain(&c, "p", Arc::new(DenyingDecider)).unwrap();
+    let chain = build_chain(&c, "p", &c.profile, Arc::new(DenyingDecider)).unwrap();
 
     let out = chain.evaluate(&request("unknown.example.com")).await;
     assert_eq!(out.action, Action::Deny);
@@ -81,15 +80,14 @@ async fn all_pass_falls_through_to_default_action() {
 #[tokio::test]
 async fn default_allow_requires_no_layer_to_agree() {
     let c = cfg(r#"
-profiles:
-  p:
-    default_action: allow
-    i_understand_this_is_allow_by_default: true
-    policy:
-      - layer: denylist
-        deny: { domains: ["blocked.example.com"] }
+profile:
+  default_action: allow
+  i_understand_this_is_allow_by_default: true
+  policy:
+    - layer: denylist
+      deny: { domains: ["blocked.example.com"] }
 "#);
-    let chain = build_chain(&c, "p", Arc::new(DenyingDecider)).unwrap();
+    let chain = build_chain(&c, "p", &c.profile, Arc::new(DenyingDecider)).unwrap();
 
     let out = chain.evaluate(&request("anything.example.com")).await;
     assert_eq!(out.action, Action::Allow);
@@ -163,37 +161,17 @@ async fn evidence_from_one_layer_reaches_the_next() {
 #[tokio::test]
 async fn unimplemented_layer_is_an_error_not_a_silent_skip() {
     let c = cfg(r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: judge
-        provider: { type: anthropic, model: m, api_key_env: K }
-        prompt: "x"
+profile:
+  default_action: deny
+  policy:
+    - layer: judge
+      provider: { type: anthropic, model: m, api_key_env: K }
+      prompt: "x"
 "#);
     // A config naming a layer we cannot run must fail loudly: silently dropping it would
     // yield a chain more permissive than the one written.
-    let err = build_chain(&c, "p", Arc::new(DenyingDecider)).unwrap_err();
+    let err = build_chain(&c, "p", &c.profile, Arc::new(DenyingDecider)).unwrap_err();
     assert!(err.to_string().contains("judge"), "{err}");
-}
-
-#[tokio::test]
-async fn extends_inherits_the_parent_chain() {
-    let c = cfg(r#"
-profiles:
-  base:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { domains: ["ok.example.com"] }
-        on_match: allow
-        on_miss: pass
-  child:
-    extends: base
-"#);
-    let chain = build_chain(&c, "child", Arc::new(DenyingDecider)).unwrap();
-    assert_eq!(chain.layer_names(), ["allowlist"]);
-    assert_eq!(chain.evaluate(&request("ok.example.com")).await.action, Action::Allow);
 }
 
 #[tokio::test]
@@ -202,34 +180,45 @@ async fn unimplemented_response_transform_is_also_an_error() {
     // what the operator asked for, and silently doing so would let a `redact` that never
     // runs leak a credential the proxy itself injected.
     let c = cfg(r#"
-profiles:
-  p:
-    default_action: deny
-    response_transforms:
-      body:
-        - transform: redact
-          patterns: ["github-pat"]
+profile:
+  default_action: deny
+  response_transforms:
+    body:
+      - transform: redact
+        patterns: ["github-pat"]
 "#);
-    let err = build_chain(&c, "p", Arc::new(DenyingDecider)).unwrap_err();
+    let err = build_chain(&c, "p", &c.profile, Arc::new(DenyingDecider)).unwrap_err();
     assert!(err.to_string().contains("redact"), "{err}");
 }
 
 #[tokio::test]
-async fn extends_inherits_both_transform_directions() {
-    let c = cfg(r#"
-profiles:
-  base:
-    default_action: deny
-    request_transforms:
-      headers:
-        allow: ["accept"]
-    response_transforms:
-      headers:
-        allow: ["content-type"]
-  child:
-    extends: base
+async fn a_profile_naming_a_transform_bundle_resolves_it() {
+    // `transforms:` is populated by `load()` from `transforms_path` — not part of the YAML
+    // document itself — so it's set directly here rather than parsed.
+    use marshal_config::model::{
+        HeaderAllowlist, RequestTransforms, ResponseTransforms, TransformBundle,
+    };
+
+    let mut c = cfg(r#"
+profile:
+  default_action: deny
+  transforms: shared
 "#);
-    let p = marshal_policy::resolve_profile(&c, "child").unwrap();
+    c.transforms.insert(
+        "shared".to_owned(),
+        TransformBundle {
+            request_transforms: RequestTransforms {
+                headers: Some(HeaderAllowlist { allow: vec!["accept".into()] }),
+                secrets: vec![],
+            },
+            response_transforms: ResponseTransforms {
+                headers: Some(HeaderAllowlist { allow: vec!["content-type".into()] }),
+                body: vec![],
+            },
+        },
+    );
+
+    let p = marshal_policy::resolve_profile(&c, &c.profile).unwrap();
     assert_eq!(p.request_transforms.headers.unwrap().allow, ["accept"]);
     assert_eq!(p.response_transforms.headers.unwrap().allow, ["content-type"]);
 }

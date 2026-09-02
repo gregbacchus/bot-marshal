@@ -39,150 +39,12 @@ impl std::fmt::Display for Diagnostic {
 pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
-    if cfg.profiles.is_empty() {
-        out.push(Diagnostic {
-            severity: Severity::Error,
-            location: "profiles".into(),
-            message: "no profiles defined; there is nothing to enforce".into(),
-        });
-    }
-
+    // The embedded fallback ("profile:") and every named one ("profiles.<name>") get the same
+    // checks — it has no name of its own, so `at` is just the top-level key here rather than
+    // a `profiles.` path.
+    check_profile(cfg, "profile", &cfg.profile, &mut out);
     for (name, profile) in &cfg.profiles {
-        let at = format!("profiles.{name}");
-
-        if profile.default_action == Decision::Allow
-            && !profile.i_understand_this_is_allow_by_default
-        {
-            out.push(Diagnostic {
-                severity: Severity::Error,
-                location: format!("{at}.default_action"),
-                message: "default_action is `allow`, which disables default-deny for every \
-                          request that reaches the end of the chain. Set \
-                          `i_understand_this_is_allow_by_default: true` to confirm this is \
-                          deliberate."
-                    .into(),
-            });
-        }
-
-        if let Some(parent) = &profile.extends
-            && !cfg.profiles.contains_key(parent)
-        {
-            out.push(Diagnostic {
-                severity: Severity::Error,
-                location: format!("{at}.extends"),
-                message: format!("extends unknown profile `{parent}`"),
-            });
-        }
-
-        // Warn mode is a rollout tool, not a setting to forget about. Saying so on every
-        // `config check` is the cheapest way to stop a profile living there indefinitely
-        // while somebody believes it is enforcing.
-        if profile.mode == crate::model::Mode::Warn {
-            out.push(Diagnostic {
-                severity: Severity::Warning,
-                location: format!("{at}.mode"),
-                message: "this profile is in WARN mode: refusals are recorded but every \
-                          request is forwarded. Audit records carry `would_deny: true`; use \
-                          them to build the allowlist, then set `mode: enforce`."
-                    .into(),
-            });
-        }
-
-        if profile.policy.is_empty() {
-            out.push(Diagnostic {
-                severity: Severity::Warning,
-                location: format!("{at}.policy"),
-                message: format!(
-                    "empty policy chain; every request falls through to default_action \
-                     (`{:?}`)",
-                    profile.default_action
-                ),
-            });
-        }
-
-        // Cost ordering: cheapest first.
-        let mut highest_seen = None;
-        for (i, layer) in profile.policy.iter().enumerate() {
-            let cost = layer.cost();
-            if let Some((prev_cost, prev_name)) = highest_seen
-                && cost < prev_cost
-            {
-                out.push(Diagnostic {
-                    severity: Severity::Warning,
-                    location: format!("{at}.policy[{i}]"),
-                    message: format!(
-                        "`{}` ({cost:?}) is placed after `{prev_name}` ({prev_cost:?}); \
-                         ordering layers cheapest-first avoids paying for the expensive one \
-                         on requests the cheap one could have decided",
-                        layer.name()
-                    ),
-                });
-            }
-            if highest_seen.is_none_or(|(prev, _)| cost > prev) {
-                highest_seen = Some((cost, layer.name()));
-            }
-        }
-
-        // An unconditional terminal verdict makes everything after it dead config. This is
-        // easy to write by accident: an allowlist with `on_match: allow` reads like "permit
-        // these hosts", but in a short-circuiting chain it also means "and skip every check
-        // that follows". Use `on_match: pass` when later layers should still run.
-        let mut terminal_at: Option<(usize, &str)> = None;
-        for (i, layer) in profile.policy.iter().enumerate() {
-            if let Some((terminal_index, culprit)) = terminal_at {
-                out.push(Diagnostic {
-                    severity: Severity::Warning,
-                    location: format!("{at}.policy[{i}]"),
-                    message: format!(
-                        "`{}` is unreachable for allowed requests: `{culprit}` at policy[{terminal_index}] \
-                         returns a terminal ALLOW on match, which stops the chain. Set that \
-                         layer's `on_match` to `pass` if later layers should still run.",
-                        layer.name()
-                    ),
-                });
-                break;
-            }
-            if let crate::layer::LayerConfig::Allowlist { on_match, .. } = layer
-                && *on_match == crate::layer::Outcome::Allow
-            {
-                terminal_at = Some((i, layer.name()));
-            }
-        }
-
-        // Body transforms force the whole response into memory. That is a real behaviour
-        // change, not a detail: an SSE or WebSocket response cannot survive it, so the
-        // operator should be told rather than discovering it when an agent's stream stalls.
-        for (i, t) in profile.response_transforms.body.iter().enumerate() {
-            out.push(Diagnostic {
-                severity: Severity::Warning,
-                location: format!("{at}.response_transforms.body[{i}]"),
-                message: format!(
-                    "`{}` buffers the response body (up to {} bytes), so responses it \
-                     applies to cannot stream; scope it away from SSE and WebSocket \
-                     endpoints",
-                    t.name(),
-                    t.max_bytes()
-                ),
-            });
-        }
-
-        // Bundle references must resolve.
-        for (i, layer) in profile.policy.iter().enumerate() {
-            let bundles = match layer {
-                crate::layer::LayerConfig::Allowlist { allow, .. } => &allow.bundles,
-                crate::layer::LayerConfig::Denylist { deny } => &deny.bundles,
-                _ => continue,
-            };
-            for b in bundles {
-                if !cfg.bundles.contains_key(b) {
-                    out.push(Diagnostic {
-                        severity: Severity::Error,
-                        location: format!("{at}.policy[{i}]"),
-                        message: format!("references unknown bundle `{b}`"),
-                    });
-                }
-            }
-        }
+        check_profile(cfg, &format!("profiles.{name}"), profile, &mut out);
     }
 
     // Resolvers must name profiles that exist, or a matching connection resolves to nothing
@@ -271,30 +133,172 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
         }
     }
 
-    if let Some(u) = &cfg.sessions.unidentified {
-        if !cfg.profiles.contains_key(&u.profile) {
-            out.push(Diagnostic {
-                severity: Severity::Error,
-                location: "sessions.unidentified.profile".into(),
-                message: format!("unknown profile `{}`", u.profile),
-            });
-        } else if cfg.file_backed_profiles.contains(&u.profile) {
-            // The fallback applied to every request nobody could attribute is significant
-            // enough that it belongs in the file someone opens first, not one they have to
-            // go find under profiles/.
-            out.push(Diagnostic {
-                severity: Severity::Error,
-                location: "sessions.unidentified.profile".into(),
-                message: format!(
-                    "`{}` is defined in profiles/, but the fallback profile for \
-                     unattributed traffic must be defined inline in the base config",
-                    u.profile
-                ),
-            });
-        }
+    // `profile: None` means "use the embedded `profile:`" — always valid, since that's
+    // required to exist. Only an explicit override needs checking.
+    if let Some(u) = &cfg.sessions.unidentified
+        && let Some(name) = &u.profile
+        && !cfg.profiles.contains_key(name)
+    {
+        out.push(Diagnostic {
+            severity: Severity::Error,
+            location: "sessions.unidentified.profile".into(),
+            message: format!("unknown profile `{name}`"),
+        });
     }
 
     out
+}
+
+fn check_profile(
+    cfg: &Config,
+    at: &str,
+    profile: &crate::model::Profile,
+    out: &mut Vec<Diagnostic>,
+) {
+    if profile.default_action == Decision::Allow && !profile.i_understand_this_is_allow_by_default {
+        out.push(Diagnostic {
+            severity: Severity::Error,
+            location: format!("{at}.default_action"),
+            message: "default_action is `allow`, which disables default-deny for every \
+                          request that reaches the end of the chain. Set \
+                          `i_understand_this_is_allow_by_default: true` to confirm this is \
+                          deliberate."
+                .into(),
+        });
+    }
+
+    // Warn mode is a rollout tool, not a setting to forget about. Saying so on every
+    // `config check` is the cheapest way to stop a profile living there indefinitely
+    // while somebody believes it is enforcing.
+    if profile.mode == crate::model::Mode::Warn {
+        out.push(Diagnostic {
+            severity: Severity::Warning,
+            location: format!("{at}.mode"),
+            message: "this profile is in WARN mode: refusals are recorded but every \
+                          request is forwarded. Audit records carry `would_deny: true`; use \
+                          them to build the allowlist, then set `mode: enforce`."
+                .into(),
+        });
+    }
+
+    if profile.policy.is_empty() {
+        out.push(Diagnostic {
+            severity: Severity::Warning,
+            location: format!("{at}.policy"),
+            message: format!(
+                "empty policy chain; every request falls through to default_action \
+                     (`{:?}`)",
+                profile.default_action
+            ),
+        });
+    }
+
+    // Cost ordering: cheapest first.
+    let mut highest_seen = None;
+    for (i, layer) in profile.policy.iter().enumerate() {
+        let cost = layer.cost();
+        if let Some((prev_cost, prev_name)) = highest_seen
+            && cost < prev_cost
+        {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                location: format!("{at}.policy[{i}]"),
+                message: format!(
+                    "`{}` ({cost:?}) is placed after `{prev_name}` ({prev_cost:?}); \
+                         ordering layers cheapest-first avoids paying for the expensive one \
+                         on requests the cheap one could have decided",
+                    layer.name()
+                ),
+            });
+        }
+        if highest_seen.is_none_or(|(prev, _)| cost > prev) {
+            highest_seen = Some((cost, layer.name()));
+        }
+    }
+
+    // An unconditional terminal verdict makes everything after it dead config. This is
+    // easy to write by accident: an allowlist with `on_match: allow` reads like "permit
+    // these hosts", but in a short-circuiting chain it also means "and skip every check
+    // that follows". Use `on_match: pass` when later layers should still run.
+    let mut terminal_at: Option<(usize, &str)> = None;
+    for (i, layer) in profile.policy.iter().enumerate() {
+        if let Some((terminal_index, culprit)) = terminal_at {
+            out.push(Diagnostic {
+                    severity: Severity::Warning,
+                    location: format!("{at}.policy[{i}]"),
+                    message: format!(
+                        "`{}` is unreachable for allowed requests: `{culprit}` at policy[{terminal_index}] \
+                         returns a terminal ALLOW on match, which stops the chain. Set that \
+                         layer's `on_match` to `pass` if later layers should still run.",
+                        layer.name()
+                    ),
+                });
+            break;
+        }
+        if let crate::layer::LayerConfig::Allowlist { on_match, .. } = layer
+            && *on_match == crate::layer::Outcome::Allow
+        {
+            terminal_at = Some((i, layer.name()));
+        }
+    }
+
+    // Body transforms force the whole response into memory. That is a real behaviour
+    // change, not a detail: an SSE or WebSocket response cannot survive it, so the
+    // operator should be told rather than discovering it when an agent's stream stalls.
+    for (i, t) in profile.response_transforms.body.iter().enumerate() {
+        out.push(Diagnostic {
+            severity: Severity::Warning,
+            location: format!("{at}.response_transforms.body[{i}]"),
+            message: format!(
+                "`{}` buffers the response body (up to {} bytes), so responses it \
+                     applies to cannot stream; scope it away from SSE and WebSocket \
+                     endpoints",
+                t.name(),
+                t.max_bytes()
+            ),
+        });
+    }
+
+    // Bundle references must resolve.
+    for (i, layer) in profile.policy.iter().enumerate() {
+        let bundles = match layer {
+            crate::layer::LayerConfig::Allowlist { allow, .. } => &allow.bundles,
+            crate::layer::LayerConfig::Denylist { deny } => &deny.bundles,
+            _ => continue,
+        };
+        for b in bundles {
+            if !cfg.bundles.contains_key(b) {
+                out.push(Diagnostic {
+                    severity: Severity::Error,
+                    location: format!("{at}.policy[{i}]"),
+                    message: format!("references unknown bundle `{b}`"),
+                });
+            }
+        }
+    }
+
+    if let Some(name) = &profile.transforms {
+        let has_inline_request = profile.request_transforms.headers.is_some()
+            || !profile.request_transforms.secrets.is_empty();
+        let has_inline_response = profile.response_transforms.headers.is_some()
+            || !profile.response_transforms.body.is_empty();
+        if has_inline_request || has_inline_response {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{at}.transforms"),
+                message: "set alongside request_transforms/response_transforms — use one \
+                              or the other, not both"
+                    .into(),
+            });
+        }
+        if !cfg.transforms.contains_key(name) {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{at}.transforms"),
+                message: format!("references unknown transform bundle `{name}`"),
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -327,16 +331,6 @@ mod tests {
     fn deny_by_default_needs_no_acknowledgement() {
         let cfg = cfg_with(Profile::default());
         assert!(!validate(&cfg).iter().any(|d| d.severity == Severity::Error));
-    }
-
-    #[test]
-    fn unknown_parent_profile_is_an_error() {
-        let cfg = cfg_with(Profile { extends: Some("nope".into()), ..Default::default() });
-        assert!(
-            validate(&cfg)
-                .iter()
-                .any(|d| d.severity == Severity::Error && d.location == "profiles.p.extends")
-        );
     }
 
     #[test]
@@ -440,19 +434,50 @@ mod tests {
     }
 
     #[test]
-    fn the_unidentified_fallback_profile_must_be_defined_inline() {
+    fn unidentified_profile_left_unset_needs_no_check() {
+        // `profile: None` means "use the embedded default", which always exists — nothing to
+        // validate.
         let mut cfg = cfg_with(Profile::default());
         cfg.sessions.unidentified =
-            Some(Unidentified { profile: "p".into(), action: UnidentifiedAction::default() });
-
-        // Defined inline (as `cfg_with` always does): fine.
+            Some(Unidentified { profile: None, action: UnidentifiedAction::default() });
         assert!(!validate(&cfg).iter().any(|d| d.severity == Severity::Error));
+    }
 
-        // The same name, but sourced from profiles/ instead: rejected, even though the
-        // profile itself is perfectly valid and referenced correctly.
-        cfg.file_backed_profiles.insert("p".into());
+    #[test]
+    fn unidentified_profile_naming_an_unknown_profile_is_an_error() {
+        let mut cfg = cfg_with(Profile::default());
+        cfg.sessions.unidentified = Some(Unidentified {
+            profile: Some("nope".into()),
+            action: UnidentifiedAction::default(),
+        });
         assert!(validate(&cfg).iter().any(
             |d| d.severity == Severity::Error && d.location == "sessions.unidentified.profile"
         ));
+
+        cfg.sessions.unidentified =
+            Some(Unidentified { profile: Some("p".into()), action: UnidentifiedAction::default() });
+        assert!(!validate(&cfg).iter().any(|d| d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn a_profile_cannot_both_reference_and_embed_transforms() {
+        let mut profile = Profile { transforms: Some("shared".into()), ..Default::default() };
+        profile.request_transforms.headers = Some(Default::default());
+        let cfg = cfg_with(profile);
+        assert!(
+            validate(&cfg)
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.location == "profiles.p.transforms")
+        );
+    }
+
+    #[test]
+    fn a_profile_referencing_an_unknown_transform_bundle_is_an_error() {
+        let cfg = cfg_with(Profile { transforms: Some("nope".into()), ..Default::default() });
+        assert!(
+            validate(&cfg)
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.location == "profiles.p.transforms")
+        );
     }
 }

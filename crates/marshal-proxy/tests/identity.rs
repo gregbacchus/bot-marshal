@@ -15,24 +15,37 @@ use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
 use support::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Two profiles: one permits the loopback upstream, the other permits nothing.
-const TWO_PROFILES: &str = r#"
-profiles:
-  permissive:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: allow
-        on_miss: pass
-  restricted:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { domains: ["nothing.invalid"] }
-        on_match: allow
-        on_miss: pass
+/// One permits the loopback upstream, the other permits nothing. Two *named* profiles, so
+/// each is built directly here and inserted into `cfg.profiles` — there's no `profiles:` key
+/// in the schema any more to hold both at once.
+const PERMISSIVE: &str = r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
 "#;
+
+const RESTRICTED: &str = r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { domains: ["nothing.invalid"] }
+      on_match: allow
+      on_miss: pass
+"#;
+
+fn two_profiles() -> Config {
+    let permissive: Config = serde_yaml_ng::from_str(PERMISSIVE).unwrap();
+    let restricted: Config = serde_yaml_ng::from_str(RESTRICTED).unwrap();
+    let mut cfg = Config::default();
+    cfg.profiles.insert("permissive".to_owned(), permissive.profile);
+    cfg.profiles.insert("restricted".to_owned(), restricted.profile);
+    cfg
+}
 
 struct Harness {
     proxy: std::net::SocketAddr,
@@ -91,12 +104,12 @@ async fn harness(
 ) -> Harness {
     let upstream = start_upstream(b"UPSTREAM").await;
 
-    let cfg: Config = serde_yaml_ng::from_str(TWO_PROFILES).unwrap();
+    let cfg = two_profiles();
     let mut chains = HashMap::new();
-    for name in cfg.profiles.keys() {
+    for (name, profile) in &cfg.profiles {
         chains.insert(
             Arc::from(name.as_str()),
-            Arc::new(build_chain(&cfg, name, Arc::new(DenyingDecider)).unwrap()),
+            Arc::new(build_chain(&cfg, name, profile, Arc::new(DenyingDecider)).unwrap()),
         );
     }
 
@@ -109,7 +122,20 @@ async fn harness(
             chains,
             response_transforms: HashMap::new(),
             request_transforms: std::collections::HashMap::new(),
-            sessions: Arc::new(SessionRegistry::new(resolvers, fallback, deny_unidentified, false)),
+            default_chain: Arc::new(marshal_policy::Chain::new(
+                "default",
+                vec![],
+                marshal_core::Decision::Deny,
+                Arc::new(DenyingDecider),
+            )),
+            default_response_transforms: Vec::new(),
+            default_request_transforms: Vec::new(),
+            sessions: Arc::new(SessionRegistry::new(
+                resolvers,
+                Some(Arc::from(fallback)),
+                deny_unidentified,
+                false,
+            )),
             passthrough: HostMatcher::default(),
             tls: support::test_engine(),
         }),
@@ -357,12 +383,12 @@ async fn the_unix_listener_identifies_by_so_peercred() {
     std::fs::create_dir_all(&dir).unwrap();
     let sock = dir.join("marshal.sock");
 
-    let cfg: Config = serde_yaml_ng::from_str(TWO_PROFILES).unwrap();
+    let cfg = two_profiles();
     let mut chains = HashMap::new();
-    for name in cfg.profiles.keys() {
+    for (name, profile) in &cfg.profiles {
         chains.insert(
             Arc::from(name.as_str()),
-            Arc::new(build_chain(&cfg, name, Arc::new(DenyingDecider)).unwrap()),
+            Arc::new(build_chain(&cfg, name, profile, Arc::new(DenyingDecider)).unwrap()),
         );
     }
     let resolver = Arc::new(
@@ -379,7 +405,20 @@ async fn the_unix_listener_identifies_by_so_peercred() {
             chains,
             response_transforms: HashMap::new(),
             request_transforms: std::collections::HashMap::new(),
-            sessions: Arc::new(SessionRegistry::new(vec![resolver], "restricted", false, false)),
+            default_chain: Arc::new(marshal_policy::Chain::new(
+                "default",
+                vec![],
+                marshal_core::Decision::Deny,
+                Arc::new(DenyingDecider),
+            )),
+            default_response_transforms: Vec::new(),
+            default_request_transforms: Vec::new(),
+            sessions: Arc::new(SessionRegistry::new(
+                vec![resolver],
+                Some(Arc::from("restricted")),
+                false,
+                false,
+            )),
             passthrough: HostMatcher::default(),
             tls: support::test_engine(),
         }),

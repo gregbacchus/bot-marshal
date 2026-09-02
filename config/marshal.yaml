@@ -4,10 +4,11 @@
 # the first terminal verdict wins. If every layer PASSes, `default_action` decides — that is
 # where default-deny actually lives.
 #
-# Every file under bundles/ (github.yaml, npm.yaml, …) is loaded automatically as one bundle,
-# keyed by its filename — no include: needed. Profiles here stay inline since this file is
-# meant to be read start to finish, but the same convention applies to a profiles/ directory
-# for a config that has outgrown one file — see the README.
+# Every file under bundles/, profiles/ and transforms/ next to this one is loaded
+# automatically, keyed by its filename — no include: needed. `profile:` below is the one
+# exception: it's embedded directly, not a named file, because it is the fallback applied to
+# traffic nothing else could attribute, and that should be visible in the file someone opens
+# first rather than off in profiles/ somewhere. See the README.
 
 listeners:
   explicit:
@@ -50,145 +51,28 @@ upstream:
   allow_private: false
   max_response_bytes: 0
 
-profiles:
-  # Runnable today. Only the denylist and allowlist layers are implemented (M1), so this
-  # profile uses just those. `marshal serve --profile base` works as-is.
-  base:
-    default_action: deny
-    policy:
-      - layer: denylist               # first, so hard denies beat any later approval
-        deny:
-          domains: ["*.onion"]
+# The fallback for unattributed traffic — embedded, not named, so it is never sourced from
+# profiles/ where it would be easy to miss. Only the denylist and allowlist layers are
+# implemented (M1), so this uses just those.
+profile:
+  default_action: deny
+  policy:
+    - layer: denylist               # first, so hard denies beat any later approval
+      deny:
+        domains: ["*.onion"]
 
-      - layer: allowlist
-        allow:
-          bundles: [github, crates-io]
-          domains: ["*.githubusercontent.com"]
-        on_match: allow
-        on_miss: pass
+    - layer: allowlist
+      allow:
+        bundles: [github, crates-io]
+        domains: ["*.githubusercontent.com"]
+      on_match: allow
+      on_miss: pass
 
-    request_transforms:
-      headers:
-        allow: ["accept*", "content-*", "user-agent", "authorization"]
+  transforms: default-headers
 
-  # The intended shape, and not yet runnable: `dlp`, `rules` and `judge` arrive in M3 and
-  # M4.5. Starting with this profile fails loudly rather than silently running a chain more
-  # permissive than the one written here.
-
-  coding-agent:
-    extends: base
-    default_action: deny
-    policy:
-      - layer: denylist
-        deny:
-          domains: ["*.onion"]
-
-      # `pass`, not `allow`: being on the allowlist is necessary but not sufficient here, so
-      # the dlp and rules layers below still get to run. `on_match: allow` would terminate
-      # the chain and silently skip them.
-      - layer: allowlist
-        allow:
-          bundles: [github, npm, pypi, crates-io]
-        on_match: pass
-        on_miss: deny
-
-      - layer: rules                  # CEL over the request and accumulated evidence
-        expressions:
-          - when: 'req.method in ["POST", "PATCH", "DELETE"]'
-            verdict: pass
-            annotate:
-              flags: ["WriteOperation"]
-
-      # The inverse of injection: catches a real credential the agent obtained some other
-      # way and is trying to send out. Scanning bodies means requests it applies to stop
-      # streaming, hence the explicit cap and oversize rule.
-      - layer: dlp
-        scan_request: true
-        patterns: ["aws-access-key", "github-pat", "private-key-pem", "openai-key"]
-        on_match: deny
-        max_body_bytes: 1048576
-        on_oversize: deny
-
-      - layer: judge                  # expensive, so it caches and circuit-breaks
-        provider:
-          type: anthropic
-          model: "claude-haiku-4-5-20251001"
-          api_key_env: ANTHROPIC_API_KEY
-        scope:
-          - host: "api.github.com"
-            methods: ["POST", "PATCH", "DELETE"]
-        cache:
-          ttl: "15m"
-          max_entries: 10000
-        timeout: "8s"
-        max_concurrent: 32
-        on_error: deny
-        on_timeout: deny
-        circuit_breaker:
-          consecutive_failures: 5
-          cooldown: "30s"
-        prompt: |
-          Allow only changes to repositories owned by gregbacchus. Deny anything that
-          modifies workflow files, repository secrets, or repository settings.
-
-    # Applied on the way out, once the chain has allowed. Rewriting is not deciding, which
-    # is why these are not policy layers.
-    request_transforms:
-      headers:
-        allow: ["accept*", "content-*", "user-agent", "authorization"]
-      # The agent holds only the placeholder. It can still authenticate to hosts the chain
-      # allows, but the real credential never exists in the agent's process, environment or
-      # filesystem — so compromising the agent no longer costs a rotation.
-      secrets:
-        - name: GITHUB_TOKEN
-          source: { type: env, var: GITHUB_TOKEN }
-          proxy_value: "marshal-github-placeholder"
-          match_headers: ["authorization"]
-          require: true
-          rules: [{ host: "api.github.com" }]
-
-    # Applied on the way back to the agent. Body transforms need the whole response in
-    # memory, so a profile declaring one is stating that responses they apply to are no
-    # longer streamable — keep them scoped away from SSE and WebSocket endpoints.
-    response_transforms:
-      headers:
-        allow: ["content-*", "date", "etag", "cache-control", "retry-after"]
-      body:
-        # Never let an injected credential echo back to the agent through a response.
-        - transform: redact
-          patterns: ["github-pat"]
-
-  # An MCP-facing agent. To a host allowlist every MCP call looks identical — one POST to one
-  # endpoint — and the difference between `search_repositories` and `delete_repository` is
-  # entirely in the body.
-  llm-agent:
-    extends: base
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow:
-          bundles: [llm-apis]
-          domains: ["mcp.example.com"]
-        on_match: pass
-        on_miss: deny
-
-      # Denied tools are also removed from `tools/list`, so the agent never forms the intent
-      # to call them. That matters more than blocking the call: an error is something an
-      # LLM-driven agent retries and works around.
-      - layer: mcp
-        servers:
-          - name: github
-            rules: [{ host: "mcp.example.com" }]
-            tools:
-              - name: "search_*"
-              - name: "create_issue"
-                when: [{ path: "owner", equals: "gregbacchus" }]
-              - name: "update_file"
-                when:
-                  - path: repo
-                    in: ["bot-marshal"]
-                  - path: path
-                    matches: "^src/"
+# coding-agent and llm-agent (the intended shape for two real agent profiles — dlp, rules and
+# judge arrive in M3/M4.5) live under profiles/, one file each, since only this fallback needs
+# to be inline. See profiles/coding-agent.yaml and profiles/llm-agent.yaml.
 
 sessions:
   # Tried in order; first match wins. Identity is derived from the connection, never asserted
@@ -202,13 +86,17 @@ sessions:
   #   source_ip      as trustworthy as the network; holds when each agent owns a namespace
   #   proxy_auth     client-asserted; an agent that can read another token can pick another
   #                  profile
+  #
+  # A resolver can only target a *named* profile (one under profiles/) — the embedded
+  # `profile:` above has no name to reference. A connection nothing here matches falls
+  # through to `unidentified` below, which uses it by default.
   resolvers:
     - type: peer_cred
       enrich: true                  # needed for cgroup matching; costs a /proc walk
       map:
         - uid: 1001
           session: "bot-ci"
-          profile: base
+          profile: coding-agent
 
     - type: launched                # sessions created by `marshal run`
 
@@ -225,8 +113,9 @@ sessions:
           session: "agent-a"
           profile: coding-agent
 
-  # Nothing matched: synthetic session, most restrictive profile, flagged unattributed in
-  # every audit record. Set `action: deny` for a hard-fail posture.
+  # Nothing matched: synthetic session, flagged unattributed in every audit record, served
+  # under the embedded `profile:` above (the most restrictive one) by default — set
+  # `profile: <name>` here to use a named one instead, or `action: deny` for a hard-fail
+  # posture rather than falling back at all.
   unidentified:
-    profile: base
     action: allow_with_profile

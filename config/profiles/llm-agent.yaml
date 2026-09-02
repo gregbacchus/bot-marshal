@@ -1,0 +1,30 @@
+# An MCP-facing agent. To a host allowlist every MCP call looks identical — one POST to one
+# endpoint — and the difference between `search_repositories` and `delete_repository` is
+# entirely in the body.
+default_action: deny
+transforms: default-headers
+policy:
+  - layer: allowlist
+    allow:
+      bundles: [llm-apis]
+      domains: ["mcp.example.com"]
+    on_match: pass
+    on_miss: deny
+
+  # Denied tools are also removed from `tools/list`, so the agent never forms the intent
+  # to call them. That matters more than blocking the call: an error is something an
+  # LLM-driven agent retries and works around.
+  - layer: mcp
+    servers:
+      - name: github
+        rules: [{ host: "mcp.example.com" }]
+        tools:
+          - name: "search_*"
+          - name: "create_issue"
+            when: [{ path: "owner", equals: "gregbacchus" }]
+          - name: "update_file"
+            when:
+              - path: repo
+                in: ["bot-marshal"]
+              - path: path
+                matches: "^src/"

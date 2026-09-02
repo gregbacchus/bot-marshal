@@ -34,7 +34,8 @@ async fn start_proxy_with_guard(
     guard: UpstreamGuard,
 ) -> std::net::SocketAddr {
     let cfg: Config = serde_yaml_ng::from_str(yaml).expect("config parses");
-    let chain = build_chain(&cfg, profile, Arc::new(DenyingDecider)).expect("chain builds");
+    let chain =
+        build_chain(&cfg, profile, &cfg.profile, Arc::new(DenyingDecider)).expect("chain builds");
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
 
     let server = Server::new(
@@ -61,14 +62,13 @@ async fn start_proxy_with_guard(
 
 /// Allows the loopback upstreams the tests spin up.
 const ALLOW_LOOPBACK: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
 "#;
 
 /// Read a proxy response head up to the blank line. Reading a fixed number of bytes would
@@ -86,14 +86,13 @@ async fn read_head(c: &mut TcpStream) -> String {
 }
 
 const DENY_ALL: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { domains: ["allowed.test"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { domains: ["allowed.test"] }
+      on_match: allow
+      on_miss: pass
 "#;
 
 #[tokio::test]
@@ -351,14 +350,13 @@ async fn the_guard_blocks_what_the_allowlist_would_permit() {
     // enough on its own. The guard is a second, independent gate on the resolved address,
     // and it is the one that closes SSRF.
     let yaml = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["169.254.0.0/16", "127.0.0.0/8"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["169.254.0.0/16", "127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
 "#;
     let guard = UpstreamGuard::new(["169.254.0.0/16"], true).unwrap();
     let proxy = start_proxy_with_guard(yaml, "p", guard).await;

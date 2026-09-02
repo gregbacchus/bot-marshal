@@ -451,7 +451,9 @@ fn build_runtime(
 
     // Every profile gets a chain, because which one applies is decided per connection.
     // Building them all up front means a broken profile fails here rather than when the
-    // first agent that uses it connects.
+    // first agent that uses it connects. The embedded `profile:` goes through the exact same
+    // builder as every named one — it just has nowhere to be keyed by name, so its artifacts
+    // land in dedicated `default_*` fields on `Runtime` instead of these maps.
     let mut chains: HashMap<Arc<str>, Arc<marshal_policy::Chain>> = HashMap::new();
     let mut response_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>> =
         HashMap::new();
@@ -465,34 +467,54 @@ fn build_runtime(
         HashMap::new();
     let mut injectors: Vec<Arc<SecretInjector>> = Vec::new();
 
-    for name in cfg.profiles.keys() {
-        chains.insert(
-            Arc::from(name.as_str()),
-            Arc::new(build_chain(&cfg, name, Arc::new(DenyingDecider))?),
-        );
-        let transforms = marshal_policy::build_response_transforms(&cfg, name)?;
-        if !transforms.is_empty() {
-            response_transforms.insert(Arc::from(name.as_str()), transforms);
-        }
+    let build_one = |label: &str,
+                     profile: &marshal_config::model::Profile|
+     -> anyhow::Result<(
+        Arc<marshal_policy::Chain>,
+        Vec<Arc<dyn marshal_core::ResponseTransform>>,
+        Vec<Arc<dyn marshal_core::RequestTransform>>,
+        Option<Arc<SecretInjector>>,
+    )> {
+        let chain = Arc::new(build_chain(&cfg, label, profile, Arc::new(DenyingDecider))?);
+        let response = marshal_policy::build_response_transforms(&cfg, label, profile)?;
+        let resolved = marshal_policy::resolve_profile(&cfg, profile)?;
+        let injector = Arc::new(build_injector(&resolved, &cfg)?);
+        let (request, injector) = if injector.is_empty() {
+            (Vec::new(), None)
+        } else {
+            (vec![Arc::clone(&injector) as Arc<dyn marshal_core::RequestTransform>], Some(injector))
+        };
+        Ok((chain, response, request, injector))
+    };
 
-        let profile = marshal_policy::resolve_profile(&cfg, name)?;
-        let injector = Arc::new(build_injector(&profile, &cfg)?);
-        if !injector.is_empty() {
-            request_transforms.insert(
-                Arc::from(name.as_str()),
-                vec![Arc::clone(&injector) as Arc<dyn marshal_core::RequestTransform>],
-            );
+    let (default_chain, default_response_transforms, default_request_transforms, default_injector) =
+        build_one("profile", &cfg.profile)?;
+    if let Some(injector) = default_injector {
+        injectors.push(injector);
+    }
+
+    for (name, profile) in &cfg.profiles {
+        let (chain, response, request, injector) = build_one(name, profile)?;
+        chains.insert(Arc::from(name.as_str()), chain);
+        if !response.is_empty() {
+            response_transforms.insert(Arc::from(name.as_str()), response);
+        }
+        if let Some(injector) = injector {
+            request_transforms.insert(Arc::from(name.as_str()), request);
             injectors.push(injector);
         }
     }
 
-    let fallback = profile_override
-        .or_else(|| cfg.sessions.unidentified.as_ref().map(|u| u.profile.clone()))
-        .or_else(|| cfg.profiles.keys().next().cloned())
-        .ok_or_else(|| anyhow::anyhow!("no profiles are defined"))?;
-    anyhow::ensure!(chains.contains_key(fallback.as_str()), "unknown profile `{fallback}`");
+    // `None` means "the embedded `profile:`" — always valid, since it's required to exist;
+    // `Some(name)` is an explicit override that must actually name a built profile.
+    let fallback_override: Option<Arc<str>> = profile_override
+        .or_else(|| cfg.sessions.unidentified.as_ref().and_then(|u| u.profile.clone()))
+        .map(|s| Arc::from(s.as_str()));
+    if let Some(name) = &fallback_override {
+        anyhow::ensure!(chains.contains_key(name), "unknown profile `{name}`");
+    }
 
-    let sessions = Arc::new(build_sessions(&cfg, &fallback)?);
+    let sessions = Arc::new(build_sessions(&cfg, fallback_override)?);
 
     // Interception is mandatory, not a fallback. A plain relay cannot enforce per-request
     // policy, and — the reason this is a hard requirement rather than a convenience — it
@@ -535,6 +557,9 @@ fn build_runtime(
             chains,
             response_transforms,
             request_transforms,
+            default_chain,
+            default_response_transforms,
+            default_request_transforms,
             sessions,
             passthrough,
             tls,
@@ -587,7 +612,7 @@ async fn start_dns(
 /// Build the resolver chain from config.
 fn build_sessions(
     cfg: &marshal_config::model::Config,
-    fallback: &str,
+    fallback: Option<Arc<str>>,
 ) -> anyhow::Result<marshal_proxy::sessions::SessionRegistry> {
     use marshal_config::model::ResolverConfig;
     use marshal_proxy::sessions::{
@@ -1061,9 +1086,11 @@ fn config_check(path: &std::path::Path) -> ExitCode {
     }
 
     println!(
+        // +1 for the embedded `profile:`, always present but not part of `cfg.profiles` —
+        // that map is exclusively the *named* ones under `profiles_path`.
         "{} ok: {} profile(s), {} bundle(s), {warnings} warning(s)",
         path.display(),
-        cfg.profiles.len(),
+        cfg.profiles.len() + 1,
         cfg.bundles.len()
     );
     ExitCode::SUCCESS
@@ -1273,6 +1300,43 @@ mod tests {
         let secret_b = dir.join("secret-b.txt");
         std::fs::write(&secret_b, "real-value-b").unwrap();
 
+        let profiles_dir = dir.join("profiles");
+        std::fs::create_dir_all(&profiles_dir).unwrap();
+        std::fs::write(
+            profiles_dir.join("profile-a.yaml"),
+            format!(
+                r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SECRET_A
+      source: {{ type: file, path: "{secret_a}" }}
+      proxy_value: "placeholder-a"
+      require: false
+      rules: [{{ host: "api.example.com" }}]
+"#,
+                secret_a = secret_a.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            profiles_dir.join("profile-b.yaml"),
+            format!(
+                r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SECRET_B
+      source: {{ type: file, path: "{secret_b}" }}
+      proxy_value: "placeholder-b"
+      require: false
+      rules: [{{ host: "api.example.com" }}]
+"#,
+                secret_b = secret_b.display(),
+            ),
+        )
+        .unwrap();
+
         let config = dir.join("marshal.yaml");
         std::fs::write(
             &config,
@@ -1282,30 +1346,10 @@ tls:
   ca_cert: "{ca_dir}/ca.crt"
   ca_key: "{ca_dir}/ca.key"
 
-profiles:
-  profile-a:
-    default_action: deny
-    request_transforms:
-      secrets:
-        - name: SECRET_A
-          source: {{ type: file, path: "{secret_a}" }}
-          proxy_value: "placeholder-a"
-          require: false
-          rules: [{{ host: "api.example.com" }}]
-
-  profile-b:
-    default_action: deny
-    request_transforms:
-      secrets:
-        - name: SECRET_B
-          source: {{ type: file, path: "{secret_b}" }}
-          proxy_value: "placeholder-b"
-          require: false
-          rules: [{{ host: "api.example.com" }}]
+profile:
+  default_action: deny
 "#,
                 ca_dir = ca_dir.display(),
-                secret_a = secret_a.display(),
-                secret_b = secret_b.display(),
             ),
         )
         .unwrap();

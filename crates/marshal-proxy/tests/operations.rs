@@ -18,31 +18,28 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn chain_from(yaml: &str) -> marshal_policy::Chain {
     let cfg: Config = serde_yaml_ng::from_str(yaml).unwrap();
-    build_chain(&cfg, "p", Arc::new(DenyingDecider)).unwrap()
+    build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap()
 }
 
 const DENY_ALL: &str = r#"
-profiles:
-  p:
-    default_action: deny
+profile:
+  default_action: deny
 "#;
 
 const WARN_ALL: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    mode: warn
+profile:
+  default_action: deny
+  mode: warn
 "#;
 
 const ALLOW_LOOPBACK: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
 "#;
 
 #[derive(Debug, Default)]

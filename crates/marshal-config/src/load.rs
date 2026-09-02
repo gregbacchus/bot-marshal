@@ -1,23 +1,25 @@
-//! Loading: a base file plus, by convention, one profile per file under `profiles_path`
-//! (default `profiles/`, resolved relative to the base file) and one bundle per file under
-//! `bundles_path` (default `bundles/`).
+//! Loading: a base file with a mandatory embedded `profile:` (the fallback for unattributed
+//! traffic — unnamed, and not referenceable from anywhere), plus, by convention, one *named*
+//! profile per file under `profiles_path` (default `profiles/`), one bundle per file under
+//! `bundles_path` (default `bundles/`), and one transform bundle per file under
+//! `transforms_path` (default `transforms/`) — each resolved relative to the base file.
 //!
 //! This is deliberately a fixed convention rather than an arbitrary `include:` glob of full
 //! config documents: a file under `profiles_path` can only ever be a profile — its schema has
 //! no `tls`/`listeners`/anything else to accidentally clobber — and the filename *is* the key,
 //! so two profiles cannot silently collide the way two arbitrary included files defining the
-//! same `profiles.<name>` key once could. The path being configurable (rather than the
-//! directory name being negotiable too) keeps that guarantee: wherever it points, a file
-//! found there is still deserialised as nothing but a profile. The base file may still define
-//! `profiles:`/`bundles:` inline for a config small enough not to need the split; a name that
-//! appears both inline and as a file is a load error, not a silent override.
+//! same key once could (a collision between two `profiles_path` files is in any case
+//! impossible: the filesystem already guarantees unique filenames within one directory). The
+//! path being configurable (rather than the directory name being negotiable too) keeps that
+//! guarantee: wherever it points, a file found there is still deserialised as nothing but a
+//! profile.
 
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
 use crate::layer::HostSet;
-use crate::model::{Config, Profile};
+use crate::model::{Config, Profile, TransformBundle};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -36,38 +38,39 @@ pub enum LoadError {
     },
 
     #[error(
-        "profile `{name}` is defined both in {path} and inline in the base config — name it \
-         in only one place"
-    )]
-    DuplicateProfile { name: String, path: PathBuf },
-
-    #[error(
         "bundle `{name}` is defined both in {path} and inline in the base config — name it in \
          only one place"
     )]
     DuplicateBundle { name: String, path: PathBuf },
 }
 
-/// Load a config file, plus every profile under `profiles_path` and every bundle under
-/// `bundles_path` (each defaulting to `profiles`/`bundles` next to the base file).
+/// Load a config file: its mandatory embedded `profile:`, plus every named profile under
+/// `profiles_path`, every bundle under `bundles_path`, and every transform bundle under
+/// `transforms_path`.
 pub fn load(path: impl AsRef<Path>) -> Result<Config, LoadError> {
     let path = path.as_ref();
     let mut cfg: Config = read_one(path)?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     let profiles_dir = resolve_dir(dir, &cfg.profiles_path);
-    for (name, path, profile) in load_dir::<Profile>(&profiles_dir)? {
-        if cfg.profiles.insert(name.clone(), profile).is_some() {
-            return Err(LoadError::DuplicateProfile { name, path });
-        }
-        cfg.file_backed_profiles.insert(name);
+    for (name, _found_at, profile) in load_dir::<Profile>(&profiles_dir)? {
+        cfg.profiles.insert(name, profile);
     }
+
     let bundles_dir = resolve_dir(dir, &cfg.bundles_path);
     for (name, path, bundle) in load_dir::<HostSet>(&bundles_dir)? {
         if cfg.bundles.insert(name.clone(), bundle).is_some() {
             return Err(LoadError::DuplicateBundle { name, path });
         }
     }
+
+    let transforms_dir = resolve_dir(dir, &cfg.transforms_path);
+    for (name, _found_at, bundle) in load_dir::<TransformBundle>(&transforms_dir)? {
+        // No inline transforms exist, so two files sharing a name is the only way to collide
+        // — and the filesystem itself already prevents that within one directory.
+        cfg.transforms.insert(name, bundle);
+    }
+
     Ok(cfg)
 }
 
@@ -157,23 +160,35 @@ mod tests {
         }
     }
 
+    /// Minimal valid base config: just the mandatory embedded `profile:`.
+    const BASE: &str = "tls: {}\nprofile:\n  default_action: deny\n";
+
     #[test]
-    fn file_backed_profiles_are_recorded_as_such() {
-        let dir = TempDir::new("profiles-tracked");
-        dir.write("config.yaml", "tls: {}\nprofiles:\n  base:\n    default_action: deny\n");
-        dir.write("profiles/coding-agent.yaml", "default_action: deny\n");
+    fn the_embedded_profile_is_read_but_not_added_to_the_named_profiles() {
+        let dir = TempDir::new("embedded-profile");
+        dir.write("config.yaml", BASE);
 
         let cfg = load(dir.0.join("config.yaml")).unwrap();
-        assert!(cfg.file_backed_profiles.contains("coding-agent"));
-        assert!(!cfg.file_backed_profiles.contains("base"));
+        assert!(matches!(cfg.profile.default_action, marshal_core::Decision::Deny));
+        // It has no name, so it never appears in the named-profiles map.
+        assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn a_config_with_no_profile_key_fails_to_parse() {
+        let dir = TempDir::new("missing-profile");
+        dir.write("config.yaml", "tls: {}\n");
+
+        let err = load(dir.0.join("config.yaml")).unwrap_err();
+        assert!(matches!(err, LoadError::Parse { .. }), "{err}");
     }
 
     #[test]
     fn one_profile_per_file_is_keyed_by_filename() {
         let dir = TempDir::new("profiles-ok");
-        dir.write("config.yaml", "tls: {}\n");
+        dir.write("config.yaml", BASE);
         dir.write("profiles/coding-agent.yaml", "default_action: deny\n");
-        dir.write("profiles/base.yaml", "default_action: allow\n");
+        dir.write("profiles/llm-agent.yaml", "default_action: allow\n");
 
         let cfg = load(dir.0.join("config.yaml")).unwrap();
         assert_eq!(cfg.profiles.len(), 2);
@@ -181,17 +196,30 @@ mod tests {
             cfg.profiles["coding-agent"].default_action,
             marshal_core::Decision::Deny
         ));
-        assert!(matches!(cfg.profiles["base"].default_action, marshal_core::Decision::Allow));
+        assert!(matches!(cfg.profiles["llm-agent"].default_action, marshal_core::Decision::Allow));
     }
 
     #[test]
     fn one_bundle_per_file_is_keyed_by_filename() {
         let dir = TempDir::new("bundles-ok");
-        dir.write("config.yaml", "tls: {}\n");
+        dir.write("config.yaml", BASE);
         dir.write("bundles/github.yaml", "domains: [\"github.com\"]\n");
 
         let cfg = load(dir.0.join("config.yaml")).unwrap();
         assert_eq!(cfg.bundles["github"].domains, vec!["github.com".to_string()]);
+    }
+
+    #[test]
+    fn one_transform_bundle_per_file_is_keyed_by_filename() {
+        let dir = TempDir::new("transforms-ok");
+        dir.write("config.yaml", BASE);
+        dir.write(
+            "transforms/github-token.yaml",
+            "request_transforms:\n  secrets: [{\"name\": \"GITHUB_TOKEN\"}]\n",
+        );
+
+        let cfg = load(dir.0.join("config.yaml")).unwrap();
+        assert_eq!(cfg.transforms["github-token"].request_transforms.secrets.len(), 1);
     }
 
     #[test]
@@ -200,27 +228,42 @@ mod tests {
         // profiles/ has no `tls`/`listeners` field to accidentally set — deserialising it
         // as `Profile` directly rejects anything that isn't a profile field.
         let dir = TempDir::new("profiles-cannot-smuggle");
-        dir.write("config.yaml", "tls: {}\n");
-        dir.write("profiles/base.yaml", "tls: { ca_cert: \"/evil\" }\n");
+        dir.write("config.yaml", BASE);
+        dir.write("profiles/coding-agent.yaml", "tls: { ca_cert: \"/evil\" }\n");
 
         let err = load(dir.0.join("config.yaml")).unwrap_err();
         assert!(matches!(err, LoadError::Parse { .. }), "{err}");
     }
 
     #[test]
-    fn a_name_defined_both_inline_and_as_a_file_is_a_load_error() {
-        let dir = TempDir::new("profiles-duplicate");
-        dir.write("config.yaml", "tls: {}\nprofiles:\n  base:\n    default_action: allow\n");
-        dir.write("profiles/base.yaml", "default_action: deny\n");
+    fn a_named_profile_called_default_is_unremarkable() {
+        // The embedded profile has no name of its own and is never placed in the named-profiles
+        // map, so nothing reserves "default" — a named profile is free to use it.
+        let dir = TempDir::new("profiles-named-default");
+        dir.write("config.yaml", BASE);
+        dir.write("profiles/default.yaml", "default_action: allow\n");
+
+        let cfg = load(dir.0.join("config.yaml")).unwrap();
+        assert!(matches!(cfg.profiles["default"].default_action, marshal_core::Decision::Allow));
+    }
+
+    #[test]
+    fn a_bundle_defined_both_inline_and_as_a_file_is_a_load_error() {
+        let dir = TempDir::new("bundles-duplicate");
+        dir.write(
+            "config.yaml",
+            "tls: {}\nprofile:\n  default_action: deny\nbundles:\n  github:\n    domains: [\"x\"]\n",
+        );
+        dir.write("bundles/github.yaml", "domains: [\"github.com\"]\n");
 
         let err = load(dir.0.join("config.yaml")).unwrap_err();
-        assert!(matches!(err, LoadError::DuplicateProfile { name, .. } if name == "base"));
+        assert!(matches!(err, LoadError::DuplicateBundle { name, .. } if name == "github"));
     }
 
     #[test]
     fn a_missing_profiles_directory_is_not_an_error() {
         let dir = TempDir::new("profiles-missing-dir");
-        dir.write("config.yaml", "tls: {}\n");
+        dir.write("config.yaml", BASE);
 
         let cfg = load(dir.0.join("config.yaml")).unwrap();
         assert!(cfg.profiles.is_empty());
@@ -229,16 +272,18 @@ mod tests {
     #[test]
     fn profiles_path_overrides_the_default_directory() {
         let dir = TempDir::new("profiles-path-override");
-        dir.write("config.yaml", "tls: {}\nprofiles_path: \"agent-profiles\"\n");
+        dir.write(
+            "config.yaml",
+            "tls: {}\nprofile:\n  default_action: deny\nprofiles_path: \"agent-profiles\"\n",
+        );
         // The default directory existing but unused proves this isn't accidentally reading
         // both.
-        dir.write("profiles/base.yaml", "default_action: allow\n");
+        dir.write("profiles/unused.yaml", "default_action: allow\n");
         dir.write("agent-profiles/coding-agent.yaml", "default_action: deny\n");
 
         let cfg = load(dir.0.join("config.yaml")).unwrap();
-        assert_eq!(cfg.profiles.len(), 1);
         assert!(cfg.profiles.contains_key("coding-agent"));
-        assert!(!cfg.profiles.contains_key("base"));
+        assert!(!cfg.profiles.contains_key("unused"));
     }
 
     #[test]

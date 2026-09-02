@@ -239,10 +239,19 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// The `Resolved.profile` label used for audit/display when the fallback is the base
+/// config's embedded `profile:` rather than a named override — it has no real name, and this
+/// is never used as a lookup key (see [`SessionRegistry::uses_default_fallback`]).
+pub const DEFAULT_PROFILE_LABEL: &str = "default";
+
 /// Runs resolvers in order and falls back to an explicitly unattributed session.
 pub struct SessionRegistry {
     resolvers: Vec<Arc<dyn SessionResolver>>,
-    fallback_profile: Arc<str>,
+    /// `None` means the fallback is the base config's embedded, unnamed `profile:` — the
+    /// runtime keeps that chain separately rather than in the name-keyed map, since it has
+    /// nothing to be keyed by. `Some(name)` means `sessions.unidentified.profile` explicitly
+    /// named one of the profiles under `profiles_path` instead.
+    fallback_profile: Option<Arc<str>>,
     /// Refuse anything that cannot be attributed, rather than serving it under the fallback.
     deny_unidentified: bool,
     /// Whether any resolver needs `/proc` enrichment.
@@ -262,16 +271,11 @@ impl std::fmt::Debug for SessionRegistry {
 impl SessionRegistry {
     pub fn new(
         resolvers: Vec<Arc<dyn SessionResolver>>,
-        fallback_profile: impl AsRef<str>,
+        fallback_profile: Option<Arc<str>>,
         deny_unidentified: bool,
         enrich: bool,
     ) -> Self {
-        Self {
-            resolvers,
-            fallback_profile: Arc::from(fallback_profile.as_ref()),
-            deny_unidentified,
-            enrich,
-        }
+        Self { resolvers, fallback_profile, deny_unidentified, enrich }
     }
 
     pub fn needs_enrichment(&self) -> bool {
@@ -280,6 +284,12 @@ impl SessionRegistry {
 
     pub fn deny_unidentified(&self) -> bool {
         self.deny_unidentified
+    }
+
+    /// Whether an unattributed connection should use the runtime's embedded default chain
+    /// rather than a named one in `runtime.chains`.
+    pub fn uses_default_fallback(&self) -> bool {
+        self.fallback_profile.is_none()
     }
 
     pub fn resolver_names(&self) -> Vec<&str> {
@@ -303,7 +313,10 @@ impl SessionRegistry {
         }
         Resolved {
             session: SessionId::unidentified(),
-            profile: Arc::clone(&self.fallback_profile),
+            profile: self
+                .fallback_profile
+                .clone()
+                .unwrap_or_else(|| Arc::from(DEFAULT_PROFILE_LABEL)),
             // Saying so is the point: an unattributed request must never look like an
             // attributed one in the audit trail.
             attributed: false,
@@ -415,7 +428,7 @@ mod tests {
                 )])
                 .unwrap(),
             )],
-            "restricted",
+            Some(Arc::from("restricted")),
             false,
             false,
         );
@@ -448,7 +461,7 @@ mod tests {
                     .unwrap(),
                 ),
             ],
-            "fallback",
+            Some(Arc::from("fallback")),
             false,
             false,
         );

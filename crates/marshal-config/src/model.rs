@@ -1,6 +1,6 @@
 //! The configuration document.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use marshal_core::Decision;
 use serde::{Deserialize, Serialize};
@@ -16,10 +16,19 @@ pub struct Config {
     pub tls: Tls,
     #[serde(default)]
     pub upstream: Upstream,
-    #[serde(default)]
+    /// The fallback profile: embedded directly, not a reference to a named one, so it's
+    /// always visible in the file someone opens first and is never sourced from
+    /// `profiles_path` where it would be easy to miss. Required — there must always be a
+    /// knowable, non-arbitrary profile for unattributed traffic. It has no name and cannot be
+    /// referenced from anywhere — `profiles`/`profiles_path` are exclusively the *named*
+    /// profiles a resolver or `marshal run --profile` can pick.
+    pub profile: Profile,
+    /// Every *named* profile, found under `profiles_path`. Not part of the YAML schema
+    /// itself; populated by `load`. Does not include the embedded `profile` above.
+    #[serde(skip)]
     pub profiles: BTreeMap<String, Profile>,
-    /// Directory scanned for one profile per file (see [`crate::load`]). Relative to this
-    /// file's own directory; `~/` expands against `$HOME`.
+    /// Directory scanned for one named profile per file (see [`crate::load`]). Relative to
+    /// this file's own directory; `~/` expands against `$HOME`.
     #[serde(default = "default_profiles_path")]
     pub profiles_path: String,
     #[serde(default)]
@@ -30,13 +39,14 @@ pub struct Config {
     /// Directory scanned for one bundle per file. Same resolution rules as `profiles_path`.
     #[serde(default = "default_bundles_path")]
     pub bundles_path: String,
-    /// Names of profiles sourced from a file under `profiles_path`, as opposed to defined
-    /// inline in this document. Not part of the YAML schema — populated by `load`, and read
-    /// by `validate` to require that `sessions.unidentified.profile` names a profile defined
-    /// inline: the fallback applied to unattributed traffic is important enough that it
-    /// should be visible in the file someone opens first, not one they have to go find.
+    /// Every named transform bundle found under `transforms_path` — see [`Profile::transforms`].
     #[serde(skip)]
-    pub file_backed_profiles: BTreeSet<String>,
+    pub transforms: BTreeMap<String, TransformBundle>,
+    /// Directory scanned for one transform bundle per file. Same resolution rules as
+    /// `profiles_path`. There is no inline equivalent — a transform bundle only ever comes
+    /// from a file, referenced by name.
+    #[serde(default = "default_transforms_path")]
+    pub transforms_path: String,
 }
 
 fn default_profiles_path() -> String {
@@ -45,6 +55,23 @@ fn default_profiles_path() -> String {
 
 fn default_bundles_path() -> String {
     "bundles".to_owned()
+}
+
+fn default_transforms_path() -> String {
+    "transforms".to_owned()
+}
+
+/// One named, reusable pair of request/response transforms, referenced by a profile via
+/// `transforms: <name>` instead of embedding `request_transforms`/`response_transforms`
+/// directly. Lives under `transforms_path`, one bundle per file, keyed by filename — the same
+/// convention `profiles_path`/`bundles_path` use.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransformBundle {
+    #[serde(default)]
+    pub request_transforms: RequestTransforms,
+    #[serde(default)]
+    pub response_transforms: ResponseTransforms,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -178,9 +205,6 @@ fn default_deny_cidrs() -> Vec<String> {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
-    /// Merged base-first from the named parent profile.
-    #[serde(default)]
-    pub extends: Option<String>,
     /// Applied when **every** layer returned `Pass`. Defaults to `Deny`; this is where the
     /// product's default-deny guarantee lives.
     #[serde(default)]
@@ -194,10 +218,14 @@ pub struct Profile {
     /// Ordered chain. First terminal verdict wins.
     #[serde(default)]
     pub policy: Vec<LayerConfig>,
-    /// Applied on the way out, after the chain has allowed.
+    /// A named bundle from `transforms_path`, used in place of `request_transforms`/
+    /// `response_transforms` below. Mutually exclusive with setting either of them directly.
+    #[serde(default)]
+    pub transforms: Option<String>,
+    /// Applied on the way out, after the chain has allowed. Ignored if `transforms` is set.
     #[serde(default)]
     pub request_transforms: RequestTransforms,
-    /// Applied on the way back to the agent.
+    /// Applied on the way back to the agent. Ignored if `transforms` is set.
     #[serde(default)]
     pub response_transforms: ResponseTransforms,
 }
@@ -413,7 +441,10 @@ pub struct PeerCredEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Unidentified {
-    pub profile: String,
+    /// Which profile unattributed traffic gets. Defaults to the embedded `profile:` — set
+    /// this only to name a *different* one from `profiles_path` instead.
+    #[serde(default)]
+    pub profile: Option<String>,
     #[serde(default)]
     pub action: UnidentifiedAction,
 }

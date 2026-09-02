@@ -17,25 +17,24 @@ use support::*;
 
 /// Allows the loopback MCP server, permits two tools, denies everything else.
 const MCP_PROFILE: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: pass
-        on_miss: deny
-      - layer: mcp
-        servers:
-          - rules: [{ cidr: "127.0.0.0/8" }]
-            tools:
-              - name: "search_*"
-              - name: "create_issue"
-                when: [{ path: owner, equals: gregbacchus }]
-      - layer: rules
-        expressions:
-          - when: 'true'
-            verdict: allow
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: pass
+      on_miss: deny
+    - layer: mcp
+      servers:
+        - rules: [{ cidr: "127.0.0.0/8" }]
+          tools:
+            - name: "search_*"
+            - name: "create_issue"
+              when: [{ path: owner, equals: gregbacchus }]
+    - layer: rules
+      expressions:
+        - when: 'true'
+          verdict: allow
 "#;
 
 struct Harness {
@@ -60,11 +59,11 @@ async fn harness() -> Harness {
     let mut chains = HashMap::new();
     chains.insert(
         Arc::from("p"),
-        Arc::new(build_chain(&cfg, "p", Arc::new(DenyingDecider)).unwrap()),
+        Arc::new(build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap()),
     );
 
     let mut transforms = HashMap::new();
-    transforms.insert(Arc::from("p"), build_response_transforms(&cfg, "p").unwrap());
+    transforms.insert(Arc::from("p"), build_response_transforms(&cfg, "p", &cfg.profile).unwrap());
 
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
     let server = Server::new(
@@ -73,7 +72,15 @@ async fn harness() -> Harness {
             chains,
             response_transforms: transforms,
             request_transforms: std::collections::HashMap::new(),
-            sessions: Arc::new(SessionRegistry::new(vec![], "p", false, false)),
+            default_chain: Arc::new(marshal_policy::Chain::new(
+                "default",
+                vec![],
+                marshal_core::Decision::Deny,
+                Arc::new(DenyingDecider),
+            )),
+            default_response_transforms: Vec::new(),
+            default_request_transforms: Vec::new(),
+            sessions: Arc::new(SessionRegistry::new(vec![], Some(Arc::from("p")), false, false)),
             passthrough: HostMatcher::default(),
             tls: engine,
         }),

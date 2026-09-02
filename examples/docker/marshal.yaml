@@ -25,26 +25,11 @@ upstream:
   # The containers are on a private network, and the proxy must reach the internet past it.
   allow_private: true
 
-profiles:
-  github-only:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { domains: ["api.github.com", "github.com"] }
-        on_match: allow
-        on_miss: pass
-
-  llm-only:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { domains: ["api.anthropic.com"] }
-        on_match: allow
-        on_miss: pass
-
-  # Anything unattributed. Deliberately permits nothing.
-  restricted:
-    default_action: deny
+# Anything unattributed. Embedded, not named, and deliberately permits nothing — see
+# profiles/github-only.yaml and profiles/llm-only.yaml for the two named profiles the
+# containers below actually resolve into.
+profile:
+  default_action: deny
 
 sessions:
   resolvers:
@@ -55,5 +40,4 @@ sessions:
         - { cidr: "172.28.0.11/32", session: "agent-b", profile: llm-only }
 
   unidentified:
-    profile: restricted
     action: allow_with_profile

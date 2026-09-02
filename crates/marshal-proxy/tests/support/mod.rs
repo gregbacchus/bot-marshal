@@ -295,7 +295,12 @@ pub fn request(target: std::net::SocketAddr, path: &str) -> Request<TestBody> {
 /// A registry with no resolvers: everything lands in the unattributed fallback, which is what
 /// the pre-M4 tests assume.
 pub fn no_resolvers() -> Arc<marshal_proxy::sessions::SessionRegistry> {
-    Arc::new(marshal_proxy::sessions::SessionRegistry::new(vec![], "p", false, false))
+    Arc::new(marshal_proxy::sessions::SessionRegistry::new(
+        vec![],
+        Some(Arc::from("p")),
+        false,
+        false,
+    ))
 }
 
 /// A plain TCP upstream that greets and echoes, for tests that do not need TLS.
@@ -381,6 +386,14 @@ pub fn runtime_with(
         chains,
         response_transforms: response_map,
         request_transforms: request_map,
+        default_chain: Arc::new(marshal_policy::Chain::new(
+            "default",
+            vec![],
+            marshal_core::Decision::Deny,
+            Arc::new(marshal_core::DenyingDecider),
+        )),
+        default_response_transforms: Vec::new(),
+        default_request_transforms: Vec::new(),
         sessions: no_resolvers(),
         passthrough,
         tls,

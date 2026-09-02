@@ -17,11 +17,8 @@ use marshal_judge::{AnthropicProvider, CompiledScope, Judge, OpenAiProvider, Pro
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
-    #[error("unknown profile `{0}`")]
-    UnknownProfile(String),
-
-    #[error("profile `{profile}` has a cyclic `extends` chain")]
-    CyclicExtends { profile: String },
+    #[error("unknown transform bundle `{0}`")]
+    UnknownTransformBundle(String),
 
     #[error("profile `{profile}`, layer `{layer}`: {source}")]
     Pattern {
@@ -69,59 +66,25 @@ pub enum BuildError {
     },
 }
 
-/// Resolve a profile's `extends` chain into an effective profile.
+/// Resolve a profile's `transforms: <name>` indirection, if it has one, into an effective
+/// profile whose `request_transforms`/`response_transforms` are ready to use.
 ///
-/// Scalars and transform sections merge child-over-parent. The **policy chain does not
-/// merge**: a
-/// child that declares any layers replaces the parent's chain outright. Splicing two ordered
-/// chains together would silently change precedence, and in a short-circuiting chain
-/// precedence is the whole semantics — better to make the child restate what it wants.
+/// `marshal config check` already rejects a profile that sets `transforms` alongside either
+/// section directly, so exactly one of "inline" or "named bundle" is ever populated on the
+/// input — this just resolves the latter into the same shape as the former.
 pub fn resolve_profile(
     cfg: &Config,
-    name: &str,
+    profile: &marshal_config::model::Profile,
 ) -> Result<marshal_config::model::Profile, BuildError> {
-    let mut lineage = Vec::new();
-    let mut current = name.to_owned();
-
-    loop {
-        if lineage.contains(&current) {
-            return Err(BuildError::CyclicExtends { profile: current });
-        }
-        let profile = cfg
-            .profiles
-            .get(&current)
-            .ok_or_else(|| BuildError::UnknownProfile(current.clone()))?;
-        lineage.push(current.clone());
-        match &profile.extends {
-            Some(parent) => current = parent.clone(),
-            None => break,
-        }
+    let mut effective = profile.clone();
+    if let Some(name) = &profile.transforms {
+        let bundle = cfg
+            .transforms
+            .get(name)
+            .ok_or_else(|| BuildError::UnknownTransformBundle(name.clone()))?;
+        effective.request_transforms = bundle.request_transforms.clone();
+        effective.response_transforms = bundle.response_transforms.clone();
     }
-
-    // Root first, so children override.
-    let mut effective = marshal_config::model::Profile::default();
-    for ancestor in lineage.iter().rev() {
-        let p = &cfg.profiles[ancestor];
-        effective.default_action = p.default_action;
-        effective.i_understand_this_is_allow_by_default = p.i_understand_this_is_allow_by_default;
-        effective.mode = p.mode;
-        if !p.policy.is_empty() {
-            effective.policy = p.policy.clone();
-        }
-        if p.request_transforms.headers.is_some() {
-            effective.request_transforms.headers = p.request_transforms.headers.clone();
-        }
-        if !p.request_transforms.secrets.is_empty() {
-            effective.request_transforms.secrets = p.request_transforms.secrets.clone();
-        }
-        if p.response_transforms.headers.is_some() {
-            effective.response_transforms.headers = p.response_transforms.headers.clone();
-        }
-        if !p.response_transforms.body.is_empty() {
-            effective.response_transforms.body = p.response_transforms.body.clone();
-        }
-    }
-    effective.extends = None;
     Ok(effective)
 }
 
@@ -133,9 +96,10 @@ pub fn resolve_profile(
 pub fn build_chain(
     cfg: &Config,
     profile_name: &str,
+    profile: &marshal_config::model::Profile,
     decider: Arc<dyn Decider>,
 ) -> Result<Chain, BuildError> {
-    let profile = resolve_profile(cfg, profile_name)?;
+    let profile = resolve_profile(cfg, profile)?;
     let mut layers: Vec<Arc<dyn PolicyLayer>> = Vec::new();
 
     for layer in &profile.policy {
@@ -287,8 +251,9 @@ pub fn build_chain(
 pub fn build_response_transforms(
     cfg: &Config,
     profile_name: &str,
+    profile: &marshal_config::model::Profile,
 ) -> Result<Vec<Arc<dyn marshal_core::ResponseTransform>>, BuildError> {
-    let profile = resolve_profile(cfg, profile_name)?;
+    let profile = resolve_profile(cfg, profile)?;
     let mut out: Vec<Arc<dyn marshal_core::ResponseTransform>> = Vec::new();
 
     for layer in &profile.policy {

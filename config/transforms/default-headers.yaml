@@ -1,0 +1,6 @@
+# A named transform bundle: request_transforms and/or response_transforms in one file,
+# referenced from a profile via `transforms: default-headers` instead of repeating this
+# allowlist in every profile that wants the same baseline header filtering.
+request_transforms:
+  headers:
+    allow: ["accept*", "content-*", "user-agent", "authorization"]

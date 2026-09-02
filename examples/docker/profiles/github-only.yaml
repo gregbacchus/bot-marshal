@@ -1,0 +1,6 @@
+default_action: deny
+policy:
+  - layer: allowlist
+    allow: { domains: ["api.github.com", "github.com"] }
+    on_match: allow
+    on_miss: pass

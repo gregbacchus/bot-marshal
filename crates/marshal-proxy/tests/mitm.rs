@@ -20,14 +20,13 @@ use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
 use support::*;
 
 const ALLOW_LOOPBACK: &str = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
 "#;
 
 struct Harness {
@@ -51,7 +50,7 @@ async fn harness(yaml: &str, passthrough: &[&str]) -> Harness {
         Arc::new(TlsEngine::with_extra_roots(minter, std::slice::from_ref(&pki.ca_pem)).unwrap());
 
     let cfg: Config = serde_yaml_ng::from_str(yaml).unwrap();
-    let chain = build_chain(&cfg, "p", Arc::new(DenyingDecider)).unwrap();
+    let chain = build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap();
     let guard = UpstreamGuard::new(Vec::<String>::new(), true).unwrap();
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
 
@@ -273,7 +272,7 @@ async fn passthrough_hosts_are_tunnelled_not_intercepted() {
         Arc::new(TlsEngine::with_extra_roots(minter, std::slice::from_ref(&pki.ca_pem)).unwrap());
 
     let cfg: Config = serde_yaml_ng::from_str(ALLOW_LOOPBACK).unwrap();
-    let chain = build_chain(&cfg, "p", Arc::new(DenyingDecider)).unwrap();
+    let chain = build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap();
     let server = Server::new(
         ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
         handle(runtime_with(
@@ -308,16 +307,15 @@ async fn policy_sees_the_decrypted_request() {
     // The whole point of M2: a rule can now refuse a path inside an allowlisted host, which
     // a tunnel-only proxy could never do.
     let yaml = r#"
-profiles:
-  p:
-    default_action: deny
-    policy:
-      - layer: denylist
-        deny: { domains: ["never.test"] }
-      - layer: allowlist
-        allow: { cidrs: ["127.0.0.0/8"] }
-        on_match: allow
-        on_miss: pass
+profile:
+  default_action: deny
+  policy:
+    - layer: denylist
+      deny: { domains: ["never.test"] }
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
 "#;
     let h = harness(yaml, &[]).await;
     let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;

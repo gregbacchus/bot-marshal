@@ -21,12 +21,21 @@ use crate::sessions::SessionRegistry;
 
 /// A complete, self-consistent view of the configuration.
 pub struct Runtime {
+    /// Every *named* profile — nothing here for the base config's embedded `profile:`, which
+    /// has no name and lives in `default_chain`/`default_response_transforms`/
+    /// `default_request_transforms` instead.
     pub chains: HashMap<Arc<str>, Arc<Chain>>,
     pub response_transforms: HashMap<Arc<str>, Vec<Arc<dyn ResponseTransform>>>,
     /// Per profile, exactly like `chains` and `response_transforms`: a profile's
     /// `request_transforms.secrets` is only meaningful for sessions resolved into that
     /// profile, and must not leak into another profile's requests.
     pub request_transforms: HashMap<Arc<str>, Vec<Arc<dyn RequestTransform>>>,
+    /// The chain for the base config's embedded, unnamed `profile:` — used whenever a
+    /// connection is unattributed and `sessions.unidentified.profile` did not name a
+    /// different, real profile instead. See [`crate::sessions::SessionRegistry::uses_default_fallback`].
+    pub default_chain: Arc<Chain>,
+    pub default_response_transforms: Vec<Arc<dyn ResponseTransform>>,
+    pub default_request_transforms: Vec<Arc<dyn RequestTransform>>,
     pub sessions: Arc<SessionRegistry>,
     /// Hosts tunnelled without interception, for genuinely certificate-pinned clients. The
     /// only sanctioned exception to interception — see [`Runtime::tls`].
@@ -112,7 +121,20 @@ mod tests {
             chains,
             response_transforms: HashMap::new(),
             request_transforms: HashMap::new(),
-            sessions: Arc::new(SessionRegistry::new(vec![], profile, false, false)),
+            default_chain: Arc::new(Chain::new(
+                "default",
+                vec![],
+                Decision::Deny,
+                Arc::new(DenyingDecider),
+            )),
+            default_response_transforms: Vec::new(),
+            default_request_transforms: Vec::new(),
+            sessions: Arc::new(SessionRegistry::new(
+                vec![],
+                Some(Arc::from(profile)),
+                false,
+                false,
+            )),
             passthrough: HostMatcher::default(),
             tls: test_engine(),
         }
