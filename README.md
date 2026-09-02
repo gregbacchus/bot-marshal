@@ -65,6 +65,7 @@ Full documentation lives in **[docs/](docs/)**.
 | [Operations](docs/operations.md) | management API, hot reload, warn-mode rollout |
 | [Production](docs/production.md) | dedicated service user, systemd |
 | [Roadmap](docs/roadmap.md) | what is built, what deliberately is not |
+| [Architecture decisions](docs/adr/) | why the design is the way it is |
 
 ## How it works, briefly
 
@@ -102,7 +103,7 @@ crates/          eleven crates; marshal-core holds the traits and depends on no 
 config/          a fuller example config, with profiles/, bundles/ and transforms/
 deploy/          nftables ruleset for transparent mode
 examples/docker/ compose: two containers captured with no proxy env vars at all
-docs/            documentation
+docs/            documentation, including architecture decision records
 ```
 
 `AGENTS.md` covers working on this codebase.

@@ -34,3 +34,5 @@ Start here if you are new; each page below stands on its own once you have.
 ## Project
 
 * **[Roadmap](roadmap.md)** — what is built, what is deliberately not, and why.
+* **[Architecture decisions](adr/)** — why the design is the way it is: the constraints that
+  forced each significant choice, and the alternatives rejected.
