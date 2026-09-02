@@ -209,6 +209,19 @@ A sibling `bundles/` directory works the same way for named allow-lists (`config
 in this repo — `github.yaml`, `npm.yaml`, …), which a policy references by name
 (`allow: { bundles: [github] }`) instead of repeating domains in every profile that needs them.
 
+`profiles_path`/`bundles_path` rename or relocate either directory, if `profiles/`/`bundles/`
+next to the config file doesn't fit — a shared bundle set kept outside this config's own tree,
+for instance:
+
+```yaml
+profiles_path: "agent-profiles"     # relative to this file, like the default
+bundles_path: "~/.config/bot-marshal/shared-bundles"   # ~/ expands against $HOME
+```
+
+Relocating the directory doesn't loosen anything: a file found there is still deserialised as
+nothing but a profile or bundle, so the same structural guarantees apply regardless of where
+`profiles_path` points it.
+
 The point of a fixed convention over a generic glob-of-full-documents is that each file's
 *schema* is scoped to what its directory promises: a file under `profiles/` deserialises
 directly as a profile, so it structurally cannot also set `tls:`/`listeners:`/anything else —

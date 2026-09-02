@@ -1,13 +1,16 @@
-//! Loading: a base file plus, by convention, one profile per file under `profiles/` and one
-//! bundle per file under `bundles/`, both resolved relative to the base file.
+//! Loading: a base file plus, by convention, one profile per file under `profiles_path`
+//! (default `profiles/`, resolved relative to the base file) and one bundle per file under
+//! `bundles_path` (default `bundles/`).
 //!
 //! This is deliberately a fixed convention rather than an arbitrary `include:` glob of full
-//! config documents: a file under `profiles/` can only ever be a profile — its schema has no
-//! `tls`/`listeners`/anything else to accidentally clobber — and the filename *is* the key, so
-//! two profiles cannot silently collide the way two arbitrary included files defining the same
-//! `profiles.<name>` key once could. The base file may still define `profiles:`/`bundles:`
-//! inline for a config small enough not to need the split; a name that appears both inline and
-//! as a file is a load error, not a silent override.
+//! config documents: a file under `profiles_path` can only ever be a profile — its schema has
+//! no `tls`/`listeners`/anything else to accidentally clobber — and the filename *is* the key,
+//! so two profiles cannot silently collide the way two arbitrary included files defining the
+//! same `profiles.<name>` key once could. The path being configurable (rather than the
+//! directory name being negotiable too) keeps that guarantee: wherever it points, a file
+//! found there is still deserialised as nothing but a profile. The base file may still define
+//! `profiles:`/`bundles:` inline for a config small enough not to need the split; a name that
+//! appears both inline and as a file is a load error, not a silent override.
 
 use std::path::{Path, PathBuf};
 
@@ -45,25 +48,47 @@ pub enum LoadError {
     DuplicateBundle { name: String, path: PathBuf },
 }
 
-/// Load a config file, plus every profile under a sibling `profiles/` directory and every
-/// bundle under a sibling `bundles/` directory.
+/// Load a config file, plus every profile under `profiles_path` and every bundle under
+/// `bundles_path` (each defaulting to `profiles`/`bundles` next to the base file).
 pub fn load(path: impl AsRef<Path>) -> Result<Config, LoadError> {
     let path = path.as_ref();
     let mut cfg: Config = read_one(path)?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
 
-    for (name, path, profile) in load_dir::<Profile>(&dir.join("profiles"))? {
+    let profiles_dir = resolve_dir(dir, &cfg.profiles_path);
+    for (name, path, profile) in load_dir::<Profile>(&profiles_dir)? {
         if cfg.profiles.insert(name.clone(), profile).is_some() {
             return Err(LoadError::DuplicateProfile { name, path });
         }
         cfg.file_backed_profiles.insert(name);
     }
-    for (name, path, bundle) in load_dir::<HostSet>(&dir.join("bundles"))? {
+    let bundles_dir = resolve_dir(dir, &cfg.bundles_path);
+    for (name, path, bundle) in load_dir::<HostSet>(&bundles_dir)? {
         if cfg.bundles.insert(name.clone(), bundle).is_some() {
             return Err(LoadError::DuplicateBundle { name, path });
         }
     }
     Ok(cfg)
+}
+
+/// Resolves `profiles_path`/`bundles_path` against the base file's directory. `~/` expands
+/// against `$HOME` first; an already-absolute result then wins outright, since joining an
+/// absolute path onto `base` is a no-op — `base` only ever contributes for a relative path.
+fn resolve_dir(base: &Path, raw: &str) -> PathBuf {
+    base.join(expand_tilde(raw, std::env::var_os("HOME")))
+}
+
+/// `home` is threaded through explicitly, rather than read here via `std::env::var_os`, so
+/// this stays a pure function callers can test without mutating process-wide environment
+/// state (which is unsound to do from a multi-threaded test binary anyway).
+fn expand_tilde(p: &str, home: Option<std::ffi::OsString>) -> PathBuf {
+    match p.strip_prefix("~/") {
+        Some(rest) => match home {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => PathBuf::from(p),
+        },
+        None => PathBuf::from(p),
+    }
 }
 
 fn read_one<T: DeserializeOwned>(path: &Path) -> Result<T, LoadError> {
@@ -199,5 +224,36 @@ mod tests {
 
         let cfg = load(dir.0.join("config.yaml")).unwrap();
         assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn profiles_path_overrides_the_default_directory() {
+        let dir = TempDir::new("profiles-path-override");
+        dir.write("config.yaml", "tls: {}\nprofiles_path: \"agent-profiles\"\n");
+        // The default directory existing but unused proves this isn't accidentally reading
+        // both.
+        dir.write("profiles/base.yaml", "default_action: allow\n");
+        dir.write("agent-profiles/coding-agent.yaml", "default_action: deny\n");
+
+        let cfg = load(dir.0.join("config.yaml")).unwrap();
+        assert_eq!(cfg.profiles.len(), 1);
+        assert!(cfg.profiles.contains_key("coding-agent"));
+        assert!(!cfg.profiles.contains_key("base"));
+    }
+
+    #[test]
+    fn expand_tilde_resolves_against_the_given_home_without_touching_the_environment() {
+        assert_eq!(
+            expand_tilde("~/profiles", Some("/home/agent".into())),
+            PathBuf::from("/home/agent/profiles")
+        );
+        // No `~/` prefix: passed through untouched, `home` irrelevant.
+        assert_eq!(
+            expand_tilde("/etc/bot-marshal/profiles", Some("/home/agent".into())),
+            PathBuf::from("/etc/bot-marshal/profiles")
+        );
+        // `~/` present but no HOME to expand against: left as a literal path rather than
+        // guessed at, matching the rest of the project's `~/` handling.
+        assert_eq!(expand_tilde("~/profiles", None), PathBuf::from("~/profiles"));
     }
 }

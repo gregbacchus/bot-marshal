@@ -18,18 +18,33 @@ pub struct Config {
     pub upstream: Upstream,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+    /// Directory scanned for one profile per file (see [`crate::load`]). Relative to this
+    /// file's own directory; `~/` expands against `$HOME`.
+    #[serde(default = "default_profiles_path")]
+    pub profiles_path: String,
     #[serde(default)]
     pub sessions: Sessions,
     /// Named host sets importable by profiles via `allow.bundles`.
     #[serde(default)]
     pub bundles: BTreeMap<String, crate::layer::HostSet>,
-    /// Names of profiles sourced from a file under `profiles/`, as opposed to defined inline
-    /// in this document. Not part of the YAML schema — populated by `load`, and read by
-    /// `validate` to require that `sessions.unidentified.profile` names a profile defined
+    /// Directory scanned for one bundle per file. Same resolution rules as `profiles_path`.
+    #[serde(default = "default_bundles_path")]
+    pub bundles_path: String,
+    /// Names of profiles sourced from a file under `profiles_path`, as opposed to defined
+    /// inline in this document. Not part of the YAML schema — populated by `load`, and read
+    /// by `validate` to require that `sessions.unidentified.profile` names a profile defined
     /// inline: the fallback applied to unattributed traffic is important enough that it
     /// should be visible in the file someone opens first, not one they have to go find.
     #[serde(skip)]
     pub file_backed_profiles: BTreeSet<String>,
+}
+
+fn default_profiles_path() -> String {
+    "profiles".to_owned()
+}
+
+fn default_bundles_path() -> String {
+    "bundles".to_owned()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
