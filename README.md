@@ -106,8 +106,8 @@ Every subcommand accepts two global flags, before the subcommand name:
 | flag | env var | default | |
 |---|---|---|---|
 | `--config`, `-c <path>` | `MARSHAL_CONFIG` | `$XDG_CONFIG_HOME/bot-marshal/config.yaml` | usually `~/.config/bot-marshal/config.yaml`; a system service should pass an explicit path (see [Running as a service](#running-as-a-service)) |
-| `--log <level>` | `MARSHAL_LOG` | `info` | `error`, `warn`, `info`, `debug`, `trace` — the `log` channel's verbosity only; see [Watching activity](#watching-activity) |
-| `--log-channels <list>` | `MARSHAL_LOG_CHANNELS` | `log,access` | comma-separated subset of `log`, `access`, `audit` |
+| `--log <level>` | `MARSHAL_LOG` | `info` | `error`, `warn`, `info`, `debug`, `trace` — the base messages' verbosity only; see [Watching activity](#watching-activity) |
+| `--log-detail <level>` | `MARSHAL_LOG_DETAIL` | `access` | `log`, `access`, `audit` — how much per-request lines carry |
 | `--log-sink <dest>` | `MARSHAL_LOG_SINK` | `auto` | `auto`, `stdout`, `journald`, `syslog` |
 | `--log-format <fmt>` | `MARSHAL_LOG_FORMAT` | `auto` | `auto`, `pretty`, `json` — stdout only |
 
@@ -229,19 +229,20 @@ everywhere else identity is involved.
 
 ## Watching activity
 
-Everything bot-marshal logs falls into three channels:
+Base operational messages (startup, warnings, shutdown) always print. `--log-detail` adds a
+line per request on top, at one of three levels — each a strict superset of the one before,
+so this is a level, not a set of things to combine:
 
-* **`log`** — operational messages: startup ("explicit proxy listening"), warnings, shutdown.
-* **`access`** — one line per request: session, host, method, profile, which layer decided,
-  how long it took. This is what you watch to see traffic.
-* **`audit`** — the same, plus everything `access` leaves out: status code, whether the
-  verdict was cached, `would_deny`, and the full evidence trail.
+* **`log`** — no per-request lines at all, just the base messages.
+* **`access`** (default) — one summary line per request: session, host, method, profile,
+  which layer decided, how long it took. This is what you watch to see traffic.
+* **`audit`** — the same line with everything else added: status code, whether the verdict
+  was cached, `would_deny`, and the full evidence trail. Noticeably bulkier — reach for it
+  while a policy is still being worked out (`--log-detail audit`), and drop back to `access`
+  once it's settled.
 
-`--log-channels` (default `log,access`) picks which are active; add `audit`
-(`--log-channels log,access,audit`) when the full evidence trail per line is worth the bulk
-— e.g. while a policy is still being worked out — and drop it again once it's settled. All
-active channels go to the same place and render the same way — there's one destination and
-one format, not one per channel:
+Whatever `--log-detail` is set to, it all goes to the same place and renders the same way —
+one destination and one format, not one per level:
 
 * **`--log-sink`** (`auto` by default) picks the destination: **journald**, if `JOURNAL_STREAM`
   is set (true for any systemd unit whose stdout/stderr is the journal) and the socket
@@ -252,7 +253,7 @@ one format, not one per channel:
   want plain stdout while running under something that sets `JOURNAL_STREAM`.
 
 * **`--log-format`** (`auto` by default; stdout only — journald and syslog format
-  themselves) decides how stdout renders every active channel: `auto` checks whether stdout
+  themselves) decides how stdout renders every line: `auto` checks whether stdout
   is actually a terminal — a human watching `marshal serve` in a shell gets short, coloured
   lines; anything reading the stream programmatically (`docker logs`, a file redirect, a
   collector that doesn't set `JOURNAL_STREAM`) gets one JSON object per line, unprompted, no
