@@ -328,9 +328,14 @@ async fn serve(
         }
     }
     if let Some(path) = &audit_log {
+        // Every record carries identities, destinations, paths and policy decisions — mode
+        // 0600 on creation so another local user can't read it off a shared umask. This only
+        // sets the mode on a file that doesn't exist yet; an existing file keeps whatever
+        // permissions it already had.
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open(path)
             .await
             .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;

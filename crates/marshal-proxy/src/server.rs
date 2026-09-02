@@ -328,6 +328,7 @@ impl Server {
         // interception to see method and path.
         let cx = self.context(
             &attribution,
+            IngressMode::Transparent,
             peer,
             authority.clone(),
             if intercepted.tls { "CONNECT" } else { "GET" },
@@ -468,6 +469,7 @@ impl Server {
 
         let cx = self.context(
             &attribution,
+            IngressMode::Explicit,
             peer,
             authority.clone(),
             "CONNECT",
@@ -524,6 +526,7 @@ impl Server {
                 chain: Arc::clone(&attribution.chain),
                 audit: Arc::clone(&self.audit),
                 authority: authority.clone(),
+                ingress: cx.ingress,
                 identity: cx.identity.clone(),
                 profile: Arc::clone(&attribution.resolved.profile),
                 client_addr: peer,
@@ -645,6 +648,7 @@ impl Server {
 
         let cx = self.context(
             &attribution,
+            IngressMode::Explicit,
             peer,
             request.authority.clone(),
             &request.method,
@@ -758,6 +762,7 @@ impl Server {
                     chain: Arc::clone(&attribution.chain),
                     audit: Arc::clone(&self.audit),
                     authority: authority.clone(),
+                    ingress: cx.ingress,
                     identity: cx.identity.clone(),
                     profile: Arc::clone(&attribution.resolved.profile),
                     client_addr: peer,
@@ -858,9 +863,11 @@ impl Server {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn context(
         &self,
         attribution: &Attribution,
+        ingress: IngressMode,
         peer: std::net::SocketAddr,
         authority: Authority,
         method: &str,
@@ -870,7 +877,7 @@ impl Server {
         RequestContext {
             identity: attribution.resolved.identity.clone(),
             profile: Arc::clone(&attribution.resolved.profile),
-            ingress: IngressMode::Explicit,
+            ingress,
             phase,
             client_addr: peer,
             authority,
@@ -901,7 +908,12 @@ impl Server {
                 attributed: attribution.resolved.attributed,
                 resolver: attribution.resolved.resolver.clone(),
                 profile: cx.profile.to_string(),
-                ingress: "explicit".into(),
+                ingress: match cx.ingress {
+                    IngressMode::Explicit => "explicit",
+                    IngressMode::Transparent => "transparent",
+                    IngressMode::Dns => "dns",
+                }
+                .into(),
                 host: cx.authority.host.clone(),
                 method: cx.method.to_string(),
                 path: cx.uri.to_string(),

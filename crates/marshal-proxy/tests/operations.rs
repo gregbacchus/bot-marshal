@@ -284,12 +284,18 @@ async fn a_rejected_reload_says_the_old_config_still_applies() {
     let handle = Arc::clone(&h.handle);
     let stats = Arc::clone(&h.stats);
     tokio::spawn(async move {
-        let _ =
-            marshal_proxy::management::serve(&mgmt.to_string(), handle, stats, builder, None).await;
+        let _ = marshal_proxy::management::serve(
+            &mgmt.to_string(),
+            handle,
+            stats,
+            builder,
+            Some("s3cret".into()),
+        )
+        .await;
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let rejected = post(mgmt, "/v1/reload", None).await;
+    let rejected = post(mgmt, "/v1/reload", Some("s3cret")).await;
     assert_eq!(rejected.0, 400);
     assert_eq!(rejected.1["status"], "rejected");
     assert!(rejected.1["error"].as_str().unwrap().contains("bad config"));
@@ -297,6 +303,40 @@ async fn a_rejected_reload_says_the_old_config_still_applies() {
     assert!(rejected.1["note"].as_str().unwrap().contains("still in effect"));
 
     assert!(connect(h.proxy, h.upstream).await.starts_with("HTTP/1.1 200"));
+}
+
+#[tokio::test]
+async fn with_no_configured_key_every_credentialled_endpoint_refuses() {
+    // A missing `management.api_key_env` must not be read as "no credential required" — that
+    // would let anyone who can reach the listener replace the running policy. There is no
+    // token that satisfies `authorised()`, offered or not: the endpoint is disabled.
+    let h = harness(DENY_ALL).await;
+    let builder: RuntimeBuilder =
+        Arc::new(|| Ok(single_profile_runtime(chain_from(ALLOW_LOOPBACK), None)));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mgmt = listener.local_addr().unwrap();
+    drop(listener);
+
+    let handle = Arc::clone(&h.handle);
+    let stats = Arc::clone(&h.stats);
+    tokio::spawn(async move {
+        let _ =
+            marshal_proxy::management::serve(&mgmt.to_string(), handle, stats, builder, None).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // healthz and metrics stay open — they are deliberately unauthenticated regardless.
+    assert_eq!(get(mgmt, "/v1/healthz", None).await.0, 200);
+
+    // Everything bearer-gated refuses, with no token and with any offered token.
+    assert_eq!(get(mgmt, "/v1/identities", None).await.0, 401);
+    assert_eq!(get(mgmt, "/v1/identities", Some("anything")).await.0, 401);
+    assert_eq!(post(mgmt, "/v1/reload", None).await.0, 401);
+    assert_eq!(post(mgmt, "/v1/reload", Some("anything")).await.0, 401);
+
+    // And a reload attempt never actually ran — the config on disk is still deny-all.
+    assert!(connect(h.proxy, h.upstream).await.starts_with("HTTP/1.1 403"));
 }
 
 async fn get(

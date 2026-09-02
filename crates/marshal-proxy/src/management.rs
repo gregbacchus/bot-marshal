@@ -51,10 +51,12 @@ pub async fn serve(
     token: Option<String>,
 ) -> Result<(), ManagementError> {
     if token.is_none() {
-        // Reload replaces the policy. An unauthenticated one is a way to disable the proxy.
+        // Reload replaces the policy. With no key there is no credential that could ever
+        // satisfy `authorised`, so every bearer-gated endpoint refuses every request rather
+        // than falling open — set `management.api_key_env` to actually use them.
         tracing::warn!(
-            "the management API has no API key: anyone who can reach {listen} can replace \
-             the running policy. Set `management.api_key_env`."
+            "the management API has no API key: /v1/reload and /v1/identities on {listen} \
+             will refuse every request until `management.api_key_env` is set."
         );
     }
 
@@ -83,9 +85,13 @@ pub async fn serve(
 }
 
 /// Constant-time bearer check, so a token cannot be recovered by timing.
+///
+/// No configured token means no possible credential, so every authenticated endpoint refuses
+/// rather than treating the absence of a key as an absent requirement — the missing-key case
+/// is what `serve` warns about at startup, not a silent open door.
 fn authorised(state: &ManagementState, headers: &axum::http::HeaderMap) -> bool {
     let Some(expected) = &state.token else {
-        return true;
+        return false;
     };
     let Some(offered) = headers
         .get(axum::http::header::AUTHORIZATION)

@@ -112,6 +112,9 @@ pub struct MitmHandler {
     pub chain: Arc<Chain>,
     pub audit: Arc<dyn AuditSink>,
     pub authority: Authority,
+    /// How the tunnel this handler decrypts was captured. Recorded on every request inside
+    /// it, so an intercepted transparent connection doesn't audit as explicit traffic.
+    pub ingress: IngressMode,
     pub identity: Identity,
     pub profile: Arc<str>,
     pub client_addr: std::net::SocketAddr,
@@ -256,7 +259,7 @@ async fn handle_request(
     let mut cx = RequestContext {
         identity: handler.identity.clone(),
         profile: Arc::clone(&handler.profile),
-        ingress: IngressMode::Explicit,
+        ingress: handler.ingress,
         phase: marshal_core::Phase::Request,
         client_addr: handler.client_addr,
         authority: handler.authority.clone(),
@@ -625,7 +628,12 @@ async fn emit(
             attributed: handler.attributed,
             resolver: handler.resolver.clone(),
             profile: cx.profile.to_string(),
-            ingress: "explicit".into(),
+            ingress: match cx.ingress {
+                IngressMode::Explicit => "explicit",
+                IngressMode::Transparent => "transparent",
+                IngressMode::Dns => "dns",
+            }
+            .into(),
             host: cx.authority.host.clone(),
             method: cx.method.to_string(),
             path: cx.uri.path().to_string(),
