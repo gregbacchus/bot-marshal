@@ -220,6 +220,10 @@ pub enum Provider {
         api_key_env: String,
         #[serde(default)]
         max_tokens: Option<u32>,
+        /// Overrides the real API endpoint — for an Anthropic-compatible gateway or
+        /// self-hosted deployment. `scheme://host[:port]`, no path.
+        #[serde(default)]
+        base_url: Option<String>,
     },
     #[serde(rename = "openai")]
     OpenAi {
@@ -227,6 +231,11 @@ pub enum Provider {
         api_key_env: String,
         #[serde(default)]
         max_tokens: Option<u32>,
+        /// Overrides the real API endpoint — this is what makes any OpenAI-compatible
+        /// server usable: Azure OpenAI, OpenRouter, a local vLLM or Ollama instance, an
+        /// internal gateway. `scheme://host[:port]`, no path.
+        #[serde(default)]
+        base_url: Option<String>,
     },
 }
 

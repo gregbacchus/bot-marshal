@@ -12,39 +12,56 @@ use std::sync::Arc;
 
 use crate::request::JudgeRequest;
 
+use super::endpoint::{Endpoint, json_post_request, post_json};
 use super::{
-    JudgeVerdict, Provider, ProviderError, VERDICT_TOOL_NAME, connect_and_post_json,
-    default_tls_config, json_post_request, user_content, verdict_parameters_schema,
+    JudgeVerdict, Provider, ProviderError, VERDICT_TOOL_NAME, default_tls_config, user_content,
+    verdict_parameters_schema,
 };
 
-const HOST: &str = "api.openai.com";
+const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+const PATH: &str = "/v1/chat/completions";
 
 #[derive(Debug)]
 pub struct OpenAiProvider {
     model: String,
     api_key: String,
     max_tokens: u32,
+    endpoint: Endpoint,
     tls_config: Arc<rustls::ClientConfig>,
 }
 
 impl OpenAiProvider {
-    pub fn new(model: String, api_key: String, max_tokens: Option<u32>) -> Self {
-        Self {
+    /// `base_url`, when given, replaces the real API endpoint — this is what makes any
+    /// OpenAI-compatible server usable: Azure OpenAI, OpenRouter, a local vLLM or Ollama
+    /// instance, an internal gateway. `None` uses the real one.
+    pub fn new(
+        model: String,
+        api_key: String,
+        max_tokens: Option<u32>,
+        base_url: Option<&str>,
+    ) -> Result<Self, ProviderError> {
+        let endpoint = match base_url {
+            Some(url) => Endpoint::parse(url)?,
+            None => Endpoint::parse(DEFAULT_BASE_URL).expect("default base url is valid"),
+        };
+        Ok(Self {
             model,
             api_key,
             max_tokens: max_tokens.unwrap_or(256),
+            endpoint,
             tls_config: default_tls_config(),
-        }
+        })
     }
 
     pub fn from_env(
         model: String,
         api_key_env: &str,
         max_tokens: Option<u32>,
+        base_url: Option<&str>,
     ) -> Result<Self, ProviderError> {
         let api_key = std::env::var(api_key_env)
             .map_err(|_| ProviderError::MissingApiKey(api_key_env.to_owned()))?;
-        Ok(Self::new(model, api_key, max_tokens))
+        Self::new(model, api_key, max_tokens, base_url)
     }
 }
 
@@ -74,13 +91,13 @@ impl Provider for OpenAiProvider {
         });
 
         let req = json_post_request(
-            "https://api.openai.com/v1/chat/completions",
-            HOST,
+            &self.endpoint,
+            PATH,
             &[("authorization", &format!("Bearer {}", self.api_key))],
             body,
         );
 
-        let response = connect_and_post_json(HOST, &self.tls_config, req).await?;
+        let response = post_json(&self.endpoint, &self.tls_config, req).await?;
         parse_verdict(response)
     }
 }
@@ -113,6 +130,22 @@ fn parse_verdict(response: serde_json::Value) -> Result<JudgeVerdict, ProviderEr
 mod tests {
     use super::*;
     use crate::providers::Decision;
+
+    #[test]
+    fn defaults_to_the_real_api_when_no_base_url_is_given() {
+        let p = OpenAiProvider::new("m".into(), "k".into(), None, None).unwrap();
+        assert_eq!(p.endpoint, Endpoint::https("api.openai.com"));
+    }
+
+    #[test]
+    fn a_custom_base_url_reaches_a_compatible_server() {
+        // The common shape for a self-hosted OpenAI-compatible server, e.g. Ollama, vLLM.
+        let p = OpenAiProvider::new("m".into(), "k".into(), None, Some("http://localhost:11434"))
+            .unwrap();
+        assert_eq!(p.endpoint.host, "localhost");
+        assert_eq!(p.endpoint.port, 11434);
+        assert!(!p.endpoint.https);
+    }
 
     /// Shaped exactly like the OpenAPI spec's own documented example response, arguments
     /// string included, so this test would have caught treating it as a nested object.
@@ -173,9 +206,13 @@ mod tests {
 
     #[test]
     fn from_env_reports_a_missing_key_by_name() {
-        let err =
-            OpenAiProvider::from_env("m".into(), "MARSHAL_TEST_DEFINITELY_ABSENT_KEY_2", None)
-                .unwrap_err();
+        let err = OpenAiProvider::from_env(
+            "m".into(),
+            "MARSHAL_TEST_DEFINITELY_ABSENT_KEY_2",
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ProviderError::MissingApiKey(k) if k == "MARSHAL_TEST_DEFINITELY_ABSENT_KEY_2")
         );

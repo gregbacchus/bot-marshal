@@ -355,6 +355,7 @@ mod tests {
                 model: "m".into(),
                 api_key_env: "K".into(),
                 max_tokens: None,
+                base_url: None,
             },
             scope: vec![],
             prompt: "p".into(),

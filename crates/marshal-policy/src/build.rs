@@ -210,22 +210,36 @@ pub fn build_chain(
                         model,
                         api_key_env,
                         max_tokens,
+                        base_url,
                     } => Arc::new(
-                        AnthropicProvider::from_env(model.clone(), api_key_env, *max_tokens)
-                            .map_err(|source| BuildError::JudgeProvider {
-                                profile: profile_name.to_owned(),
-                                source,
-                            })?,
-                    ),
-                    marshal_config::layer::Provider::OpenAi { model, api_key_env, max_tokens } => {
-                        Arc::new(
-                            OpenAiProvider::from_env(model.clone(), api_key_env, *max_tokens)
-                                .map_err(|source| BuildError::JudgeProvider {
-                                    profile: profile_name.to_owned(),
-                                    source,
-                                })?,
+                        AnthropicProvider::from_env(
+                            model.clone(),
+                            api_key_env,
+                            *max_tokens,
+                            base_url.as_deref(),
                         )
-                    }
+                        .map_err(|source| BuildError::JudgeProvider {
+                            profile: profile_name.to_owned(),
+                            source,
+                        })?,
+                    ),
+                    marshal_config::layer::Provider::OpenAi {
+                        model,
+                        api_key_env,
+                        max_tokens,
+                        base_url,
+                    } => Arc::new(
+                        OpenAiProvider::from_env(
+                            model.clone(),
+                            api_key_env,
+                            *max_tokens,
+                            base_url.as_deref(),
+                        )
+                        .map_err(|source| BuildError::JudgeProvider {
+                            profile: profile_name.to_owned(),
+                            source,
+                        })?,
+                    ),
                 };
 
                 layers.push(Arc::new(Judge::new(

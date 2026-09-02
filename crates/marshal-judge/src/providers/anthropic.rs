@@ -7,29 +7,44 @@ use std::sync::Arc;
 
 use crate::request::JudgeRequest;
 
+use super::endpoint::{Endpoint, json_post_request, post_json};
 use super::{
-    JudgeVerdict, Provider, ProviderError, VERDICT_TOOL_NAME, connect_and_post_json,
-    default_tls_config, json_post_request, user_content, verdict_parameters_schema,
+    JudgeVerdict, Provider, ProviderError, VERDICT_TOOL_NAME, default_tls_config, user_content,
+    verdict_parameters_schema,
 };
 
-const HOST: &str = "api.anthropic.com";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const PATH: &str = "/v1/messages";
 
 #[derive(Debug)]
 pub struct AnthropicProvider {
     model: String,
     api_key: String,
     max_tokens: u32,
+    endpoint: Endpoint,
     tls_config: Arc<rustls::ClientConfig>,
 }
 
 impl AnthropicProvider {
-    pub fn new(model: String, api_key: String, max_tokens: Option<u32>) -> Self {
-        Self {
+    /// `base_url`, when given, replaces the real API endpoint — for Anthropic-compatible
+    /// gateways or self-hosted deployments. `None` uses the real one.
+    pub fn new(
+        model: String,
+        api_key: String,
+        max_tokens: Option<u32>,
+        base_url: Option<&str>,
+    ) -> Result<Self, ProviderError> {
+        let endpoint = match base_url {
+            Some(url) => Endpoint::parse(url)?,
+            None => Endpoint::parse(DEFAULT_BASE_URL).expect("default base url is valid"),
+        };
+        Ok(Self {
             model,
             api_key,
             max_tokens: max_tokens.unwrap_or(256),
+            endpoint,
             tls_config: default_tls_config(),
-        }
+        })
     }
 
     /// Read the API key from the named environment variable. A missing key is a startup-time
@@ -39,10 +54,11 @@ impl AnthropicProvider {
         model: String,
         api_key_env: &str,
         max_tokens: Option<u32>,
+        base_url: Option<&str>,
     ) -> Result<Self, ProviderError> {
         let api_key = std::env::var(api_key_env)
             .map_err(|_| ProviderError::MissingApiKey(api_key_env.to_owned()))?;
-        Ok(Self::new(model, api_key, max_tokens))
+        Self::new(model, api_key, max_tokens, base_url)
     }
 }
 
@@ -67,13 +83,13 @@ impl Provider for AnthropicProvider {
         });
 
         let req = json_post_request(
-            "https://api.anthropic.com/v1/messages",
-            HOST,
+            &self.endpoint,
+            PATH,
             &[("x-api-key", &self.api_key), ("anthropic-version", "2023-06-01")],
             body,
         );
 
-        let response = connect_and_post_json(HOST, &self.tls_config, req).await?;
+        let response = post_json(&self.endpoint, &self.tls_config, req).await?;
         parse_verdict(response)
     }
 }
@@ -98,6 +114,26 @@ fn parse_verdict(response: serde_json::Value) -> Result<JudgeVerdict, ProviderEr
 mod tests {
     use super::*;
     use crate::providers::Decision;
+
+    #[test]
+    fn defaults_to_the_real_api_when_no_base_url_is_given() {
+        let p = AnthropicProvider::new("m".into(), "k".into(), None, None).unwrap();
+        assert_eq!(p.endpoint, Endpoint::https("api.anthropic.com"));
+    }
+
+    #[test]
+    fn a_custom_base_url_is_used_instead() {
+        let p = AnthropicProvider::new("m".into(), "k".into(), None, Some("http://localhost:8081"))
+            .unwrap();
+        assert_eq!(p.endpoint.host, "localhost");
+        assert_eq!(p.endpoint.port, 8081);
+        assert!(!p.endpoint.https);
+    }
+
+    #[test]
+    fn an_invalid_base_url_is_a_clear_startup_error() {
+        assert!(AnthropicProvider::new("m".into(), "k".into(), None, Some("not a url")).is_err());
+    }
 
     #[test]
     fn parses_a_well_formed_tool_call_response() {
@@ -130,9 +166,13 @@ mod tests {
 
     #[test]
     fn from_env_reports_a_missing_key_by_name() {
-        let err =
-            AnthropicProvider::from_env("m".into(), "MARSHAL_TEST_DEFINITELY_ABSENT_KEY", None)
-                .unwrap_err();
+        let err = AnthropicProvider::from_env(
+            "m".into(),
+            "MARSHAL_TEST_DEFINITELY_ABSENT_KEY",
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ProviderError::MissingApiKey(k) if k == "MARSHAL_TEST_DEFINITELY_ABSENT_KEY")
         );

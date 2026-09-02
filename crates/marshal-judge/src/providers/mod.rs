@@ -24,23 +24,22 @@
 //!
 //! # Adding a provider
 //!
-//! Each provider owns only its request envelope and response parsing — the scoping
-//! constraints (no body, no header values, structured-output-only) live in [`crate::Judge`]
-//! itself, so a new provider inherits them automatically rather than having to reimplement
-//! them. [`connect_and_post_json`] is the shared one-shot HTTPS POST every provider so far
-//! has needed; a provider whose API does not fit that shape can bypass it.
+//! Each provider owns only its request envelope, response parsing, and default
+//! [`Endpoint`] — the scoping constraints (no body, no header values, structured-output-only)
+//! live in [`crate::Judge`] itself, so a new provider inherits them automatically. Every
+//! provider also takes an optional `base_url`: a self-hosted or compatible server (Azure
+//! OpenAI, a local vLLM/Ollama instance, an internal gateway) is a normal thing to want
+//! instead of the real vendor endpoint, and [`Endpoint::parse`] is the only code that needs
+//! to know that.
 
-use std::sync::Arc;
-
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::Request;
 use serde::Deserialize;
 
 pub mod anthropic;
+pub mod endpoint;
 pub mod openai;
 
 pub use anthropic::AnthropicProvider;
+pub use endpoint::Endpoint;
 pub use openai::OpenAiProvider;
 
 use crate::request::JudgeRequest;
@@ -79,6 +78,8 @@ pub enum ProviderError {
     MalformedVerdict(#[source] serde_json::Error),
     #[error("`{0}` is not set")]
     MissingApiKey(String),
+    #[error("invalid provider base_url: {0}")]
+    InvalidBaseUrl(String),
 }
 
 /// Something that can turn a request into a verdict. A trait so tests can substitute a fake
@@ -126,84 +127,15 @@ pub(crate) fn user_content(request: &JudgeRequest) -> String {
 }
 
 /// Build the TLS client config every provider uses: public roots, no client auth, HTTP/1.1
-/// only. Shared because there is nothing provider-specific about it.
-pub(crate) fn default_tls_config() -> Arc<rustls::ClientConfig> {
+/// only. Shared because there is nothing provider-specific about it. Only consulted when an
+/// endpoint is actually `https`.
+pub(crate) fn default_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut cfg =
         rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Arc::new(cfg)
-}
-
-/// One request, one connection, to `host`. Every provider implemented so far is a single JSON
-/// POST-and-parse over HTTPS, so this is the whole client: resolve, connect, TLS handshake,
-/// send, check status, parse. Connection reuse is an optimisation deferred rather than
-/// complexity carried from the start — the judge is called rarely relative to ordinary proxy
-/// traffic.
-pub(crate) async fn connect_and_post_json(
-    host: &'static str,
-    tls_config: &Arc<rustls::ClientConfig>,
-    req: Request<http_body_util::combinators::BoxBody<Bytes, std::convert::Infallible>>,
-) -> Result<serde_json::Value, ProviderError> {
-    let addr = tokio::net::lookup_host((host, 443))
-        .await
-        .map_err(ProviderError::Resolve)?
-        .next()
-        .ok_or_else(|| {
-        ProviderError::Resolve(std::io::Error::other(format!("no address for {host}")))
-    })?;
-
-    let tcp = tokio::net::TcpStream::connect(addr).await.map_err(ProviderError::Connect)?;
-    let server_name =
-        rustls::pki_types::ServerName::try_from(host).expect("static hostname").to_owned();
-    let tls = tokio_rustls::TlsConnector::from(Arc::clone(tls_config))
-        .connect(server_name, tcp)
-        .await
-        .map_err(ProviderError::Tls)?;
-
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls)).await?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let resp = sender.send_request(req).await?;
-    let status = resp.status();
-    let body = resp.into_body().collect().await?.to_bytes();
-
-    if !status.is_success() {
-        return Err(ProviderError::Status {
-            status: status.as_u16(),
-            body: String::from_utf8_lossy(&body).into_owned(),
-        });
-    }
-
-    serde_json::from_slice(&body).map_err(ProviderError::MalformedVerdict)
-}
-
-/// Build a JSON POST request. Shared because only the URL, headers, and body differ per
-/// provider.
-pub(crate) fn json_post_request(
-    uri: &str,
-    host: &str,
-    headers: &[(&str, &str)],
-    body: serde_json::Value,
-) -> Request<http_body_util::combinators::BoxBody<Bytes, std::convert::Infallible>> {
-    let bytes = serde_json::to_vec(&body).expect("judge request body serialises");
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("host", host)
-        .header("content-type", "application/json");
-    for (name, value) in headers {
-        builder = builder.header(*name, *value);
-    }
-    builder
-        .body(
-            Full::new(Bytes::from(bytes)).map_err(|e: std::convert::Infallible| match e {}).boxed(),
-        )
-        .expect("well-formed request")
+    std::sync::Arc::new(cfg)
 }
 
 #[cfg(test)]

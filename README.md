@@ -322,6 +322,10 @@ loudly rather than silently.
 - layer: judge
   provider: { type: anthropic, model: "claude-haiku-4-5-20251001", api_key_env: ANTHROPIC_API_KEY }
   # or: provider: { type: openai, model: "...", api_key_env: OPENAI_API_KEY }
+  # either provider takes an optional base_url — Azure OpenAI, OpenRouter, a local vLLM or
+  # Ollama instance, an internal gateway. scheme://host[:port], no path; http:// is honoured
+  # for a local server, not upgraded to https.
+  #   base_url: "http://localhost:11434"
   scope: [{ host: "api.github.com", methods: ["POST", "PATCH", "DELETE"] }]
   prompt: "Allow only changes to repositories owned by gregbacchus. Deny anything ..."
 ```
