@@ -252,7 +252,10 @@ system is already running, trying each in turn at startup:
    terminal, or any supervisor (Docker, an init script) that already captures stdout into its
    own log system.
 
-This selection happens automatically and needs no flag. `--audit-log <path>` is additive,
+This selection happens automatically and needs no flag — but `--log-sink auto|stdout|journald|syslog`
+(`MARSHAL_LOG_SINK`) forces one, erroring out if it isn't actually reachable rather than
+silently falling back; useful when you want plain stdout while running under something that
+sets `JOURNAL_STREAM`. `--audit-log <path>` is additive,
 for the separate case of needing a durable JSON-lines copy regardless of which of the above
 is active — e.g. shipping to something none of them forward to — and gets no console mirror
 of its own.

@@ -26,8 +26,23 @@ struct Cli {
     #[arg(long, global = true, env = "MARSHAL_LOG", default_value = "info")]
     log: String,
 
+    /// Where logs go. `auto` (default) picks the first of journald, syslog, or stdout that's
+    /// actually reachable; the others force one, failing if it isn't available rather than
+    /// silently falling back — useful for debugging under a supervisor that sets
+    /// `JOURNAL_STREAM` but where you want plain stdout anyway.
+    #[arg(long, global = true, env = "MARSHAL_LOG_SINK", default_value = "auto")]
+    log_sink: LogSink,
+
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum LogSink {
+    Auto,
+    Stdout,
+    Journald,
+    Syslog,
 }
 
 #[derive(Debug, Subcommand)]
@@ -127,7 +142,10 @@ enum CaCommand {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(&cli.log);
+    if let Err(e) = init_tracing(&cli.log, cli.log_sink) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
 
     // `Sandbox` needs no config file at all — it gets everything through its own flags — so
     // resolution happens for every other subcommand rather than unconditionally, and a
@@ -800,51 +818,104 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SyslogLayer {
     }
 }
 
-fn init_tracing(filter: &str) {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
+/// Tries to install a journald layer. `Ok(false)` means journald just isn't reachable here
+/// (not running under systemd, or the socket refused the connection) — the caller decides
+/// whether that's a fallback trigger or a hard error depending on whether the sink was forced.
+#[cfg(target_os = "linux")]
+fn try_journald(filter: tracing_subscriber::EnvFilter) -> bool {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
-    // Prefer whatever OS-level log system is already there over inventing our own file
-    // management: journald (structured fields, no re-parsing) first, then classic syslog
-    // (still gets rotation/forwarding for free on non-systemd Linux), then plain stdout —
-    // which is itself already captured by Docker, most init scripts, or an interactive
-    // terminal. Each tier is a real connection attempt, not a guess from `/proc`, so a
-    // machine that merely looks like it has journald but doesn't actually accept the
-    // connection still falls through correctly.
-    #[cfg(target_os = "linux")]
-    {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-
-        // systemd sets JOURNAL_STREAM for any unit whose stdout/stderr is connected to the
-        // journal. When it's set, log straight to the journal socket instead of formatting
-        // text for systemd to recapture — that's what makes fields like `session`/`host`
-        // real, filterable journal fields (`journalctl -o json`, `journalctl FIELD=value`)
-        // rather than substrings of a formatted line someone has to grep.
-        if std::env::var_os("JOURNAL_STREAM").is_some() {
-            if let Ok(journald) = tracing_journald::layer() {
-                tracing_subscriber::registry().with(filter).with(journald).init();
-                return;
-            }
-            eprintln!(
-                "warning: JOURNAL_STREAM is set but connecting to the journal failed; trying syslog"
-            );
+    match tracing_journald::layer() {
+        Ok(journald) => {
+            tracing_subscriber::registry().with(filter).with(journald).init();
+            true
         }
+        Err(_) => false,
+    }
+}
 
-        let formatter = syslog::Formatter3164 {
-            facility: syslog::Facility::LOG_DAEMON,
-            hostname: None,
-            process: "marshal".to_owned(),
-            pid: std::process::id(),
-        };
-        if let Ok(logger) = syslog::unix(formatter) {
+#[cfg(target_os = "linux")]
+fn try_syslog(filter: tracing_subscriber::EnvFilter) -> bool {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let formatter = syslog::Formatter3164 {
+        facility: syslog::Facility::LOG_DAEMON,
+        hostname: None,
+        process: "marshal".to_owned(),
+        pid: std::process::id(),
+    };
+    match syslog::unix(formatter) {
+        Ok(logger) => {
             let layer = SyslogLayer(std::sync::Mutex::new(logger));
             tracing_subscriber::registry().with(filter).with(layer).init();
-            return;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn init_stdout(filter: tracing_subscriber::EnvFilter) {
+    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+}
+
+fn init_tracing(filter: &str, sink: LogSink) -> anyhow::Result<()> {
+    use tracing_subscriber::EnvFilter;
+    let parsed = || EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // `auto` prefers whatever OS-level log system is already there over inventing our own
+    // file management: journald (structured fields, no re-parsing) first, then classic
+    // syslog (still gets rotation/forwarding for free on non-systemd Linux), then plain
+    // stdout — which is itself already captured by Docker, most init scripts, or an
+    // interactive terminal. Each tier is a real connection attempt, not a guess from
+    // `/proc`, so a machine that merely looks like it has journald but doesn't actually
+    // accept the connection still falls through correctly. A forced sink (`--log-sink`)
+    // skips the fallback chain entirely and errors out if that one sink isn't reachable,
+    // rather than silently landing somewhere else — the point of forcing it.
+    match sink {
+        LogSink::Auto => {
+            #[cfg(target_os = "linux")]
+            {
+                // systemd sets JOURNAL_STREAM for any unit whose stdout/stderr is connected
+                // to the journal — a signal worth checking before spending a connection
+                // attempt, since journald is otherwise indistinguishable from "not running"
+                // this early in a container.
+                if std::env::var_os("JOURNAL_STREAM").is_some() && try_journald(parsed()) {
+                    return Ok(());
+                }
+                if try_syslog(parsed()) {
+                    return Ok(());
+                }
+            }
+            init_stdout(parsed());
+        }
+        LogSink::Stdout => init_stdout(parsed()),
+        #[cfg(target_os = "linux")]
+        LogSink::Journald => {
+            if !try_journald(parsed()) {
+                anyhow::bail!(
+                    "--log-sink journald was requested but the journal socket isn't reachable \
+                     (not running under systemd, or JOURNAL_STREAM's target rejected the \
+                     connection)"
+                );
+            }
+        }
+        #[cfg(target_os = "linux")]
+        LogSink::Syslog => {
+            if !try_syslog(parsed()) {
+                anyhow::bail!(
+                    "--log-sink syslog was requested but neither /dev/log nor /var/run/syslog \
+                     is reachable"
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        LogSink::Journald | LogSink::Syslog => {
+            anyhow::bail!("--log-sink journald/syslog are only supported on Linux");
         }
     }
-
-    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+    Ok(())
 }
 
 fn config_check(path: &std::path::Path) -> ExitCode {
