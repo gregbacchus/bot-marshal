@@ -11,7 +11,7 @@ use marshal_core::{AuditSink, DenyingDecider};
 use marshal_policy::build_chain;
 use marshal_proxy::management::RuntimeBuilder;
 use marshal_proxy::runtime::RuntimeHandle;
-use marshal_proxy::stats::SessionStats;
+use marshal_proxy::stats::IdentityStats;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
 use support::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -90,7 +90,7 @@ struct Harness {
     proxy: std::net::SocketAddr,
     upstream: std::net::SocketAddr,
     handle: Arc<RuntimeHandle>,
-    stats: Arc<SessionStats>,
+    stats: Arc<IdentityStats>,
     audit: Arc<AuditBuffer>,
 }
 
@@ -216,7 +216,7 @@ async fn a_failed_reload_leaves_the_running_policy_untouched() {
 }
 
 #[tokio::test]
-async fn management_reports_health_sessions_and_reload() {
+async fn management_reports_health_identities_and_reload() {
     let h = harness(DENY_ALL).await;
     connect(h.proxy, h.upstream).await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -249,13 +249,13 @@ async fn management_reports_health_sessions_and_reload() {
     assert_eq!(health.1["status"], "ok");
     assert_eq!(health.1["generation"], 0);
 
-    // sessions does, because it reveals what the agents are doing.
-    assert_eq!(get(mgmt, "/v1/sessions", None).await.0, 401);
-    assert_eq!(get(mgmt, "/v1/sessions", Some("wrong")).await.0, 401);
+    // identities does, because it reveals what the agents are doing.
+    assert_eq!(get(mgmt, "/v1/identities", None).await.0, 401);
+    assert_eq!(get(mgmt, "/v1/identities", Some("wrong")).await.0, 401);
 
-    let sessions = get(mgmt, "/v1/sessions", Some("s3cret")).await;
-    assert_eq!(sessions.0, 200);
-    assert_eq!(sessions.1["sessions"][0]["denied"], 1);
+    let identities = get(mgmt, "/v1/identities", Some("s3cret")).await;
+    assert_eq!(identities.0, 200);
+    assert_eq!(identities.1["identities"][0]["denied"], 1);
 
     // Metrics are unauthenticated like healthz: a scrape target that needs a credential is
     // one that gets configured wrong.

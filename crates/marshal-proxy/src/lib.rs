@@ -5,12 +5,12 @@
 
 pub mod guard;
 pub mod httpfront;
+pub mod identity;
 pub mod management;
 pub mod mitm;
 pub mod rewind;
 pub mod runtime;
 pub mod server;
-pub mod sessions;
 pub mod sniff;
 pub mod socks5;
 pub mod stats;

@@ -1,4 +1,4 @@
-//! Session identity, derived from the connection rather than asserted by the client.
+//! Identity, derived from the connection rather than asserted by the client.
 //!
 //! Transparent and DNS ingress give the client no channel to present a credential — it
 //! believes it is talking to the origin — so identity has to come from what the kernel knows
@@ -12,20 +12,20 @@ use crate::request::IngressMode;
 /// Which agent or task a connection belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct SessionId(pub Arc<str>);
+pub struct Identity(pub Arc<str>);
 
-impl SessionId {
+impl Identity {
     pub fn new(s: impl AsRef<str>) -> Self {
-        SessionId(Arc::from(s.as_ref()))
+        Identity(Arc::from(s.as_ref()))
     }
 
-    /// The synthetic session used when no resolver matched.
+    /// The synthetic identity used when no resolver matched.
     pub fn unidentified() -> Self {
-        SessionId::new("unidentified")
+        Identity::new("unidentified")
     }
 }
 
-impl std::fmt::Display for SessionId {
+impl std::fmt::Display for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -52,7 +52,7 @@ impl PeerCred {
     }
 }
 
-/// What a [`SessionResolver`] gets to look at.
+/// What an [`IdentityResolver`] gets to look at.
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
     pub ingress: IngressMode,
@@ -82,10 +82,10 @@ impl std::fmt::Debug for Credential {
     }
 }
 
-/// The outcome of session resolution.
+/// The outcome of identity resolution.
 #[derive(Debug, Clone)]
 pub struct Resolved {
-    pub session: SessionId,
+    pub identity: Identity,
     pub profile: Arc<str>,
     /// `false` when no resolver matched. The audit record says so, and the most restrictive
     /// profile applies — an unattributed request never silently inherits a permissive one.
@@ -96,7 +96,7 @@ pub struct Resolved {
 
 /// Resolvers are tried in order; first match wins.
 #[async_trait::async_trait]
-pub trait SessionResolver: Send + Sync + std::fmt::Debug {
+pub trait IdentityResolver: Send + Sync + std::fmt::Debug {
     fn name(&self) -> &str;
 
     /// `None` means "no opinion" — try the next resolver.

@@ -1,6 +1,6 @@
 [package]
 name = "marshal-launch"
-description = "The 'marshal run' launcher: netns and cgroup isolation, session registration"
+description = "The 'marshal run' launcher: netns and cgroup isolation, identity registration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,8 +1,8 @@
 //! Counters.
 //!
-//! Two audiences. `/v1/sessions` answers "what is this agent doing", which is the question an
-//! operator asks when an agent misbehaves. `/v1/metrics` answers "is the proxy healthy", which
-//! is what gets scraped.
+//! Two audiences. `/v1/identities` answers "what is this agent doing", which is the question
+//! an operator asks when an agent misbehaves. `/v1/metrics` answers "is the proxy healthy",
+//! which is what gets scraped.
 //!
 //! Both must count *requests*, not connections. Once TLS is intercepted a single CONNECT
 //! carries many requests, and counting tunnels would understate an agent's activity by
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use marshal_core::SessionId;
+use marshal_core::Identity;
 
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -33,12 +33,12 @@ impl Counters {
 }
 
 #[derive(Debug, Default)]
-pub struct SessionStats {
-    sessions: Mutex<HashMap<SessionId, std::sync::Arc<Counters>>>,
+pub struct IdentityStats {
+    identities: Mutex<HashMap<Identity, std::sync::Arc<Counters>>>,
     profiles: Mutex<HashMap<String, std::sync::Arc<Counters>>>,
 }
 
-/// One session's totals.
+/// One identity's totals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub key: String,
@@ -47,12 +47,12 @@ pub struct Row {
     pub would_deny: u64,
 }
 
-impl SessionStats {
+impl IdentityStats {
     /// Record one *request*. Called from every path that produces an audit record, so the
     /// two can never disagree about what happened.
-    pub fn record(&self, session: &SessionId, profile: &str, allowed: bool, would_deny: bool) {
+    pub fn record(&self, identity: &Identity, profile: &str, allowed: bool, would_deny: bool) {
         for counters in
-            [entry(&self.sessions, session.clone()), entry(&self.profiles, profile.to_owned())]
+            [entry(&self.identities, identity.clone()), entry(&self.profiles, profile.to_owned())]
         {
             if allowed {
                 counters.allowed.fetch_add(1, Ordering::Relaxed);
@@ -65,8 +65,8 @@ impl SessionStats {
         }
     }
 
-    pub fn by_session(&self) -> Vec<Row> {
-        rows(&self.sessions, |s: &SessionId| s.to_string())
+    pub fn by_identity(&self) -> Vec<Row> {
+        rows(&self.identities, |i: &Identity| i.to_string())
     }
 
     pub fn by_profile(&self) -> Vec<Row> {
@@ -106,16 +106,16 @@ impl SessionStats {
             ));
         }
 
-        out.push_str("# HELP marshal_session_requests_total Requests by session.\n");
-        out.push_str("# TYPE marshal_session_requests_total counter\n");
-        for row in self.by_session() {
-            let session = escape(&row.key);
+        out.push_str("# HELP marshal_identity_requests_total Requests by identity.\n");
+        out.push_str("# TYPE marshal_identity_requests_total counter\n");
+        for row in self.by_identity() {
+            let identity = escape(&row.key);
             out.push_str(&format!(
-                "marshal_session_requests_total{{session=\"{session}\",action=\"allow\"}} {}\n",
+                "marshal_identity_requests_total{{identity=\"{identity}\",action=\"allow\"}} {}\n",
                 row.allowed
             ));
             out.push_str(&format!(
-                "marshal_session_requests_total{{session=\"{session}\",action=\"deny\"}} {}\n",
+                "marshal_identity_requests_total{{identity=\"{identity}\",action=\"deny\"}} {}\n",
                 row.denied
             ));
         }
@@ -157,10 +157,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn counts_by_session_and_by_profile() {
-        let stats = SessionStats::default();
-        let a = SessionId::new("agent-a");
-        let b = SessionId::new("agent-b");
+    fn counts_by_identity_and_by_profile() {
+        let stats = IdentityStats::default();
+        let a = Identity::new("agent-a");
+        let b = Identity::new("agent-b");
 
         stats.record(&a, "coding", true, false);
         stats.record(&a, "coding", true, false);
@@ -168,7 +168,7 @@ mod tests {
         stats.record(&b, "llm", false, false);
 
         assert_eq!(
-            stats.by_session(),
+            stats.by_identity(),
             vec![
                 Row { key: "agent-a".into(), allowed: 2, denied: 1, would_deny: 0 },
                 Row { key: "agent-b".into(), allowed: 0, denied: 1, would_deny: 0 },
@@ -187,8 +187,8 @@ mod tests {
     fn warn_mode_requests_count_as_allowed_and_as_would_deny() {
         // Both, deliberately: the request *was* forwarded, and policy *did* disagree.
         // Counting it only as allowed would hide the rollout signal.
-        let stats = SessionStats::default();
-        stats.record(&SessionId::new("s"), "rollout", true, true);
+        let stats = IdentityStats::default();
+        stats.record(&Identity::new("s"), "rollout", true, true);
 
         let row = &stats.by_profile()[0];
         assert_eq!(row.allowed, 1);
@@ -198,8 +198,8 @@ mod tests {
 
     #[test]
     fn prometheus_output_is_well_formed() {
-        let stats = SessionStats::default();
-        stats.record(&SessionId::new("agent-a"), "coding", true, false);
+        let stats = IdentityStats::default();
+        stats.record(&Identity::new("agent-a"), "coding", true, false);
 
         let text = stats.prometheus();
         assert!(text.contains("# TYPE marshal_requests_total counter"));
@@ -212,11 +212,11 @@ mod tests {
     fn label_values_are_escaped() {
         // Profile names come from config; an unescaped quote produces output no scraper can
         // parse, which silently loses every metric rather than just the offending one.
-        let stats = SessionStats::default();
-        stats.record(&SessionId::new(r#"we"ird"#), r#"pro"file"#, true, false);
+        let stats = IdentityStats::default();
+        stats.record(&Identity::new(r#"we"ird"#), r#"pro"file"#, true, false);
 
         let text = stats.prometheus();
         assert!(text.contains(r#"profile="pro\"file""#), "{text}");
-        assert!(text.contains(r#"session="we\"ird""#), "{text}");
+        assert!(text.contains(r#"identity="we\"ird""#), "{text}");
     }
 }

@@ -16,8 +16,8 @@ use std::sync::{Arc, RwLock};
 use marshal_core::{RequestTransform, ResponseTransform};
 use marshal_policy::{Chain, HostMatcher};
 
+use crate::identity::IdentityRegistry;
 use crate::mitm::TlsEngine;
-use crate::sessions::SessionRegistry;
 
 /// A complete, self-consistent view of the configuration.
 pub struct Runtime {
@@ -27,16 +27,16 @@ pub struct Runtime {
     pub chains: HashMap<Arc<str>, Arc<Chain>>,
     pub response_transforms: HashMap<Arc<str>, Vec<Arc<dyn ResponseTransform>>>,
     /// Per profile, exactly like `chains` and `response_transforms`: a profile's
-    /// `request_transforms.secrets` is only meaningful for sessions resolved into that
+    /// `request_transforms.secrets` is only meaningful for identities resolved into that
     /// profile, and must not leak into another profile's requests.
     pub request_transforms: HashMap<Arc<str>, Vec<Arc<dyn RequestTransform>>>,
     /// The chain for the base config's embedded, unnamed `profile:` — used whenever a
-    /// connection is unattributed and `sessions.unidentified.profile` did not name a
-    /// different, real profile instead. See [`crate::sessions::SessionRegistry::uses_default_fallback`].
+    /// connection is unattributed and `identities.unidentified.profile` did not name a
+    /// different, real profile instead. See [`crate::identity::IdentityRegistry::uses_default_fallback`].
     pub default_chain: Arc<Chain>,
     pub default_response_transforms: Vec<Arc<dyn ResponseTransform>>,
     pub default_request_transforms: Vec<Arc<dyn RequestTransform>>,
-    pub sessions: Arc<SessionRegistry>,
+    pub identities: Arc<IdentityRegistry>,
     /// Hosts tunnelled without interception, for genuinely certificate-pinned clients. The
     /// only sanctioned exception to interception — see [`Runtime::tls`].
     pub passthrough: HostMatcher,
@@ -129,7 +129,7 @@ mod tests {
             )),
             default_response_transforms: Vec::new(),
             default_request_transforms: Vec::new(),
-            sessions: Arc::new(SessionRegistry::new(
+            identities: Arc::new(IdentityRegistry::new(
                 vec![],
                 Some(Arc::from(profile)),
                 false,

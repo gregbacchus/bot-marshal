@@ -16,7 +16,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::runtime::{Runtime, RuntimeHandle};
-use crate::stats::SessionStats;
+use crate::stats::IdentityStats;
 
 /// Builds a fresh runtime from the current configuration on disk.
 ///
@@ -27,7 +27,7 @@ pub type RuntimeBuilder = Arc<dyn Fn() -> Result<Runtime, String> + Send + Sync 
 #[derive(Clone)]
 struct ManagementState {
     runtime: Arc<RuntimeHandle>,
-    stats: Arc<SessionStats>,
+    stats: Arc<IdentityStats>,
     build: RuntimeBuilder,
     token: Option<Arc<str>>,
 }
@@ -46,7 +46,7 @@ pub enum ManagementError {
 pub async fn serve(
     listen: &str,
     runtime: Arc<RuntimeHandle>,
-    stats: Arc<SessionStats>,
+    stats: Arc<IdentityStats>,
     build: RuntimeBuilder,
     token: Option<String>,
 ) -> Result<(), ManagementError> {
@@ -63,7 +63,7 @@ pub async fn serve(
 
     let app = Router::new()
         .route("/v1/healthz", get(healthz))
-        .route("/v1/sessions", get(sessions))
+        .route("/v1/identities", get(identities))
         .route("/v1/reload", post(reload))
         .route("/v1/metrics", get(metrics))
         .with_state(state);
@@ -120,7 +120,7 @@ async fn healthz(State(state): State<ManagementState>) -> impl IntoResponse {
     }))
 }
 
-async fn sessions(
+async fn identities(
     State(state): State<ManagementState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
@@ -129,18 +129,18 @@ async fn sessions(
     }
     let rows: Vec<_> = state
         .stats
-        .by_session()
+        .by_identity()
         .into_iter()
         .map(|row| {
             serde_json::json!({
-                "session": row.key,
+                "identity": row.key,
                 "allowed": row.allowed,
                 "denied": row.denied,
                 "would_deny": row.would_deny,
             })
         })
         .collect();
-    Json(serde_json::json!({ "sessions": rows })).into_response()
+    Json(serde_json::json!({ "identities": rows })).into_response()
 }
 
 /// Prometheus scrape endpoint.

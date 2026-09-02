@@ -31,13 +31,13 @@ upstream:
 profile:
   default_action: deny
 
-sessions:
+identities:
   resolvers:
     # Each container has its own address, which is the whole reason they are static.
     - type: source_ip
       map:
-        - { cidr: "172.28.0.10/32", session: "agent-a", profile: github-only }
-        - { cidr: "172.28.0.11/32", session: "agent-b", profile: llm-only }
+        - { cidr: "172.28.0.10/32", identity: "agent-a", profile: github-only }
+        - { cidr: "172.28.0.11/32", identity: "agent-b", profile: llm-only }
 
   unidentified:
     action: allow_with_profile

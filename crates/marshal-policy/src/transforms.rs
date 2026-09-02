@@ -179,7 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_responses_are_filtered_and_content_length_corrected() {
-        use marshal_core::{Authority, Evidence, IngressMode, Phase, SessionId};
+        use marshal_core::{Authority, Evidence, Identity, IngressMode, Phase};
 
         let body = serde_json::to_vec(&serde_json::json!({
             "jsonrpc": "2.0", "id": 1,
@@ -199,7 +199,7 @@ mod tests {
         };
 
         let cx = RequestContext {
-            session: SessionId::new("t"),
+            identity: Identity::new("t"),
             profile: Arc::from("p"),
             ingress: IngressMode::Explicit,
             phase: Phase::Request,

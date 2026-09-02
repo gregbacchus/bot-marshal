@@ -208,7 +208,7 @@ impl PolicyLayer for Judge {
 mod tests {
     use super::*;
     use crate::providers::ProviderError;
-    use marshal_core::{Authority, BodyHandle, IngressMode, Phase, SessionId};
+    use marshal_core::{Authority, BodyHandle, Identity, IngressMode, Phase};
 
     #[derive(Debug)]
     struct FakeProvider {
@@ -254,7 +254,7 @@ mod tests {
 
     fn cx(host: &str, method: http::Method) -> RequestContext {
         RequestContext {
-            session: SessionId::new("t"),
+            identity: Identity::new("t"),
             profile: Arc::from("p"),
             ingress: IngressMode::Explicit,
             phase: Phase::Request,

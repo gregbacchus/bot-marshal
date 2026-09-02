@@ -38,7 +38,7 @@ pub struct ProxyRequest {
     /// upstream without us having re-serialised (and possibly altered) it.
     pub raw_head: Vec<u8>,
     pub is_connect: bool,
-    /// `Proxy-Authorization`, when present. Selects a session.
+    /// `Proxy-Authorization`, when present. Selects an identity.
     pub proxy_auth: Option<marshal_core::Credential>,
 }
 
@@ -179,7 +179,7 @@ fn parse_authority(s: &str, default_port: u16) -> Result<Authority, HttpError> {
 pub async fn write_denial<S>(
     stream: &mut S,
     reason: &marshal_core::Reason,
-    session: &str,
+    identity: &str,
     profile: &str,
 ) -> std::io::Result<()>
 where
@@ -188,7 +188,7 @@ where
     let body = serde_json::json!({
         "error": "egress_denied",
         "proxy": "bot-marshal",
-        "session": session,
+        "identity": identity,
         "profile": profile,
         "reason": reason,
     });

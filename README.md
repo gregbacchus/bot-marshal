@@ -131,9 +131,9 @@ the same trust instructions `ca init` prints. Useful for piping into a container
 or a trust store update without regenerating anything.
 
 **`marshal serve [--profile <name>] [--listen <addr>] [--audit-log <path>]`** — runs the
-proxy until `Ctrl-C`. `--profile` overrides `sessions.unidentified.profile` for the
+proxy until `Ctrl-C`. `--profile` overrides `identities.unidentified.profile` for the
 unattributed fallback; it does not select a single profile to run — every profile in the
-config gets built and is reachable by whatever resolves a session into it. `--listen`
+config gets built and is reachable by whatever resolves an identity into it. `--listen`
 overrides `listeners.explicit.listen`. `--audit-log <path>` additionally writes the full
 structured JSON record (evidence trail, status code — more than the log's one-line summary)
 to a file, append mode, created if missing — see [Watching activity](#watching-activity).
@@ -170,7 +170,7 @@ What bot-marshal writes to disk, and only what it writes:
 | Audit log | `--audit-log <path>`, optional | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
 
 That is the complete list. There is no database, no cache directory, and no other state
-persisted between runs — `/v1/sessions` and `/v1/metrics` counters, and the judge's response
+persisted between runs — `/v1/identities` and `/v1/metrics` counters, and the judge's response
 cache, all live in memory and reset on restart. A config `include` glob and any files a
 `file`-type secret source or `tls.upstream_ca_certs` entry points at are read, never written.
 
@@ -215,13 +215,13 @@ policy:
     on_match: allow
 ```
 
-A resolver (`sessions.resolvers`) or `marshal run --profile <name>` can only target a *named*
+A resolver (`identities.resolvers`) or `marshal run --profile <name>` can only target a *named*
 profile this way — the embedded `profile:` has no name and can't be referenced from
 anywhere. A connection nothing resolves falls through to it automatically, or
-`sessions.unidentified.profile: <name>` can point that fallback at a named one instead:
+`identities.unidentified.profile: <name>` can point that fallback at a named one instead:
 
 ```yaml
-sessions:
+identities:
   unidentified:
     action: allow_with_profile   # omit `profile:` to use the embedded one (the default);
                                   # set it to use a named profile instead
@@ -322,7 +322,7 @@ line per request on top, at one of three levels — each a strict superset of th
 so this is a level, not a set of things to combine:
 
 * **`log`** — no per-request lines at all, just the base messages.
-* **`access`** (default) — one summary line per request: session, host, method, profile,
+* **`access`** (default) — one summary line per request: identity, host, method, profile,
   which layer decided, how long it took. This is what you watch to see traffic.
 * **`audit`** — the same line with everything else added: status code, whether the verdict
   was cached, `would_deny`, and the full evidence trail. Noticeably bulkier — reach for it
@@ -347,7 +347,7 @@ one destination and one format, not one per level:
   collector that doesn't set `JOURNAL_STREAM`) gets one JSON object per line, unprompted, no
   flag needed. `pretty`/`json` forces one regardless of what stdout actually is.
 
-Under journald, every field lands as a real, structured journal field (`session` → `F_SESSION`,
+Under journald, every field lands as a real, structured journal field (`identity` → `F_IDENTITY`,
 `host` → `F_HOST`, …), so `journalctl` *is* the follow/watch command:
 
 ```bash
@@ -457,8 +457,8 @@ listeners:
 | endpoint | auth | purpose |
 |---|---|---|
 | `GET /v1/healthz` | none | alive, generation, profiles, warn-mode profiles |
-| `GET /v1/metrics` | none | Prometheus counters by profile and session |
-| `GET /v1/sessions` | bearer | what each agent has done |
+| `GET /v1/metrics` | none | Prometheus counters by profile and identity |
+| `GET /v1/identities` | bearer | what each agent has done |
 | `POST /v1/reload` | bearer | re-read config and swap atomically |
 
 Reload builds the entire new configuration — every chain, transform and resolver — before
@@ -548,41 +548,41 @@ way to present a credential. Resolvers are tried in order, and they are not equa
 | `source_ip` | as trustworthy as the network | collapses when two agents share a namespace |
 | `proxy_auth` | client-asserted | an agent that can read another token can pick another profile |
 
-Config-wise this is one `sessions:` block: an ordered `resolvers` list (first match wins),
-each entry mapping something the connection carries to a `session` name and a `profile`, plus
+Config-wise this is one `identities:` block: an ordered `resolvers` list (first match wins),
+each entry mapping something the connection carries to an `identity` name and a `profile`, plus
 `unidentified` for the fallback when nothing matches:
 
 ```yaml
-sessions:
+identities:
   resolvers:
     - type: peer_cred                 # kernel-supplied uid/gid — strongest, list it first
       enrich: true                    # needed for cgroup matching, and for gid over TCP —
                                        # uid/username don't need it either way
       map:
         - uid: 1001                   # numeric, or...
-          session: "bot-ci"
+          identity: "bot-ci"
           profile: coding-agent
         - username: "bot-nightly"     # ...a name — resolved to a uid once at config load,
-          session: "bot-nightly"      # so matching still happens on the numeric id the
+          identity: "bot-nightly"     # so matching still happens on the numeric id the
           profile: coding-agent        # kernel reports; exactly as strong as `uid:`
         - groupname: "agents"         # same idea for `gid:`/`groupname:`
-          session: "shared-agents"
+          identity: "shared-agents"
           profile: llm-agent
 
-    - type: launched                  # sessions `marshal run` registers — no map needed,
+    - type: launched                  # identities `marshal run` registers — no map needed,
                                        # the cgroup naming convention *is* the registration
 
     - type: source_ip                 # containers / netns: one IP per agent
       map:
         - cidr: "172.20.0.10/32"
-          session: "agent-a"
+          identity: "agent-a"
           profile: coding-agent
 
     - type: proxy_auth                # weakest — client-asserted — so it goes last
       credentials:
         - user: "agent-a"
           password_env: "MARSHAL_AGENT_A_PW"
-          session: "agent-a"
+          identity: "agent-a"
           profile: coding-agent
 
   unidentified:                       # nothing matched — falls through to the base config's
@@ -597,11 +597,11 @@ config check` rejects setting both, and rejects an entry with none of `uid`, `us
 A resolver can only target a *named* profile — one defined under `profiles/`, like
 `coding-agent` and `llm-agent` above — never the embedded `profile:`, which has no name to
 reference (see [Splitting the config](#splitting-the-config-into-multiple-files)). Every
-audit record carries the resolved `session`, which `resolver` matched, and `attributed:
+audit record carries the resolved `identity`, which `resolver` matched, and `attributed:
 false` when none did — that's what makes `attributed: false` in a record a hard signal to
 look at, not noise: it means every resolver missed and the request got the fallback profile.
 
-Anything unresolved gets a synthetic session, the embedded (most restrictive) profile, and
+Anything unresolved gets a synthetic identity, the embedded (most restrictive) profile, and
 `attributed: false` in every audit record — never a silent inheritance of a permissive one.
 
 The Unix listener exists for `SO_PEERCRED`, which is the only same-host identity that is both
@@ -618,7 +618,7 @@ named `marshal-coding-agent-<id>.scope`. The scope supplies identity — the nam
 *is* the registration, so the `launched` resolver reads the profile back out of the cgroup and
 there is no control socket to get out of sync. Because cgroups are inherited, the `git`, `npm`
 and `curl` processes the agent spawns — where most of its egress actually comes from — are
-identified too. That gives distinct sessions for agents running as the *same* uid, which uid
+identified too. That gives distinct identities for agents running as the *same* uid, which uid
 alone cannot do.
 
 **`netns` enforces rather than identifies**, which is what separates it from every other mode.
@@ -666,7 +666,7 @@ same trade a certificate-pinned client always makes by opting out of interceptio
 | M1 | Explicit proxy (CONNECT + SOCKS5), chain runner, denylist + allowlist, upstream guard, audit | done |
 | M2 | TLS MITM, streaming (WebSocket / SSE / chunked) | done |
 | M3 | Secret injection, egress DLP, CEL rules layer | done |
-| M4 | Session identity, profiles, `marshal run` | done |
+| M4 | Identity resolution, profiles, `marshal run` | done |
 | M4.5 | LLM judge layer | done |
 | M5 | MCP tool-level policy | done |
 | M6 | Transparent (nftables) and DNS interception | done |
@@ -719,7 +719,7 @@ is down.
 ## Not built
 
 **OpenTelemetry export.** The audit log is already structured JSON carrying the full layer
-trail, session attribution, status and timing, and `/v1/metrics` covers scraping. OTLP would
+trail, identity attribution, status and timing, and `/v1/metrics` covers scraping. OTLP would
 add correlation with an agent's own traces, which is genuinely useful — but it is a large
 dependency tree for something a log shipper largely covers, so it is left as a deliberate
 decision rather than assumed.
@@ -728,7 +728,7 @@ decision rather than assumed.
 the chain resolves them; the only implementation refuses. A human-in-the-loop approval flow
 plugs in without touching the chain.
 
-**Rate limits and budgets.** Per-session counters exist and are exported, which is the
+**Rate limits and budgets.** Per-identity counters exist and are exported, which is the
 groundwork; enforcement does not.
 
 **Response body transforms — `summarize`, `compact`, `redact`.** Declared as config shapes

@@ -8,9 +8,9 @@ use std::sync::Arc;
 use http_body_util::BodyExt;
 use marshal_audit::JsonSink;
 use marshal_config::model::Config;
-use marshal_core::{AuditSink, DenyingDecider, SessionResolver};
+use marshal_core::{AuditSink, DenyingDecider, IdentityResolver};
 use marshal_policy::{HostMatcher, build_chain};
-use marshal_proxy::sessions::{PeerCredResolver, ProxyAuthResolver, SessionRegistry};
+use marshal_proxy::identity::{IdentityRegistry, PeerCredResolver, ProxyAuthResolver};
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
 use support::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -98,7 +98,7 @@ impl std::fmt::Debug for SharedWriter {
 }
 
 async fn harness(
-    resolvers: Vec<Arc<dyn SessionResolver>>,
+    resolvers: Vec<Arc<dyn IdentityResolver>>,
     fallback: &str,
     deny_unidentified: bool,
 ) -> Harness {
@@ -130,7 +130,7 @@ async fn harness(
             )),
             default_response_transforms: Vec::new(),
             default_request_transforms: Vec::new(),
-            sessions: Arc::new(SessionRegistry::new(
+            identities: Arc::new(IdentityRegistry::new(
                 resolvers,
                 Some(Arc::from(fallback)),
                 deny_unidentified,
@@ -203,7 +203,7 @@ fn base64(input: &str) -> String {
 }
 
 #[tokio::test]
-async fn two_sessions_hitting_one_host_get_different_answers() {
+async fn two_identities_hitting_one_host_get_different_answers() {
     // The plan's headline criterion: same destination, different identities, different
     // outcomes — and the audit trail attributes each correctly.
     let resolver = Arc::new(ProxyAuthResolver::new([
@@ -223,14 +223,14 @@ async fn two_sessions_hitting_one_host_get_different_answers() {
     assert_eq!(records.len(), 2, "{records:#?}");
 
     let allowed = &records[0];
-    assert_eq!(allowed["session"], "agent-allowed");
+    assert_eq!(allowed["identity"], "agent-allowed");
     assert_eq!(allowed["profile"], "permissive");
     assert_eq!(allowed["action"], "allow");
     assert_eq!(allowed["attributed"], true);
     assert_eq!(allowed["resolver"], "proxy_auth");
 
     let blocked = &records[1];
-    assert_eq!(blocked["session"], "agent-blocked");
+    assert_eq!(blocked["identity"], "agent-blocked");
     assert_eq!(blocked["profile"], "restricted");
     assert_eq!(blocked["action"], "deny");
 }
@@ -253,7 +253,7 @@ async fn an_unidentified_connection_gets_the_fallback_and_is_flagged() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let records = h.audit.records();
     assert_eq!(records[0]["attributed"], false, "it must not look attributed");
-    assert_eq!(records[0]["session"], "unidentified");
+    assert_eq!(records[0]["identity"], "unidentified");
     assert_eq!(records[0]["profile"], "restricted");
     assert!(records[0]["resolver"].is_null());
 }
@@ -305,7 +305,7 @@ async fn peer_cred_uid_selects_a_profile_over_a_real_connection() {
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let records = h.audit.records();
-    assert_eq!(records[0]["session"], "me");
+    assert_eq!(records[0]["identity"], "me");
     assert_eq!(records[0]["resolver"], "peer_cred:uid");
     assert_eq!(records[0]["attributed"], true);
 }
@@ -326,7 +326,7 @@ async fn an_unmapped_uid_falls_through_to_the_fallback() {
 }
 
 #[tokio::test]
-async fn socks5_credentials_select_a_session_too() {
+async fn socks5_credentials_select_an_identity_too() {
     let resolver = Arc::new(ProxyAuthResolver::new([(
         "allowed".into(),
         "pw1".into(),
@@ -364,7 +364,7 @@ async fn socks5_credentials_select_a_session_too() {
     assert_eq!(reply[1], 0x00, "the credential should have selected the permissive profile");
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert_eq!(h.audit.records()[0]["session"], "agent-allowed");
+    assert_eq!(h.audit.records()[0]["identity"], "agent-allowed");
 }
 
 #[tokio::test]
@@ -413,7 +413,7 @@ async fn the_unix_listener_identifies_by_so_peercred() {
             )),
             default_response_transforms: Vec::new(),
             default_request_transforms: Vec::new(),
-            sessions: Arc::new(SessionRegistry::new(
+            identities: Arc::new(IdentityRegistry::new(
                 vec![resolver],
                 Some(Arc::from("restricted")),
                 false,
@@ -464,7 +464,7 @@ async fn the_unix_listener_identifies_by_so_peercred() {
 }
 
 #[tokio::test]
-async fn per_session_counters_track_allowed_and_denied() {
+async fn per_identity_counters_track_allowed_and_denied() {
     let resolver = Arc::new(ProxyAuthResolver::new([
         ("allowed".into(), "pw1".into(), "agent-allowed".into(), "permissive".into()),
         ("blocked".into(), "pw2".into(), "agent-blocked".into(), "restricted".into()),
@@ -478,8 +478,10 @@ async fn per_session_counters_track_allowed_and_denied() {
 
     // Counted from the audit stream, which is what the in-process counters mirror.
     let records = h.audit.records();
-    let denied =
-        records.iter().filter(|r| r["session"] == "agent-blocked" && r["action"] == "deny").count();
+    let denied = records
+        .iter()
+        .filter(|r| r["identity"] == "agent-blocked" && r["action"] == "deny")
+        .count();
     assert_eq!(denied, 2);
 }
 

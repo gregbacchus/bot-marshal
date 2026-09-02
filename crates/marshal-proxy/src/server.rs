@@ -1,7 +1,7 @@
 //! The explicit-proxy listener.
 //!
 //! One TCP port serves HTTP `CONNECT`, absolute-form HTTP, and SOCKS5. Every accepted
-//! connection follows the same path regardless of which: resolve a session, evaluate the
+//! connection follows the same path regardless of which: resolve an identity, evaluate the
 //! policy chain against the requested authority, and only then touch the network. Nothing
 //! upstream is contacted before a verdict exists.
 
@@ -23,7 +23,7 @@ use crate::rewind::Rewind;
 use crate::runtime::{Runtime, RuntimeHandle};
 use crate::sniff::{self, Protocol};
 use crate::socks5::{self, Reply};
-use crate::stats::SessionStats;
+use crate::stats::IdentityStats;
 use crate::tunnel;
 
 #[derive(Clone)]
@@ -50,21 +50,21 @@ impl std::fmt::Debug for ServerConfig {
 
 /// A resolved connection: who it is, and the chain that therefore applies.
 #[derive(Clone)]
-struct Session {
+struct Attribution {
     resolved: Resolved,
     chain: Arc<Chain>,
-    /// Response transforms for this profile. Per-session rather than per-server, because
+    /// Response transforms for this profile. Per-identity rather than per-server, because
     /// which tools are visible depends on which profile applies.
     response_transforms: Vec<Arc<dyn marshal_core::ResponseTransform>>,
     /// Request transforms for this profile, most importantly secret injection — a swap
-    /// declared under one profile must never fire for a session resolved into another.
+    /// declared under one profile must never fire for an identity resolved into another.
     request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
 }
 
-impl std::fmt::Debug for Session {
+impl std::fmt::Debug for Attribution {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Session")
-            .field("session", &self.resolved.session)
+        f.debug_struct("Attribution")
+            .field("identity", &self.resolved.identity)
             .field("profile", &self.resolved.profile)
             .field("attributed", &self.resolved.attributed)
             .finish()
@@ -78,7 +78,7 @@ pub struct Server {
     runtime: Arc<RuntimeHandle>,
     guard: Arc<UpstreamGuard>,
     audit: Arc<dyn AuditSink>,
-    stats: Arc<SessionStats>,
+    stats: Arc<IdentityStats>,
 }
 
 impl std::fmt::Debug for Server {
@@ -94,7 +94,7 @@ impl Server {
         guard: Arc<UpstreamGuard>,
         audit: Arc<dyn AuditSink>,
     ) -> Self {
-        Self { config, runtime, guard, audit, stats: Arc::new(SessionStats::default()) }
+        Self { config, runtime, guard, audit, stats: Arc::new(IdentityStats::default()) }
     }
 
     /// The handle a reload writes through.
@@ -102,21 +102,21 @@ impl Server {
         Arc::clone(&self.runtime)
     }
 
-    pub fn stats(&self) -> Arc<SessionStats> {
+    pub fn stats(&self) -> Arc<IdentityStats> {
         Arc::clone(&self.stats)
     }
 
-    /// Resolve a connection to a session and the chain that applies to it.
+    /// Resolve a connection to an identity and the chain that applies to it.
     ///
     /// A resolver naming a profile that does not exist is a configuration error caught at
     /// startup; reaching it here means falling back rather than serving an arbitrary chain.
-    async fn session_for(&self, conn: &ConnInfo, runtime: &Runtime) -> Option<Session> {
-        let resolved = runtime.sessions.resolve(conn).await;
+    async fn resolve_attribution(&self, conn: &ConnInfo, runtime: &Runtime) -> Option<Attribution> {
+        let resolved = runtime.identities.resolve(conn).await;
 
-        // Unattributed, with no `sessions.unidentified.profile` override: the embedded
+        // Unattributed, with no `identities.unidentified.profile` override: the embedded
         // `profile:` applies, which has no name and so isn't in `chains` at all.
-        if !resolved.attributed && runtime.sessions.uses_default_fallback() {
-            return Some(Session {
+        if !resolved.attributed && runtime.identities.uses_default_fallback() {
+            return Some(Attribution {
                 resolved,
                 chain: Arc::clone(&runtime.default_chain),
                 response_transforms: runtime.default_response_transforms.clone(),
@@ -130,7 +130,7 @@ impl Server {
                     runtime.response_transforms.get(&resolved.profile).cloned().unwrap_or_default();
                 let request_transforms =
                     runtime.request_transforms.get(&resolved.profile).cloned().unwrap_or_default();
-                Some(Session {
+                Some(Attribution {
                     resolved,
                     chain: Arc::clone(chain),
                     response_transforms,
@@ -140,7 +140,7 @@ impl Server {
             None => {
                 tracing::error!(
                     profile = %resolved.profile,
-                    "a session resolver named a profile with no chain; refusing the connection"
+                    "an identity resolver named a profile with no chain; refusing the connection"
                 );
                 None
             }
@@ -156,7 +156,7 @@ impl Server {
         tracing::info!(
             listen = %local,
             profiles = ?runtime.chains.keys().map(|k| &**k).collect::<Vec<_>>(),
-            resolvers = ?runtime.sessions.resolver_names(),
+            resolvers = ?runtime.identities.resolver_names(),
             intercepting = true,
             "explicit proxy listening"
         );
@@ -314,10 +314,12 @@ impl Server {
         let runtime = self.runtime.load();
         let mut conn = self.conn_info(peer, local);
         conn.ingress = IngressMode::Transparent;
-        runtime.sessions.attach_peer_cred(&mut conn);
+        runtime.identities.attach_peer_cred(&mut conn);
 
-        let Some(session) = self.session_for(&conn, &runtime).await else { return Ok(()) };
-        if !session.resolved.attributed && runtime.sessions.deny_unidentified() {
+        let Some(attribution) = self.resolve_attribution(&conn, &runtime).await else {
+            return Ok(());
+        };
+        if !attribution.resolved.attributed && runtime.identities.deny_unidentified() {
             return Ok(());
         }
 
@@ -325,20 +327,20 @@ impl Server {
         // hostname, so host-level layers can decide properly. Request-level layers still need
         // interception to see method and path.
         let cx = self.context(
-            &session,
+            &attribution,
             peer,
             authority.clone(),
             if intercepted.tls { "CONNECT" } else { "GET" },
             "/",
             marshal_core::Phase::Connect,
         );
-        let outcome = session.chain.evaluate(&cx).await;
+        let outcome = attribution.chain.evaluate(&cx).await;
 
         if outcome.action == Action::Deny {
             // There is no proxy protocol to answer with, so a refusal is a closed connection.
             // Recording it is the only way anyone learns it happened.
-            self.emit_session(
-                &session,
+            self.emit_audit(
+                &attribution,
                 &cx,
                 &outcome.reason,
                 Action::Deny,
@@ -358,13 +360,13 @@ impl Server {
         let mut upstream = match self.guard.connect(&literal).await {
             Ok(s) => s,
             Err(e) => {
-                self.emit_guard_failure(&session, &cx, &e, outcome.evidence, started).await;
+                self.emit_guard_failure(&attribution, &cx, &e, outcome.evidence, started).await;
                 return Ok(());
             }
         };
 
-        self.emit_session(
-            &session,
+        self.emit_audit(
+            &attribution,
             &cx,
             &outcome.reason,
             Action::Allow,
@@ -385,9 +387,9 @@ impl Server {
         self: Arc<Self>,
         stream: tokio::net::UnixStream,
     ) -> std::io::Result<()> {
-        let cred = crate::sessions::peercred::peer_cred_for_unix(
+        let cred = crate::identity::peercred::peer_cred_for_unix(
             &stream,
-            self.runtime.load().sessions.needs_enrichment(),
+            self.runtime.load().identities.needs_enrichment(),
         );
 
         // A Unix socket has no meaningful addresses; synthetic loopback ones keep the rest of
@@ -453,31 +455,31 @@ impl Server {
         let runtime = self.runtime.load();
         let mut conn = self.conn_info(peer, local);
         conn.proxy_auth = request.credential;
-        runtime.sessions.attach_peer_cred(&mut conn);
+        runtime.identities.attach_peer_cred(&mut conn);
 
-        let Some(session) = self.session_for(&conn, &runtime).await else {
+        let Some(attribution) = self.resolve_attribution(&conn, &runtime).await else {
             let _ = socks5::reply(&mut client, Reply::GeneralFailure).await;
             return Ok(());
         };
-        if !session.resolved.attributed && runtime.sessions.deny_unidentified() {
+        if !attribution.resolved.attributed && runtime.identities.deny_unidentified() {
             let _ = socks5::reply(&mut client, Reply::NotAllowed).await;
             return Ok(());
         }
 
         let cx = self.context(
-            &session,
+            &attribution,
             peer,
             authority.clone(),
             "CONNECT",
             "",
             marshal_core::Phase::Connect,
         );
-        let outcome = session.chain.evaluate(&cx).await;
+        let outcome = attribution.chain.evaluate(&cx).await;
 
         if outcome.action == Action::Deny {
             let _ = socks5::reply(&mut client, Reply::NotAllowed).await;
-            self.emit_session(
-                &session,
+            self.emit_audit(
+                &attribution,
                 &cx,
                 &outcome.reason,
                 Action::Deny,
@@ -494,7 +496,7 @@ impl Server {
             Ok(s) => s,
             Err(e) => {
                 let _ = socks5::reply(&mut client, guard_reply(&e)).await;
-                self.emit_guard_failure(&session, &cx, &e, outcome.evidence, started).await;
+                self.emit_guard_failure(&attribution, &cx, &e, outcome.evidence, started).await;
                 return Ok(());
             }
         };
@@ -506,8 +508,8 @@ impl Server {
         // still runs the SNI cross-check. A SOCKS5 tunnel is exactly as capable of the
         // shared-IP/SNI trick as an HTTP CONNECT tunnel, so it gets exactly the same defence.
         if self.intercepts(&authority, &runtime) {
-            self.emit_session(
-                &session,
+            self.emit_audit(
+                &attribution,
                 &cx,
                 &outcome.reason,
                 Action::Allow,
@@ -519,17 +521,17 @@ impl Server {
             .await;
 
             let handler = Arc::new(MitmHandler {
-                chain: Arc::clone(&session.chain),
+                chain: Arc::clone(&attribution.chain),
                 audit: Arc::clone(&self.audit),
                 authority: authority.clone(),
-                session: cx.session.clone(),
-                profile: Arc::clone(&session.resolved.profile),
+                identity: cx.identity.clone(),
+                profile: Arc::clone(&attribution.resolved.profile),
                 client_addr: peer,
-                request_transforms: session.request_transforms.clone(),
+                request_transforms: attribution.request_transforms.clone(),
                 stats: Arc::clone(&self.stats),
-                response_transforms: session.response_transforms.clone(),
-                attributed: session.resolved.attributed,
-                resolver: session.resolved.resolver.clone(),
+                response_transforms: attribution.response_transforms.clone(),
+                attributed: attribution.resolved.attributed,
+                resolver: attribution.resolved.resolver.clone(),
             });
 
             if let Err(e) =
@@ -542,8 +544,8 @@ impl Server {
             return Ok(());
         }
 
-        self.emit_session(
-            &session,
+        self.emit_audit(
+            &attribution,
             &cx,
             &outcome.reason,
             Action::Allow,
@@ -562,8 +564,8 @@ impl Server {
         if let Err(tunnel::RelayError::Rejected(why)) = result {
             tracing::warn!(peer = %peer, authority = %authority, "{why}");
             let reason = Reason::new("allowlist", "sni_authority_mismatch", why);
-            self.emit_session(
-                &session,
+            self.emit_audit(
+                &attribution,
                 &cx,
                 &reason,
                 Action::Deny,
@@ -613,36 +615,36 @@ impl Server {
         let mut conn = self.conn_info(peer, local);
         conn.proxy_auth = request.proxy_auth.clone();
         conn.peer_cred = peer_cred;
-        runtime.sessions.attach_peer_cred(&mut conn);
+        runtime.identities.attach_peer_cred(&mut conn);
 
-        let Some(session) = self.session_for(&conn, &runtime).await else {
+        let Some(attribution) = self.resolve_attribution(&conn, &runtime).await else {
             let _ = httpfront::write_status(
                 &mut client,
                 "500 Internal Server Error",
-                "session resolution failed",
+                "attribution resolution failed",
             )
             .await;
             return Ok(());
         };
-        if !session.resolved.attributed && runtime.sessions.deny_unidentified() {
+        if !attribution.resolved.attributed && runtime.identities.deny_unidentified() {
             let reason = Reason::new(
-                "sessions",
+                "identities",
                 "unidentified",
-                "this connection could not be attributed to a session, and the proxy is \
+                "this connection could not be attributed to an identity, and the proxy is \
                  configured to refuse unattributed traffic",
             );
             let _ = httpfront::write_denial(
                 &mut client,
                 &reason,
-                &session.resolved.session.to_string(),
-                &session.resolved.profile,
+                &attribution.resolved.identity.to_string(),
+                &attribution.resolved.profile,
             )
             .await;
             return Ok(());
         }
 
         let cx = self.context(
-            &session,
+            &attribution,
             peer,
             request.authority.clone(),
             &request.method,
@@ -656,7 +658,7 @@ impl Server {
                 marshal_core::Phase::Request
             },
         );
-        let mut outcome = session.chain.evaluate(&cx).await;
+        let mut outcome = attribution.chain.evaluate(&cx).await;
 
         // A CONNECT is a pre-filter, not the decision.
         //
@@ -674,7 +676,7 @@ impl Server {
             && outcome.action == Action::Deny
             && outcome.reason.layer == "default_action"
             && self.intercepts(&request.authority, &runtime)
-            && !session.chain.request_only_layers().is_empty()
+            && !attribution.chain.request_only_layers().is_empty()
         {
             outcome.action = Action::Allow;
             outcome.reason = Reason::new(
@@ -684,7 +686,7 @@ impl Server {
                     "no host-level layer refused `{}`; the decision is deferred to the \
                      request-level layers {:?} once TLS is intercepted",
                     request.authority.host,
-                    session.chain.request_only_layers()
+                    attribution.chain.request_only_layers()
                 ),
             );
         }
@@ -693,12 +695,12 @@ impl Server {
             let _ = httpfront::write_denial(
                 &mut client,
                 &outcome.reason,
-                &cx.session.to_string(),
-                &session.resolved.profile,
+                &cx.identity.to_string(),
+                &attribution.resolved.profile,
             )
             .await;
-            self.emit_session(
-                &session,
+            self.emit_audit(
+                &attribution,
                 &cx,
                 &outcome.reason,
                 Action::Deny,
@@ -716,7 +718,7 @@ impl Server {
             Err(e) => {
                 let _ =
                     httpfront::write_status(&mut client, "502 Bad Gateway", &e.to_string()).await;
-                self.emit_guard_failure(&session, &cx, &e, outcome.evidence, started).await;
+                self.emit_guard_failure(&attribution, &cx, &e, outcome.evidence, started).await;
                 return Ok(());
             }
         };
@@ -740,8 +742,8 @@ impl Server {
             if let Some(engine) = intercept {
                 // The CONNECT itself is allowed here; each request inside the tunnel is
                 // evaluated separately once decrypted, and audited on its own.
-                self.emit_session(
-                    &session,
+                self.emit_audit(
+                    &attribution,
                     &cx,
                     &outcome.reason,
                     Action::Allow,
@@ -753,17 +755,17 @@ impl Server {
                 .await;
 
                 let handler = Arc::new(MitmHandler {
-                    chain: Arc::clone(&session.chain),
+                    chain: Arc::clone(&attribution.chain),
                     audit: Arc::clone(&self.audit),
                     authority: authority.clone(),
-                    session: cx.session.clone(),
-                    profile: Arc::clone(&session.resolved.profile),
+                    identity: cx.identity.clone(),
+                    profile: Arc::clone(&attribution.resolved.profile),
                     client_addr: peer,
-                    request_transforms: session.request_transforms.clone(),
+                    request_transforms: attribution.request_transforms.clone(),
                     stats: Arc::clone(&self.stats),
-                    response_transforms: session.response_transforms.clone(),
-                    attributed: session.resolved.attributed,
-                    resolver: session.resolved.resolver.clone(),
+                    response_transforms: attribution.response_transforms.clone(),
+                    attributed: attribution.resolved.attributed,
+                    resolver: attribution.resolved.resolver.clone(),
                 });
 
                 if let Err(e) = mitm::intercept(stream, upstream, engine, handler).await {
@@ -781,8 +783,8 @@ impl Server {
             // The check runs on the relay's first client chunk rather than by peeking before
             // the relay starts, so a server-speaks-first protocol is not held up waiting for
             // a client that has nothing to say yet.
-            self.emit_session(
-                &session,
+            self.emit_audit(
+                &attribution,
                 &cx,
                 &outcome.reason,
                 Action::Allow,
@@ -801,8 +803,8 @@ impl Server {
             if let Err(tunnel::RelayError::Rejected(why)) = result {
                 tracing::warn!(peer = %peer, authority = %authority, "{why}");
                 let reason = Reason::new("allowlist", "sni_authority_mismatch", why);
-                self.emit_session(
-                    &session,
+                self.emit_audit(
+                    &attribution,
                     &cx,
                     &reason,
                     Action::Deny,
@@ -821,8 +823,8 @@ impl Server {
             upstream.write_all(&head).await?;
         }
 
-        self.emit_session(
-            &session,
+        self.emit_audit(
+            &attribution,
             &cx,
             &outcome.reason,
             Action::Allow,
@@ -858,7 +860,7 @@ impl Server {
 
     fn context(
         &self,
-        session: &Session,
+        attribution: &Attribution,
         peer: std::net::SocketAddr,
         authority: Authority,
         method: &str,
@@ -866,8 +868,8 @@ impl Server {
         phase: marshal_core::Phase,
     ) -> RequestContext {
         RequestContext {
-            session: session.resolved.session.clone(),
-            profile: Arc::clone(&session.resolved.profile),
+            identity: attribution.resolved.identity.clone(),
+            profile: Arc::clone(&attribution.resolved.profile),
             ingress: IngressMode::Explicit,
             phase,
             client_addr: peer,
@@ -881,9 +883,9 @@ impl Server {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn emit_session(
+    async fn emit_audit(
         &self,
-        session: &Session,
+        attribution: &Attribution,
         cx: &RequestContext,
         reason: &Reason,
         action: Action,
@@ -892,12 +894,12 @@ impl Server {
         started: Instant,
         would_deny: bool,
     ) {
-        self.stats.record(&cx.session, &cx.profile, action == Action::Allow, would_deny);
+        self.stats.record(&cx.identity, &cx.profile, action == Action::Allow, would_deny);
         self.audit
             .emit(AuditRecord {
-                session: cx.session.to_string(),
-                attributed: session.resolved.attributed,
-                resolver: session.resolved.resolver.clone(),
+                identity: cx.identity.to_string(),
+                attributed: attribution.resolved.attributed,
+                resolver: attribution.resolved.resolver.clone(),
                 profile: cx.profile.to_string(),
                 ingress: "explicit".into(),
                 host: cx.authority.host.clone(),
@@ -915,7 +917,7 @@ impl Server {
 
     async fn emit_guard_failure(
         &self,
-        session: &Session,
+        attribution: &Attribution,
         cx: &RequestContext,
         e: &GuardError,
         evidence: Evidence,
@@ -929,7 +931,8 @@ impl Server {
             GuardError::Connect { .. } => "upstream_unreachable",
         };
         let reason = Reason::new("upstream_guard", code, e.to_string());
-        self.emit_session(session, cx, &reason, Action::Deny, evidence, None, started, false).await;
+        self.emit_audit(attribution, cx, &reason, Action::Deny, evidence, None, started, false)
+            .await;
     }
 }
 

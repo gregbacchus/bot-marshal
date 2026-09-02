@@ -1,6 +1,6 @@
 [package]
 name = "marshal-core"
-description = "Core types and traits for bot-marshal: verdicts, policy layers, transforms, sessions"
+description = "Core types and traits for bot-marshal: verdicts, policy layers, transforms, identities"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

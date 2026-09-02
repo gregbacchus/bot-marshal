@@ -294,8 +294,8 @@ pub fn request(target: std::net::SocketAddr, path: &str) -> Request<TestBody> {
 
 /// A registry with no resolvers: everything lands in the unattributed fallback, which is what
 /// the pre-M4 tests assume.
-pub fn no_resolvers() -> Arc<marshal_proxy::sessions::SessionRegistry> {
-    Arc::new(marshal_proxy::sessions::SessionRegistry::new(
+pub fn no_resolvers() -> Arc<marshal_proxy::identity::IdentityRegistry> {
+    Arc::new(marshal_proxy::identity::IdentityRegistry::new(
         vec![],
         Some(Arc::from("p")),
         false,
@@ -394,7 +394,7 @@ pub fn runtime_with(
         )),
         default_response_transforms: Vec::new(),
         default_request_transforms: Vec::new(),
-        sessions: no_resolvers(),
+        identities: no_resolvers(),
         passthrough,
         tls,
     }

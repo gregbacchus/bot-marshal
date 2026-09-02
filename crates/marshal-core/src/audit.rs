@@ -17,8 +17,8 @@ pub enum Action {
 /// are redacted before a record is ever constructed — see `marshal-secrets`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuditRecord {
-    pub session: String,
-    /// `false` when no session resolver matched.
+    pub identity: String,
+    /// `false` when no identity resolver matched.
     pub attributed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolver: Option<String>,

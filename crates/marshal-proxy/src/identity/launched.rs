@@ -2,7 +2,7 @@
 //!
 //! The naming convention *is* the registration. `marshal run --profile coding-agent` places
 //! the agent in a cgroup named `marshal-coding-agent-<id>.scope`, and this resolver reads the
-//! profile and session back out of that name. No control socket, no shared state, and nothing
+//! profile and identity back out of that name. No control socket, no shared state, and nothing
 //! to get out of sync if the proxy restarts.
 //!
 //! The property that makes it work for real agents is cgroup inheritance: a coding agent's
@@ -16,7 +16,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use marshal_core::{ConnInfo, Resolved, SessionId, SessionResolver};
+use marshal_core::{ConnInfo, Identity, IdentityResolver, Resolved};
 
 /// The scope-name prefix `marshal run` uses.
 pub const SCOPE_PREFIX: &str = "marshal-";
@@ -34,7 +34,7 @@ impl LaunchedResolver {
     }
 }
 
-/// Pull `(profile, session)` out of a cgroup path containing a `marshal-<profile>-<id>.scope`
+/// Pull `(profile, identity)` out of a cgroup path containing a `marshal-<profile>-<id>.scope`
 /// component.
 pub fn parse_scope(cgroup: &str) -> Option<(String, String)> {
     let scope =
@@ -51,14 +51,14 @@ pub fn parse_scope(cgroup: &str) -> Option<(String, String)> {
 }
 
 #[async_trait::async_trait]
-impl SessionResolver for LaunchedResolver {
+impl IdentityResolver for LaunchedResolver {
     fn name(&self) -> &str {
         "launched"
     }
 
     async fn resolve(&self, conn: &ConnInfo) -> Option<Resolved> {
         let cgroup = conn.peer_cred.as_ref()?.cgroup.as_ref()?;
-        let (profile, session) = parse_scope(cgroup)?;
+        let (profile, identity) = parse_scope(cgroup)?;
         if !self.known_profiles.contains(&profile) {
             tracing::warn!(
                 %profile,
@@ -67,7 +67,7 @@ impl SessionResolver for LaunchedResolver {
             return None;
         }
         Some(Resolved {
-            session: SessionId::new(session),
+            identity: Identity::new(identity),
             profile: Arc::from(profile.as_str()),
             attributed: true,
             resolver: Some("launched".into()),
@@ -82,12 +82,12 @@ mod tests {
 
     #[test]
     fn parses_a_scope_out_of_a_cgroup_path() {
-        let (profile, session) = parse_scope(
+        let (profile, identity) = parse_scope(
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/marshal-coding-agent-4821.scope",
         )
         .unwrap();
         assert_eq!(profile, "coding-agent", "a hyphenated profile name must survive");
-        assert_eq!(session, "coding-agent-4821");
+        assert_eq!(identity, "coding-agent-4821");
     }
 
     #[test]

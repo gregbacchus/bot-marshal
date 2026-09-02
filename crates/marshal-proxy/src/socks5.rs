@@ -42,7 +42,7 @@ pub enum Reply {
 pub struct Socks5Request {
     pub authority: Authority,
     /// Present when the client authenticated with username/password (RFC 1929). Used to
-    /// select a session, so a single port can serve several agents.
+    /// select an identity, so a single port can serve several agents.
     pub credential: Option<marshal_core::Credential>,
 }
 
@@ -113,7 +113,7 @@ where
 
 /// RFC 1929 username/password sub-negotiation.
 ///
-/// Always answered with success: the credential selects a session, and an unknown one simply
+/// Always answered with success: the credential selects an identity, and an unknown one simply
 /// fails to match any resolver and lands in the unidentified fallback. Rejecting here would
 /// turn a profile-selection miss into an opaque transport error.
 async fn read_userpass<S>(stream: &mut S) -> Result<marshal_core::Credential, Socks5Error>

@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use marshal_config::model::Config;
 use marshal_core::{
-    Action, BodyHandle, CostClass, DenyingDecider, Evidence, IngressMode, PolicyLayer, Reason,
-    RequestContext, Result, SessionId, Verdict,
+    Action, BodyHandle, CostClass, DenyingDecider, Evidence, Identity, IngressMode, PolicyLayer,
+    Reason, RequestContext, Result, Verdict,
 };
 use marshal_policy::build_chain;
 
@@ -18,7 +18,7 @@ fn cfg(yaml: &str) -> Config {
 
 fn request(host: &str) -> RequestContext {
     RequestContext {
-        session: SessionId::new("test"),
+        identity: Identity::new("test"),
         profile: Arc::from("p"),
         ingress: IngressMode::Explicit,
         phase: marshal_core::Phase::Request,

@@ -3,14 +3,14 @@
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use marshal_core::{ConnInfo, Resolved, SessionId, SessionResolver};
+use marshal_core::{ConnInfo, Identity, IdentityResolver, Resolved};
 
 use super::peercred;
 
-/// Maps a source address range to a session.
+/// Maps a source address range to an identity.
 #[derive(Debug)]
 pub struct SourceIpResolver {
-    entries: Vec<(IpNet, SessionId, Arc<str>)>,
+    entries: Vec<(IpNet, Identity, Arc<str>)>,
 }
 
 impl SourceIpResolver {
@@ -19,8 +19,8 @@ impl SourceIpResolver {
     ) -> Result<Self, ipnet::AddrParseError> {
         let entries = entries
             .into_iter()
-            .map(|(cidr, session, profile)| {
-                Ok((cidr.parse::<IpNet>()?, SessionId::new(session), Arc::from(profile.as_str())))
+            .map(|(cidr, identity, profile)| {
+                Ok((cidr.parse::<IpNet>()?, Identity::new(identity), Arc::from(profile.as_str())))
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { entries })
@@ -28,16 +28,16 @@ impl SourceIpResolver {
 }
 
 #[async_trait::async_trait]
-impl SessionResolver for SourceIpResolver {
+impl IdentityResolver for SourceIpResolver {
     fn name(&self) -> &str {
         "source_ip"
     }
 
     async fn resolve(&self, conn: &ConnInfo) -> Option<Resolved> {
         let ip = conn.client_addr.ip();
-        self.entries.iter().find(|(net, _, _)| net.contains(&ip)).map(|(_, session, profile)| {
+        self.entries.iter().find(|(net, _, _)| net.contains(&ip)).map(|(_, identity, profile)| {
             Resolved {
-                session: session.clone(),
+                identity: identity.clone(),
                 profile: Arc::clone(profile),
                 attributed: true,
                 resolver: Some("source_ip".into()),
@@ -46,12 +46,12 @@ impl SessionResolver for SourceIpResolver {
     }
 }
 
-/// Maps a kernel-supplied uid or gid, or an enriched cgroup path, to a session.
+/// Maps a kernel-supplied uid or gid, or an enriched cgroup path, to an identity.
 #[derive(Debug)]
 pub struct PeerCredResolver {
-    uids: Vec<(u32, SessionId, Arc<str>)>,
-    gids: Vec<(u32, SessionId, Arc<str>)>,
-    cgroups: Vec<(globset::GlobMatcher, SessionId, Arc<str>)>,
+    uids: Vec<(u32, Identity, Arc<str>)>,
+    gids: Vec<(u32, Identity, Arc<str>)>,
+    cgroups: Vec<(globset::GlobMatcher, Identity, Arc<str>)>,
 }
 
 impl PeerCredResolver {
@@ -63,18 +63,18 @@ impl PeerCredResolver {
         Ok(Self {
             uids: uids
                 .into_iter()
-                .map(|(uid, s, p)| (uid, SessionId::new(s), Arc::from(p.as_str())))
+                .map(|(uid, s, p)| (uid, Identity::new(s), Arc::from(p.as_str())))
                 .collect(),
             gids: gids
                 .into_iter()
-                .map(|(gid, s, p)| (gid, SessionId::new(s), Arc::from(p.as_str())))
+                .map(|(gid, s, p)| (gid, Identity::new(s), Arc::from(p.as_str())))
                 .collect(),
             cgroups: cgroups
                 .into_iter()
                 .map(|(pattern, s, p)| {
                     Ok((
                         globset::Glob::new(&pattern)?.compile_matcher(),
-                        SessionId::new(s),
+                        Identity::new(s),
                         Arc::from(p.as_str()),
                     ))
                 })
@@ -89,7 +89,7 @@ impl PeerCredResolver {
 }
 
 #[async_trait::async_trait]
-impl SessionResolver for PeerCredResolver {
+impl IdentityResolver for PeerCredResolver {
     fn name(&self) -> &str {
         "peer_cred"
     }
@@ -102,10 +102,10 @@ impl SessionResolver for PeerCredResolver {
         // strong against a prompt-injected agent, not against one that moves itself between
         // delegated cgroups.
         if let Some(uid) = cred.uid
-            && let Some((_, session, profile)) = self.uids.iter().find(|(u, _, _)| *u == uid)
+            && let Some((_, identity, profile)) = self.uids.iter().find(|(u, _, _)| *u == uid)
         {
             return Some(Resolved {
-                session: session.clone(),
+                identity: identity.clone(),
                 profile: Arc::clone(profile),
                 attributed: true,
                 resolver: Some("peer_cred:uid".into()),
@@ -113,10 +113,10 @@ impl SessionResolver for PeerCredResolver {
         }
 
         if let Some(gid) = cred.gid
-            && let Some((_, session, profile)) = self.gids.iter().find(|(g, _, _)| *g == gid)
+            && let Some((_, identity, profile)) = self.gids.iter().find(|(g, _, _)| *g == gid)
         {
             return Some(Resolved {
-                session: session.clone(),
+                identity: identity.clone(),
                 profile: Arc::clone(profile),
                 attributed: true,
                 resolver: Some("peer_cred:gid".into()),
@@ -124,11 +124,11 @@ impl SessionResolver for PeerCredResolver {
         }
 
         if let Some(cgroup) = &cred.cgroup
-            && let Some((_, session, profile)) =
+            && let Some((_, identity, profile)) =
                 self.cgroups.iter().find(|(m, _, _)| m.is_match(cgroup))
         {
             return Some(Resolved {
-                session: session.clone(),
+                identity: identity.clone(),
                 profile: Arc::clone(profile),
                 attributed: true,
                 resolver: Some("peer_cred:cgroup".into()),
@@ -139,7 +139,7 @@ impl SessionResolver for PeerCredResolver {
     }
 }
 
-/// Maps the port a connection arrived on to a session.
+/// Maps the port a connection arrived on to an identity.
 ///
 /// The fallback for agents that share a uid. nftables steers each identity to a different
 /// port — `meta skuid 1001 ... redirect to :8081` — so the accepting listener *is* the
@@ -150,7 +150,7 @@ impl SessionResolver for PeerCredResolver {
 /// own profile by choosing a port.
 #[derive(Debug)]
 pub struct ListenerPortResolver {
-    entries: Vec<(u16, SessionId, Arc<str>)>,
+    entries: Vec<(u16, Identity, Arc<str>)>,
 }
 
 impl ListenerPortResolver {
@@ -158,22 +158,22 @@ impl ListenerPortResolver {
         Self {
             entries: entries
                 .into_iter()
-                .map(|(port, s, p)| (port, SessionId::new(s), Arc::from(p.as_str())))
+                .map(|(port, s, p)| (port, Identity::new(s), Arc::from(p.as_str())))
                 .collect(),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl SessionResolver for ListenerPortResolver {
+impl IdentityResolver for ListenerPortResolver {
     fn name(&self) -> &str {
         "listener_port"
     }
 
     async fn resolve(&self, conn: &ConnInfo) -> Option<Resolved> {
         let port = conn.local_addr.port();
-        self.entries.iter().find(|(p, _, _)| *p == port).map(|(_, session, profile)| Resolved {
-            session: session.clone(),
+        self.entries.iter().find(|(p, _, _)| *p == port).map(|(_, identity, profile)| Resolved {
+            identity: identity.clone(),
             profile: Arc::clone(profile),
             attributed: true,
             resolver: Some("listener_port".into()),
@@ -186,7 +186,7 @@ impl SessionResolver for ListenerPortResolver {
 /// Client-asserted, so it is only as strong as the secret. Listed last in the shipped config
 /// for that reason.
 pub struct ProxyAuthResolver {
-    entries: Vec<(String, String, SessionId, Arc<str>)>,
+    entries: Vec<(String, String, Identity, Arc<str>)>,
 }
 
 impl std::fmt::Debug for ProxyAuthResolver {
@@ -200,7 +200,7 @@ impl ProxyAuthResolver {
         Self {
             entries: entries
                 .into_iter()
-                .map(|(u, p, s, prof)| (u, p, SessionId::new(s), Arc::from(prof.as_str())))
+                .map(|(u, p, s, prof)| (u, p, Identity::new(s), Arc::from(prof.as_str())))
                 .collect(),
         }
     }
@@ -211,7 +211,7 @@ impl ProxyAuthResolver {
 }
 
 #[async_trait::async_trait]
-impl SessionResolver for ProxyAuthResolver {
+impl IdentityResolver for ProxyAuthResolver {
     fn name(&self) -> &str {
         "proxy_auth"
     }
@@ -223,8 +223,8 @@ impl SessionResolver for ProxyAuthResolver {
         self.entries
             .iter()
             .find(|(u, p, _, _)| *u == cred.user && constant_time_eq(p, &cred.password))
-            .map(|(_, _, session, profile)| Resolved {
-                session: session.clone(),
+            .map(|(_, _, identity, profile)| Resolved {
+                identity: identity.clone(),
                 profile: Arc::clone(profile),
                 attributed: true,
                 resolver: Some("proxy_auth".into()),
@@ -241,15 +241,15 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 
 /// The `Resolved.profile` label used for audit/display when the fallback is the base
 /// config's embedded `profile:` rather than a named override — it has no real name, and this
-/// is never used as a lookup key (see [`SessionRegistry::uses_default_fallback`]).
+/// is never used as a lookup key (see [`IdentityRegistry::uses_default_fallback`]).
 pub const DEFAULT_PROFILE_LABEL: &str = "default";
 
-/// Runs resolvers in order and falls back to an explicitly unattributed session.
-pub struct SessionRegistry {
-    resolvers: Vec<Arc<dyn SessionResolver>>,
+/// Runs resolvers in order and falls back to an explicitly unattributed identity.
+pub struct IdentityRegistry {
+    resolvers: Vec<Arc<dyn IdentityResolver>>,
     /// `None` means the fallback is the base config's embedded, unnamed `profile:` — the
     /// runtime keeps that chain separately rather than in the name-keyed map, since it has
-    /// nothing to be keyed by. `Some(name)` means `sessions.unidentified.profile` explicitly
+    /// nothing to be keyed by. `Some(name)` means `identities.unidentified.profile` explicitly
     /// named one of the profiles under `profiles_path` instead.
     fallback_profile: Option<Arc<str>>,
     /// Refuse anything that cannot be attributed, rather than serving it under the fallback.
@@ -258,9 +258,9 @@ pub struct SessionRegistry {
     enrich: bool,
 }
 
-impl std::fmt::Debug for SessionRegistry {
+impl std::fmt::Debug for IdentityRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SessionRegistry")
+        f.debug_struct("IdentityRegistry")
             .field("resolvers", &self.resolvers.iter().map(|r| r.name()).collect::<Vec<_>>())
             .field("fallback_profile", &self.fallback_profile)
             .field("deny_unidentified", &self.deny_unidentified)
@@ -268,9 +268,9 @@ impl std::fmt::Debug for SessionRegistry {
     }
 }
 
-impl SessionRegistry {
+impl IdentityRegistry {
     pub fn new(
-        resolvers: Vec<Arc<dyn SessionResolver>>,
+        resolvers: Vec<Arc<dyn IdentityResolver>>,
         fallback_profile: Option<Arc<str>>,
         deny_unidentified: bool,
         enrich: bool,
@@ -304,7 +304,7 @@ impl SessionRegistry {
         conn.peer_cred = peercred::peer_cred_for_tcp(conn.client_addr, self.enrich);
     }
 
-    /// First match wins; otherwise an explicitly unattributed session.
+    /// First match wins; otherwise an explicitly unattributed identity.
     pub async fn resolve(&self, conn: &ConnInfo) -> Resolved {
         for resolver in &self.resolvers {
             if let Some(found) = resolver.resolve(conn).await {
@@ -312,7 +312,7 @@ impl SessionRegistry {
             }
         }
         Resolved {
-            session: SessionId::unidentified(),
+            identity: Identity::unidentified(),
             profile: self
                 .fallback_profile
                 .clone()
@@ -352,7 +352,7 @@ mod tests {
         let mut c = conn();
         c.client_addr = "172.20.0.7:1234".parse().unwrap();
         let got = r.resolve(&c).await.unwrap();
-        assert_eq!(got.session.to_string(), "agent-a");
+        assert_eq!(got.identity.to_string(), "agent-a");
         assert_eq!(&*got.profile, "coding");
 
         c.client_addr = "10.0.0.1:1234".parse().unwrap();
@@ -375,14 +375,14 @@ mod tests {
             ..Default::default()
         });
         // Uid is the part the kernel guarantees, so it wins.
-        assert_eq!(r.resolve(&c).await.unwrap().session.to_string(), "by-uid");
+        assert_eq!(r.resolve(&c).await.unwrap().identity.to_string(), "by-uid");
 
         c.peer_cred = Some(PeerCred {
             uid: Some(9999),
             cgroup: Some("/user.slice/agent.scope".into()),
             ..Default::default()
         });
-        assert_eq!(r.resolve(&c).await.unwrap().session.to_string(), "by-cgroup");
+        assert_eq!(r.resolve(&c).await.unwrap().identity.to_string(), "by-cgroup");
     }
 
     #[tokio::test]
@@ -391,7 +391,7 @@ mod tests {
 
         let mut c = conn();
         c.local_addr = "127.0.0.1:8081".parse().unwrap();
-        assert_eq!(r.resolve(&c).await.unwrap().session.to_string(), "agent-a");
+        assert_eq!(r.resolve(&c).await.unwrap().identity.to_string(), "agent-a");
 
         c.local_addr = "127.0.0.1:8082".parse().unwrap();
         assert!(r.resolve(&c).await.is_none());
@@ -419,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn unmatched_connections_are_explicitly_unattributed() {
-        let registry = SessionRegistry::new(
+        let registry = IdentityRegistry::new(
             vec![Arc::new(
                 SourceIpResolver::new([(
                     "172.20.0.0/24".to_string(),
@@ -435,14 +435,14 @@ mod tests {
 
         let got = registry.resolve(&conn()).await;
         assert!(!got.attributed, "an unmatched connection must not look attributed");
-        assert_eq!(got.session.to_string(), "unidentified");
+        assert_eq!(got.identity.to_string(), "unidentified");
         assert_eq!(&*got.profile, "restricted");
         assert!(got.resolver.is_none());
     }
 
     #[tokio::test]
     async fn resolvers_are_tried_in_order() {
-        let registry = SessionRegistry::new(
+        let registry = IdentityRegistry::new(
             vec![
                 Arc::new(
                     SourceIpResolver::new([(
@@ -465,7 +465,7 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(registry.resolve(&conn()).await.session.to_string(), "first");
+        assert_eq!(registry.resolve(&conn()).await.identity.to_string(), "first");
     }
 
     #[test]

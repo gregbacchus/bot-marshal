@@ -74,7 +74,7 @@ profile:
 # judge arrive in M3/M4.5) live under profiles/, one file each, since only this fallback needs
 # to be inline. See profiles/coding-agent.yaml and profiles/llm-agent.yaml.
 
-sessions:
+identities:
   # Tried in order; first match wins. Identity is derived from the connection, never asserted
   # by the client — transparent and DNS ingress give the client no way to present a
   # credential. They are listed strongest-first, which is also the order they should be tried:
@@ -95,25 +95,25 @@ sessions:
       enrich: true                  # needed for cgroup matching; costs a /proc walk
       map:
         - uid: 1001
-          session: "bot-ci"
+          identity: "bot-ci"
           profile: coding-agent
 
-    - type: launched                # sessions created by `marshal run`
+    - type: launched                # identities created by `marshal run`
 
     - type: source_ip               # containers / netns
       map:
         - cidr: "172.20.0.10/32"
-          session: "agent-a"
+          identity: "agent-a"
           profile: coding-agent
 
     - type: proxy_auth
       credentials:
         - user: "agent-a"
           password_env: "MARSHAL_AGENT_A_PW"
-          session: "agent-a"
+          identity: "agent-a"
           profile: coding-agent
 
-  # Nothing matched: synthetic session, flagged unattributed in every audit record, served
+  # Nothing matched: synthetic identity, flagged unattributed in every audit record, served
   # under the embedded `profile:` above (the most restrictive one) by default — set
   # `profile: <name>` here to use a named one instead, or `action: deny` for a hard-fail
   # posture rather than falling back at all.

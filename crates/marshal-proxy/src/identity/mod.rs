@@ -1,5 +1,5 @@
-//! Session identity: deciding which agent a connection belongs to, and therefore which
-//! profile applies.
+//! Identity: deciding which agent a connection belongs to, and therefore which profile
+//! applies.
 //!
 //! Resolvers are tried in order and the first match wins. They are deliberately not
 //! interchangeable in strength, and the config documents which is which:
@@ -20,5 +20,5 @@ pub mod resolvers;
 
 pub use launched::LaunchedResolver;
 pub use resolvers::{
-    ListenerPortResolver, PeerCredResolver, ProxyAuthResolver, SessionRegistry, SourceIpResolver,
+    IdentityRegistry, ListenerPortResolver, PeerCredResolver, ProxyAuthResolver, SourceIpResolver,
 };

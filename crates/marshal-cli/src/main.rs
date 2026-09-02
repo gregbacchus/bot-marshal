@@ -30,7 +30,7 @@ struct Cli {
 
     /// How much detail per-request lines carry, on top of the base `log` messages (startup,
     /// warnings, shutdown), which are always on. `access` (default) is one summary line per
-    /// request: session, host, method, profile, deciding layer, duration. `audit` is the
+    /// request: identity, host, method, profile, deciding layer, duration. `audit` is the
     /// same line with everything else added: status code, cache/would-deny flags, and the
     /// full evidence trail — noticeably bulkier, so reach for it while a policy is still
     /// being worked out, not as a standing default. `log` turns per-request lines off
@@ -135,7 +135,7 @@ enum Command {
     /// Run the proxy.
     Serve {
         /// Fallback profile for connections no resolver attributes. Overrides
-        /// `sessions.unidentified.profile`.
+        /// `identities.unidentified.profile`.
         #[arg(long)]
         profile: Option<String>,
 
@@ -458,10 +458,10 @@ fn build_runtime(
     let mut response_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>> =
         HashMap::new();
     // Per profile, same as chains and response_transforms: a secret swap declared under one
-    // profile must never fire for a session resolved into a different one. Kept alongside as
+    // profile must never fire for an identity resolved into a different one. Kept alongside as
     // `injectors` too, because the redactor below needs the union of every profile's real
     // secret values, not just whichever profile a given connection happens to resolve into —
-    // a value belonging to any profile can end up in a log line regardless of which session
+    // a value belonging to any profile can end up in a log line regardless of which identity
     // produced it.
     let mut request_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::RequestTransform>>> =
         HashMap::new();
@@ -508,13 +508,13 @@ fn build_runtime(
     // `None` means "the embedded `profile:`" — always valid, since it's required to exist;
     // `Some(name)` is an explicit override that must actually name a built profile.
     let fallback_override: Option<Arc<str>> = profile_override
-        .or_else(|| cfg.sessions.unidentified.as_ref().and_then(|u| u.profile.clone()))
+        .or_else(|| cfg.identities.unidentified.as_ref().and_then(|u| u.profile.clone()))
         .map(|s| Arc::from(s.as_str()));
     if let Some(name) = &fallback_override {
         anyhow::ensure!(chains.contains_key(name), "unknown profile `{name}`");
     }
 
-    let sessions = Arc::new(build_sessions(&cfg, fallback_override)?);
+    let identities = Arc::new(build_identities(&cfg, fallback_override)?);
 
     // Interception is mandatory, not a fallback. A plain relay cannot enforce per-request
     // policy, and — the reason this is a hard requirement rather than a convenience — it
@@ -560,7 +560,7 @@ fn build_runtime(
             default_chain,
             default_response_transforms,
             default_request_transforms,
-            sessions,
+            identities,
             passthrough,
             tls,
         },
@@ -610,19 +610,19 @@ async fn start_dns(
 }
 
 /// Build the resolver chain from config.
-fn build_sessions(
+fn build_identities(
     cfg: &marshal_config::model::Config,
     fallback: Option<Arc<str>>,
-) -> anyhow::Result<marshal_proxy::sessions::SessionRegistry> {
+) -> anyhow::Result<marshal_proxy::identity::IdentityRegistry> {
     use marshal_config::model::ResolverConfig;
-    use marshal_proxy::sessions::{
-        LaunchedResolver, PeerCredResolver, ProxyAuthResolver, SessionRegistry, SourceIpResolver,
+    use marshal_proxy::identity::{
+        IdentityRegistry, LaunchedResolver, PeerCredResolver, ProxyAuthResolver, SourceIpResolver,
     };
 
-    let mut resolvers: Vec<Arc<dyn marshal_core::SessionResolver>> = Vec::new();
+    let mut resolvers: Vec<Arc<dyn marshal_core::IdentityResolver>> = Vec::new();
     let mut enrich = false;
 
-    for resolver in &cfg.sessions.resolvers {
+    for resolver in &cfg.identities.resolvers {
         match resolver {
             ResolverConfig::ProxyAuth { credentials } => {
                 let mut entries = Vec::new();
@@ -632,13 +632,13 @@ fn build_sessions(
                     // agent to the fallback profile.
                     let password = std::env::var(&c.password_env).map_err(|_| {
                         anyhow::anyhow!(
-                            "sessions.resolvers: `{}` is not set, so the credential for `{}` \
+                            "identities.resolvers: `{}` is not set, so the credential for `{}` \
                              cannot be built",
                             c.password_env,
                             c.user
                         )
                     })?;
-                    entries.push((c.user.clone(), password, c.session.clone(), c.profile.clone()));
+                    entries.push((c.user.clone(), password, c.identity.clone(), c.profile.clone()));
                 }
                 let r = ProxyAuthResolver::new(entries);
                 if !r.is_empty() {
@@ -647,7 +647,7 @@ fn build_sessions(
             }
             ResolverConfig::SourceIp { map } => {
                 resolvers.push(Arc::new(SourceIpResolver::new(
-                    map.iter().map(|e| (e.cidr.clone(), e.session.clone(), e.profile.clone())),
+                    map.iter().map(|e| (e.cidr.clone(), e.identity.clone(), e.profile.clone())),
                 )?));
             }
             ResolverConfig::PeerCred { enrich: e, map } => {
@@ -665,10 +665,10 @@ fn build_sessions(
                     let uid = match (m.uid, &m.username) {
                         (Some(uid), _) => Some(uid),
                         (None, Some(name)) => Some(
-                            marshal_proxy::sessions::peercred::resolve_username(name).map_err(
+                            marshal_proxy::identity::peercred::resolve_username(name).map_err(
                                 |e| {
                                     anyhow::anyhow!(
-                                        "sessions.resolvers: peer_cred username `{name}` \
+                                        "identities.resolvers: peer_cred username `{name}` \
                                          could not be resolved to a uid: {e}"
                                     )
                                 },
@@ -677,15 +677,15 @@ fn build_sessions(
                         (None, None) => None,
                     };
                     if let Some(uid) = uid {
-                        uids.push((uid, m.session.clone(), m.profile.clone()));
+                        uids.push((uid, m.identity.clone(), m.profile.clone()));
                     }
                     let gid = match (m.gid, &m.groupname) {
                         (Some(gid), _) => Some(gid),
                         (None, Some(name)) => Some(
-                            marshal_proxy::sessions::peercred::resolve_groupname(name).map_err(
+                            marshal_proxy::identity::peercred::resolve_groupname(name).map_err(
                                 |e| {
                                     anyhow::anyhow!(
-                                        "sessions.resolvers: peer_cred groupname `{name}` \
+                                        "identities.resolvers: peer_cred groupname `{name}` \
                                          could not be resolved to a gid: {e}"
                                     )
                                 },
@@ -694,10 +694,10 @@ fn build_sessions(
                         (None, None) => None,
                     };
                     if let Some(gid) = gid {
-                        gids.push((gid, m.session.clone(), m.profile.clone()));
+                        gids.push((gid, m.identity.clone(), m.profile.clone()));
                     }
                     if let Some(cgroup) = &m.cgroup {
-                        cgroups.push((cgroup.clone(), m.session.clone(), m.profile.clone()));
+                        cgroups.push((cgroup.clone(), m.identity.clone(), m.profile.clone()));
                     }
                 }
                 resolvers.push(Arc::new(PeerCredResolver::new(uids, gids, cgroups)?));
@@ -709,19 +709,19 @@ fn build_sessions(
                 resolvers.push(Arc::new(LaunchedResolver::new(cfg.profiles.keys().cloned())));
             }
             ResolverConfig::ListenerPort { map } => {
-                resolvers.push(Arc::new(marshal_proxy::sessions::ListenerPortResolver::new(
-                    map.iter().map(|e| (e.port, e.session.clone(), e.profile.clone())),
+                resolvers.push(Arc::new(marshal_proxy::identity::ListenerPortResolver::new(
+                    map.iter().map(|e| (e.port, e.identity.clone(), e.profile.clone())),
                 )));
             }
         }
     }
 
     let deny_unidentified = matches!(
-        cfg.sessions.unidentified.as_ref().map(|u| u.action),
+        cfg.identities.unidentified.as_ref().map(|u| u.action),
         Some(marshal_config::model::UnidentifiedAction::Deny)
     );
 
-    Ok(SessionRegistry::new(resolvers, fallback, deny_unidentified, enrich))
+    Ok(IdentityRegistry::new(resolvers, fallback, deny_unidentified, enrich))
 }
 
 /// `marshal run`: launch an agent under a profile.
@@ -1280,7 +1280,7 @@ mod tests {
     /// shape that used to break: `build_runtime` resolved only the fallback profile's
     /// `request_transforms.secrets`, so a non-fallback profile's swap was either silently
     /// never built, or — worse, if both profiles targeted the same host — the fallback
-    /// profile's real credential could be injected into a session that resolved into the
+    /// profile's real credential could be injected into an identity that resolved into the
     /// other profile entirely.
     fn write_two_profile_config(dir: &std::path::Path) -> std::path::PathBuf {
         let ca_dir = dir.join("ca");
@@ -1369,7 +1369,7 @@ profile:
         // The mechanical bug: request_transforms used to be a flat Vec built from one
         // profile, so it either lacked profile-b's swap entirely, or (worse, when hosts
         // overlapped, as they do here) applied profile-a's real secret to profile-b's
-        // sessions. Both profiles must now have their own, independent entry.
+        // identities. Both profiles must now have their own, independent entry.
         assert!(
             runtime.request_transforms.contains_key("profile-a"),
             "profile-a's own swap is missing"
@@ -1382,7 +1382,7 @@ profile:
 
         // And the redactor-seeding side of the same bug: every profile's real value must be
         // resolved, not just the fallback's, because a value belonging to any profile could
-        // appear in a log line regardless of which session produced it.
+        // appear in a log line regardless of which identity produced it.
         let mut all_values = Vec::new();
         for injector in &injectors {
             for (_, v) in injector.resolve_all().await {

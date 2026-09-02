@@ -1,7 +1,7 @@
 //! The request context every ingress mode converges on.
 
 use crate::evidence::Evidence;
-use crate::session::SessionId;
+use crate::identity::Identity;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -72,7 +72,7 @@ impl BodyHandle {
 /// Everything a policy layer or transform can see about one request.
 #[derive(Debug)]
 pub struct RequestContext {
-    pub session: SessionId,
+    pub identity: Identity,
     /// Name of the resolved profile. The profile itself lives in `marshal-config`, which
     /// depends on this crate, so it is referenced by name here to keep the dependency acyclic.
     pub profile: Arc<str>,

@@ -23,8 +23,8 @@ use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use marshal_core::{
-    Action, AuditRecord, AuditSink, Authority, BodyHandle, BodyRequirement, Evidence, IngressMode,
-    Reason, RequestContext, RequestTransform, ResponseParts, ResponseTransform, SessionId,
+    Action, AuditRecord, AuditSink, Authority, BodyHandle, BodyRequirement, Evidence, Identity,
+    IngressMode, Reason, RequestContext, RequestTransform, ResponseParts, ResponseTransform,
 };
 use marshal_policy::Chain;
 use rustls::pki_types::ServerName;
@@ -112,7 +112,7 @@ pub struct MitmHandler {
     pub chain: Arc<Chain>,
     pub audit: Arc<dyn AuditSink>,
     pub authority: Authority,
-    pub session: SessionId,
+    pub identity: Identity,
     pub profile: Arc<str>,
     pub client_addr: std::net::SocketAddr,
     /// Applied after the chain allows. Rewriting is not deciding.
@@ -122,7 +122,7 @@ pub struct MitmHandler {
     /// Counters. Intercepted requests must be recorded here too: once TLS is terminated a
     /// single CONNECT carries many requests, and counting only tunnels understates an agent's
     /// activity by whatever its connection reuse happens to be.
-    pub stats: Arc<crate::stats::SessionStats>,
+    pub stats: Arc<crate::stats::IdentityStats>,
     /// Whether a resolver matched. Recorded so an unattributed request never looks
     /// attributed in the audit trail.
     pub attributed: bool,
@@ -254,7 +254,7 @@ async fn handle_request(
 
     // Policy now sees the real request, not just the tunnel destination.
     let mut cx = RequestContext {
-        session: handler.session.clone(),
+        identity: handler.identity.clone(),
         profile: Arc::clone(&handler.profile),
         ingress: IngressMode::Explicit,
         phase: marshal_core::Phase::Request,
@@ -592,7 +592,7 @@ fn denial_response(
     let body = serde_json::json!({
         "error": "egress_denied",
         "proxy": "bot-marshal",
-        "session": cx.session.to_string(),
+        "identity": cx.identity.to_string(),
         "profile": cx.profile.to_string(),
         "reason": reason,
     });
@@ -617,11 +617,11 @@ async fn emit(
     started: std::time::Instant,
     would_deny: bool,
 ) {
-    handler.stats.record(&cx.session, &cx.profile, action == Action::Allow, would_deny);
+    handler.stats.record(&cx.identity, &cx.profile, action == Action::Allow, would_deny);
     handler
         .audit
         .emit(AuditRecord {
-            session: cx.session.to_string(),
+            identity: cx.identity.to_string(),
             attributed: handler.attributed,
             resolver: handler.resolver.clone(),
             profile: cx.profile.to_string(),

@@ -49,8 +49,8 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
 
     // Resolvers must name profiles that exist, or a matching connection resolves to nothing
     // and falls through to the fallback — silently, and under the wrong policy.
-    for (i, resolver) in cfg.sessions.resolvers.iter().enumerate() {
-        let at = format!("sessions.resolvers[{i}]");
+    for (i, resolver) in cfg.identities.resolvers.iter().enumerate() {
+        let at = format!("identities.resolvers[{i}]");
         let referenced: Vec<&String> = match resolver {
             crate::model::ResolverConfig::ProxyAuth { credentials } => {
                 credentials.iter().map(|c| &c.profile).collect()
@@ -135,13 +135,13 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
 
     // `profile: None` means "use the embedded `profile:`" — always valid, since that's
     // required to exist. Only an explicit override needs checking.
-    if let Some(u) = &cfg.sessions.unidentified
+    if let Some(u) = &cfg.identities.unidentified
         && let Some(name) = &u.profile
         && !cfg.profiles.contains_key(name)
     {
         out.push(Diagnostic {
             severity: Severity::Error,
-            location: "sessions.unidentified.profile".into(),
+            location: "identities.unidentified.profile".into(),
             message: format!("unknown profile `{name}`"),
         });
     }
@@ -438,7 +438,7 @@ mod tests {
         // `profile: None` means "use the embedded default", which always exists — nothing to
         // validate.
         let mut cfg = cfg_with(Profile::default());
-        cfg.sessions.unidentified =
+        cfg.identities.unidentified =
             Some(Unidentified { profile: None, action: UnidentifiedAction::default() });
         assert!(!validate(&cfg).iter().any(|d| d.severity == Severity::Error));
     }
@@ -446,15 +446,16 @@ mod tests {
     #[test]
     fn unidentified_profile_naming_an_unknown_profile_is_an_error() {
         let mut cfg = cfg_with(Profile::default());
-        cfg.sessions.unidentified = Some(Unidentified {
+        cfg.identities.unidentified = Some(Unidentified {
             profile: Some("nope".into()),
             action: UnidentifiedAction::default(),
         });
-        assert!(validate(&cfg).iter().any(
-            |d| d.severity == Severity::Error && d.location == "sessions.unidentified.profile"
-        ));
+        assert!(
+            validate(&cfg).iter().any(|d| d.severity == Severity::Error
+                && d.location == "identities.unidentified.profile")
+        );
 
-        cfg.sessions.unidentified =
+        cfg.identities.unidentified =
             Some(Unidentified { profile: Some("p".into()), action: UnidentifiedAction::default() });
         assert!(!validate(&cfg).iter().any(|d| d.severity == Severity::Error));
     }

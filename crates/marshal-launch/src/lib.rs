@@ -1,6 +1,6 @@
 //! `marshal run`: launching an agent so the proxy can identify it.
 //!
-//! The mechanisms in `marshal-proxy::sessions` are useless if using one means assembling a
+//! The mechanisms in `marshal-proxy::identity` are useless if using one means assembling a
 //! cgroup scope or a network namespace by hand. This turns that into a single command.
 //!
 //! Isolation modes, strongest first:
@@ -307,11 +307,11 @@ mod tests {
         let name = scope_name("coding-agent", 4821);
         assert_eq!(name, "marshal-coding-agent-4821.scope");
         // The launcher and the resolver must agree, or identity silently stops working.
-        let (profile, session) =
-            marshal_proxy::sessions::launched::parse_scope(&format!("0::/user.slice/{name}"))
+        let (profile, identity) =
+            marshal_proxy::identity::launched::parse_scope(&format!("0::/user.slice/{name}"))
                 .unwrap();
         assert_eq!(profile, "coding-agent");
-        assert_eq!(session, "coding-agent-4821");
+        assert_eq!(identity, "coding-agent-4821");
     }
 
     #[test]

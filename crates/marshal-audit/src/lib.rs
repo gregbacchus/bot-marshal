@@ -126,7 +126,7 @@ impl AuditSink for RequestTracingSink {
             match r.action {
                 Action::Allow => tracing::info!(
                     target: "access",
-                    session = %r.session,
+                    identity = %r.identity,
                     profile = %r.profile,
                     host = %r.host,
                     method = %r.method,
@@ -136,7 +136,7 @@ impl AuditSink for RequestTracingSink {
                 ),
                 Action::Deny => tracing::warn!(
                     target: "access",
-                    session = %r.session,
+                    identity = %r.identity,
                     profile = %r.profile,
                     host = %r.host,
                     method = %r.method,
@@ -152,7 +152,7 @@ impl AuditSink for RequestTracingSink {
         match r.action {
             Action::Allow => tracing::info!(
                 target: "access",
-                session = %r.session,
+                identity = %r.identity,
                 attributed = r.attributed,
                 resolver = r.resolver.as_deref().unwrap_or(""),
                 profile = %r.profile,
@@ -171,7 +171,7 @@ impl AuditSink for RequestTracingSink {
             ),
             Action::Deny => tracing::warn!(
                 target: "access",
-                session = %r.session,
+                identity = %r.identity,
                 attributed = r.attributed,
                 resolver = r.resolver.as_deref().unwrap_or(""),
                 profile = %r.profile,
@@ -218,7 +218,7 @@ mod tests {
 
     fn record() -> AuditRecord {
         AuditRecord {
-            session: "agent-a".into(),
+            identity: "agent-a".into(),
             attributed: true,
             resolver: Some("proxy_auth".into()),
             profile: "coding-agent".into(),

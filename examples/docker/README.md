@@ -19,7 +19,7 @@ docker compose exec agent-a curl -sS -o /dev/null -w '%{http_code}\n' https://ap
 docker compose exec agent-b curl -sS -o /dev/null -w '%{http_code}\n' https://api.anthropic.com/
 ```
 
-The audit log shows each request attributed to a session by `source_ip`:
+The audit log shows each request attributed to an identity by `source_ip`:
 
 ```bash
 docker compose logs proxy | grep '"action"'

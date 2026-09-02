@@ -10,8 +10,8 @@ use marshal_audit::JsonSink;
 use marshal_config::model::Config;
 use marshal_core::{AuditSink, DenyingDecider};
 use marshal_policy::{HostMatcher, build_chain, build_response_transforms};
+use marshal_proxy::identity::IdentityRegistry;
 use marshal_proxy::mitm::TlsEngine;
-use marshal_proxy::sessions::SessionRegistry;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
 use support::*;
 
@@ -80,7 +80,7 @@ async fn harness() -> Harness {
             )),
             default_response_transforms: Vec::new(),
             default_request_transforms: Vec::new(),
-            sessions: Arc::new(SessionRegistry::new(vec![], Some(Arc::from("p")), false, false)),
+            identities: Arc::new(IdentityRegistry::new(vec![], Some(Arc::from("p")), false, false)),
             passthrough: HostMatcher::default(),
             tls: engine,
         }),

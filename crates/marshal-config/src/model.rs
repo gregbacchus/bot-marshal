@@ -32,7 +32,7 @@ pub struct Config {
     #[serde(default = "default_profiles_path")]
     pub profiles_path: String,
     #[serde(default)]
-    pub sessions: Sessions,
+    pub identities: Identities,
     /// Named host sets importable by profiles via `allow.bundles`.
     #[serde(default)]
     pub bundles: BTreeMap<String, crate::layer::HostSet>,
@@ -337,7 +337,7 @@ pub struct HeaderAllowlist {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Sessions {
+pub struct Identities {
     /// Tried in order; first match wins.
     #[serde(default)]
     pub resolvers: Vec<ResolverConfig>,
@@ -345,7 +345,7 @@ pub struct Sessions {
     pub unidentified: Option<Unidentified>,
 }
 
-/// A session resolver. Ordering is significant, and so is strength: `peer_cred` uid is
+/// An identity resolver. Ordering is significant, and so is strength: `peer_cred` uid is
 /// kernel-supplied, `source_ip` is as trustworthy as the network, and `proxy_auth` is
 /// client-asserted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,7 +367,7 @@ pub enum ResolverConfig {
         #[serde(default)]
         map: Vec<PeerCredEntry>,
     },
-    /// Sessions created by `marshal run`, identified by the cgroup scope it names.
+    /// Identities created by `marshal run`, identified by the cgroup scope it names.
     Launched,
     /// Identity by which listener accepted, for agents that share a uid.
     ListenerPort {
@@ -395,7 +395,7 @@ pub struct ProxyAuthEntry {
     /// Read from the environment rather than written in the file, so the config can be
     /// committed.
     pub password_env: String,
-    pub session: String,
+    pub identity: String,
     pub profile: String,
 }
 
@@ -403,7 +403,7 @@ pub struct ProxyAuthEntry {
 #[serde(deny_unknown_fields)]
 pub struct SourceIpEntry {
     pub cidr: String,
-    pub session: String,
+    pub identity: String,
     pub profile: String,
 }
 
@@ -411,7 +411,7 @@ pub struct SourceIpEntry {
 #[serde(deny_unknown_fields)]
 pub struct ListenerPortEntry {
     pub port: u16,
-    pub session: String,
+    pub identity: String,
     pub profile: String,
 }
 
@@ -434,7 +434,7 @@ pub struct PeerCredEntry {
     /// Glob over the cgroup path. Requires `enrich: true`.
     #[serde(default)]
     pub cgroup: Option<String>,
-    pub session: String,
+    pub identity: String,
     pub profile: String,
 }
 
