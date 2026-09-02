@@ -16,4 +16,5 @@ serde_json.workspace = true
 async-trait.workspace = true
 http.workspace = true
 bytes.workspace = true
+ipnet.workspace = true
 thiserror.workspace = true

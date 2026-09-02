@@ -13,6 +13,7 @@ use crate::layers::{Allowlist, Denylist, Dlp, Mcp, Rules};
 use crate::mcp::McpPolicy;
 use crate::patterns;
 use crate::transforms::McpToolFilter;
+use marshal_judge::{AnthropicProvider, CompiledScope, Judge, Provider};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -44,6 +45,20 @@ pub enum BuildError {
         profile: String,
         #[source]
         source: crate::mcp::McpConfigError,
+    },
+
+    #[error("profile `{profile}`: judge scope: {source}")]
+    JudgeScope {
+        profile: String,
+        #[source]
+        source: marshal_core::PatternError,
+    },
+
+    #[error("profile `{profile}`: judge: {source}")]
+    JudgeProvider {
+        profile: String,
+        #[source]
+        source: marshal_judge::ProviderError,
     },
 
     #[error("profile `{profile}`: {source}")]
@@ -184,6 +199,39 @@ pub fn build_chain(
                     BuildError::Mcp { profile: profile_name.to_owned(), source }
                 })?);
                 layers.push(Arc::new(Mcp::new(policy, *max_body_bytes)));
+            }
+            LayerConfig::Judge(cfg) => {
+                let scope = CompiledScope::compile(&cfg.scope).map_err(|source| {
+                    BuildError::JudgeScope { profile: profile_name.to_owned(), source }
+                })?;
+
+                let provider: Arc<dyn Provider> = match &cfg.provider {
+                    marshal_config::layer::Provider::Anthropic {
+                        model,
+                        api_key_env,
+                        max_tokens,
+                    } => Arc::new(
+                        AnthropicProvider::from_env(model.clone(), api_key_env, *max_tokens)
+                            .map_err(|source| BuildError::JudgeProvider {
+                                profile: profile_name.to_owned(),
+                                source,
+                            })?,
+                    ),
+                };
+
+                layers.push(Arc::new(Judge::new(
+                    scope,
+                    provider,
+                    cfg.prompt.clone(),
+                    cfg.cache.ttl,
+                    cfg.cache.max_entries,
+                    cfg.max_concurrent,
+                    cfg.timeout,
+                    cfg.on_error,
+                    cfg.on_timeout,
+                    cfg.circuit_breaker.consecutive_failures,
+                    cfg.circuit_breaker.cooldown,
+                )));
             }
             #[allow(unreachable_patterns)]
             other => {

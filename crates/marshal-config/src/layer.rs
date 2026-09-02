@@ -175,7 +175,7 @@ pub struct JudgeConfig {
     /// Only requests matching this scope reach the judge. A scope that is too broad is slow
     /// and expensive, which is why cache hit rate is an exported metric.
     #[serde(default)]
-    pub scope: Vec<serde_json::Value>,
+    pub scope: Vec<JudgeScope>,
     pub prompt: String,
     #[serde(default)]
     pub cache: CacheConfig,
@@ -193,6 +193,23 @@ pub struct JudgeConfig {
 
 fn default_max_concurrent() -> usize {
     32
+}
+
+/// Which requests reach the judge.
+///
+/// Deliberately excludes header and body content — the judge never sees either, only method,
+/// host, path, and header *names*. The request goes to a third-party API; anything it is
+/// shown is a potential leak, and neither the body nor a header value is ever necessary to
+/// answer a scoping question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeScope {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub cidr: Option<String>,
+    #[serde(default)]
+    pub methods: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

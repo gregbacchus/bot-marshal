@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod error;
 pub mod evidence;
+pub mod hosts;
 pub mod policy;
 pub mod redact;
 pub mod request;
@@ -17,6 +18,7 @@ pub mod verdict;
 pub use audit::{Action, AuditRecord, AuditSink};
 pub use error::{Error, Result};
 pub use evidence::{Evidence, Fact, Flag, LayerOutcome};
+pub use hosts::{HostMatcher, MatchKind, PatternError};
 pub use policy::{
     BodyRequirement, CostClass, FailureMode, PolicyLayer, RequestTransform, ResponseTransform,
 };

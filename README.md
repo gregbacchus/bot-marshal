@@ -268,7 +268,7 @@ same trade a certificate-pinned client always makes by opting out of interceptio
 | M2 | TLS MITM, streaming (WebSocket / SSE / chunked) | done |
 | M3 | Secret injection, egress DLP, CEL rules layer | done |
 | M4 | Session identity, profiles, `marshal run` | done |
-| M4.5 | LLM judge layer | |
+| M4.5 | LLM judge layer | done |
 | M5 | MCP tool-level policy | done |
 | M6 | Transparent (nftables) and DNS interception | done |
 | M7 | Management API, hot reload, warn mode, metrics | done¹ |
@@ -310,9 +310,41 @@ SOCKS5 works on the same port; the protocol is sniffed from the first byte.
 curl --socks5-hostname 127.0.0.1:8080 https://api.github.com/zen
 ```
 
-Starting `--profile coding-agent` deliberately fails: that profile names `rules`, `dlp` and
-`judge` layers that do not exist yet, and running it without them would enforce a chain more
-permissive than the one written.
+Starting `--profile coding-agent` still fails, but for a narrower and now-honest reason: it
+also configures a `redact` response transform, which — unlike every policy layer, all of
+which are implemented — remains a declared config shape with no implementation. Running it
+without one would serve a response that was supposed to be scrubbed, unscrubbed, so it fails
+loudly rather than silently.
+
+## The judge
+
+```yaml
+- layer: judge
+  provider: { type: anthropic, model: "claude-haiku-4-5-20251001", api_key_env: ANTHROPIC_API_KEY }
+  scope: [{ host: "api.github.com", methods: ["POST", "PATCH", "DELETE"] }]
+  prompt: "Allow only changes to repositories owned by gregbacchus. Deny anything ..."
+```
+
+The judge sees **method, host, path, and header names — never header values, never the
+body**. It sends a description of the request to a third-party API, so anything shown there
+is a potential leak; a header value is exactly where a credential lives, and the body is
+exactly where proprietary content or a secret an earlier layer hasn't caught yet would be.
+Neither is ever necessary to answer a scoping question, so neither is offered the chance to
+leak.
+
+The untrusted request travels inside explicit `<request>` tags in the message content, never
+concatenated into the system prompt, and the verdict comes back through a forced tool call —
+never parsed from prose. Those two close the mechanical injection surface: there is no string
+an attacker controls that ever becomes an instruction, and no free text this layer ever
+interprets as a decision. What that does *not* guarantee is that the underlying model resists
+a sufficiently crafted `<request>` payload through that data channel — that is a live-model
+behavioural property, not a parsing one, and no unit test proves it. Treat the judge as
+defence-in-depth, not a substitute for the layers before it.
+
+Verdicts cache on a normalised signature (method, host, path, sorted header names) with a
+configurable TTL, and a circuit breaker opens after consecutive failures so an unhealthy
+provider degrades to `on_error` instead of adding latency to every request in scope while it
+is down.
 
 ## Not built
 
@@ -328,6 +360,12 @@ plugs in without touching the chain.
 
 **Rate limits and budgets.** Per-session counters exist and are exported, which is the
 groundwork; enforcement does not.
+
+**Response body transforms — `summarize`, `compact`, `redact`.** Declared as config shapes
+since M3 (they determine whether a response can stream, which the rest of the design has to
+respect) but never implemented. A profile naming one fails to start rather than serving a
+response that was supposed to be rewritten, unrewritten — which is why the shipped
+`coding-agent` profile, which configures a `redact`, still does not start end to end.
 
 ## Layout
 
