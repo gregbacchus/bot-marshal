@@ -58,6 +58,9 @@ impl std::fmt::Debug for ServerConfig {
 struct Session {
     resolved: Resolved,
     chain: Arc<Chain>,
+    /// Response transforms for this profile. Per-session rather than per-server, because
+    /// which tools are visible depends on which profile applies.
+    response_transforms: Vec<Arc<dyn marshal_core::ResponseTransform>>,
 }
 
 impl std::fmt::Debug for Session {
@@ -74,6 +77,8 @@ pub struct Server {
     config: ServerConfig,
     /// One chain per profile. Which one applies is decided per connection.
     chains: HashMap<Arc<str>, Arc<Chain>>,
+    /// Response transforms per profile, alongside the chains.
+    response_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>>,
     sessions: Arc<SessionRegistry>,
     guard: Arc<UpstreamGuard>,
     audit: Arc<dyn AuditSink>,
@@ -98,6 +103,7 @@ impl Server {
         Self {
             config,
             chains,
+            response_transforms: HashMap::new(),
             sessions,
             guard,
             audit,
@@ -117,7 +123,11 @@ impl Server {
     async fn session_for(&self, conn: &ConnInfo) -> Option<Session> {
         let resolved = self.sessions.resolve(conn).await;
         match self.chains.get(&resolved.profile) {
-            Some(chain) => Some(Session { resolved, chain: Arc::clone(chain) }),
+            Some(chain) => {
+                let response_transforms =
+                    self.response_transforms.get(&resolved.profile).cloned().unwrap_or_default();
+                Some(Session { resolved, chain: Arc::clone(chain), response_transforms })
+            }
             None => {
                 tracing::error!(
                     profile = %resolved.profile,
@@ -135,6 +145,15 @@ impl Server {
         transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
     ) -> Self {
         self.request_transforms = transforms;
+        self
+    }
+
+    /// Response transforms, keyed by profile.
+    pub fn with_response_transforms(
+        mut self,
+        transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>>,
+    ) -> Self {
+        self.response_transforms = transforms;
         self
     }
 
@@ -533,6 +552,7 @@ impl Server {
                     profile: Arc::clone(&session.resolved.profile),
                     client_addr: peer,
                     request_transforms: self.request_transforms.clone(),
+                    response_transforms: session.response_transforms.clone(),
                     attributed: session.resolved.attributed,
                     resolver: session.resolved.resolver.clone(),
                 });

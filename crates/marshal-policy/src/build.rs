@@ -9,8 +9,10 @@ use marshal_core::{Decider, PolicyLayer};
 use crate::chain::Chain;
 use crate::hosts::{HostMatcher, PatternError};
 use crate::layers::dlp::Oversize as DlpOversize;
-use crate::layers::{Allowlist, Denylist, Dlp, Rules};
+use crate::layers::{Allowlist, Denylist, Dlp, Mcp, Rules};
+use crate::mcp::McpPolicy;
 use crate::patterns;
+use crate::transforms::McpToolFilter;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -36,6 +38,13 @@ pub enum BuildError {
 
     #[error("profile `{profile}`: unknown dlp pattern `{pattern}`. Known patterns: {known}")]
     UnknownPattern { profile: String, pattern: String, known: String },
+
+    #[error("profile `{profile}`: mcp: {source}")]
+    Mcp {
+        profile: String,
+        #[source]
+        source: crate::mcp::McpConfigError,
+    },
 
     #[error("profile `{profile}`: {source}")]
     Rule {
@@ -169,6 +178,13 @@ pub fn build_chain(
                 })?;
                 layers.push(Arc::new(rules));
             }
+            LayerConfig::Mcp { servers, max_body_bytes } => {
+                let policy = Arc::new(McpPolicy::compile(servers).map_err(|source| {
+                    BuildError::Mcp { profile: profile_name.to_owned(), source }
+                })?);
+                layers.push(Arc::new(Mcp::new(policy, *max_body_bytes)));
+            }
+            #[allow(unreachable_patterns)]
             other => {
                 return Err(BuildError::Unimplemented {
                     profile: profile_name.to_owned(),
@@ -188,6 +204,31 @@ pub fn build_chain(
     }
 
     Ok(Chain::new(profile_name, layers, profile.default_action, decider))
+}
+
+/// Response transforms implied by a profile's policy.
+///
+/// The MCP filter is derived from the `mcp` layer rather than configured separately: gating
+/// `tools/call` and hiding those same tools from `tools/list` are two halves of one policy,
+/// and letting them drift apart would advertise tools that cannot be called.
+pub fn build_response_transforms(
+    cfg: &Config,
+    profile_name: &str,
+) -> Result<Vec<Arc<dyn marshal_core::ResponseTransform>>, BuildError> {
+    let profile = resolve_profile(cfg, profile_name)?;
+    let mut out: Vec<Arc<dyn marshal_core::ResponseTransform>> = Vec::new();
+
+    for layer in &profile.policy {
+        if let LayerConfig::Mcp { servers, max_body_bytes } = layer {
+            let policy =
+                Arc::new(McpPolicy::compile(servers).map_err(|source| BuildError::Mcp {
+                    profile: profile_name.to_owned(),
+                    source,
+                })?);
+            out.push(Arc::new(McpToolFilter::new(policy, *max_body_bytes)));
+        }
+    }
+    Ok(out)
 }
 
 /// Flatten a host set, expanding bundle references.

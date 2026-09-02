@@ -213,9 +213,15 @@ async fn serve(
     // Building them all up front means a broken profile fails at startup rather than when the
     // first agent that uses it connects.
     let mut chains: HashMap<Arc<str>, Arc<marshal_policy::Chain>> = HashMap::new();
+    let mut response_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::ResponseTransform>>> =
+        HashMap::new();
     for name in cfg.profiles.keys() {
         let chain = build_chain(&cfg, name, Arc::new(DenyingDecider))?;
         chains.insert(Arc::from(name.as_str()), Arc::new(chain));
+        let transforms = marshal_policy::build_response_transforms(&cfg, name)?;
+        if !transforms.is_empty() {
+            response_transforms.insert(Arc::from(name.as_str()), transforms);
+        }
     }
 
     let fallback = profile_override
@@ -303,7 +309,8 @@ async fn serve(
         Arc::new(guard),
         audit,
     )
-    .with_request_transforms(transforms);
+    .with_request_transforms(transforms)
+    .with_response_transforms(response_transforms);
 
     tokio::select! {
         r = server.run(|_| {}) => r.map_err(Into::into),

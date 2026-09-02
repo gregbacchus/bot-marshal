@@ -8,9 +8,12 @@
 pub mod build;
 pub mod chain;
 pub mod hosts;
+pub mod jsonrpc;
 pub mod layers;
+pub mod mcp;
 pub mod patterns;
+pub mod transforms;
 
-pub use build::{BuildError, build_chain, resolve_profile};
+pub use build::{BuildError, build_chain, build_response_transforms, resolve_profile};
 pub use chain::{Chain, Outcome};
 pub use hosts::{HostMatcher, MatchKind, PatternError};

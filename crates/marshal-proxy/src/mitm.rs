@@ -24,7 +24,7 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use marshal_core::{
     Action, AuditRecord, AuditSink, Authority, BodyHandle, BodyRequirement, Evidence, IngressMode,
-    Reason, RequestContext, RequestTransform, SessionId,
+    Reason, RequestContext, RequestTransform, ResponseParts, ResponseTransform, SessionId,
 };
 use marshal_policy::Chain;
 use rustls::pki_types::ServerName;
@@ -35,6 +35,10 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 /// The body type flowing through the proxy. Boxed so an upstream response and a locally
 /// generated denial can share one signature; still streaming underneath.
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
+
+/// JSON-RPC error code for a policy refusal. Inside the reserved implementation-defined
+/// server-error range.
+pub const MCP_DENIED_CODE: i64 = -32001;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MitmError {
@@ -113,6 +117,8 @@ pub struct MitmHandler {
     pub client_addr: std::net::SocketAddr,
     /// Applied after the chain allows. Rewriting is not deciding.
     pub request_transforms: Vec<Arc<dyn RequestTransform>>,
+    /// Applied to the response on its way back to the agent.
+    pub response_transforms: Vec<Arc<dyn ResponseTransform>>,
     /// Whether a resolver matched. Recorded so an unattributed request never looks
     /// attributed in the audit trail.
     pub attributed: bool,
@@ -126,6 +132,15 @@ impl MitmHandler {
             .iter()
             .map(|t| t.body_requirement())
             .fold(self.chain.body_requirement(), |acc, r| acc.combine(r))
+    }
+
+    /// What the response side needs. Kept separate from the request side so a transform that
+    /// rewrites responses does not force request bodies to be buffered as well.
+    fn response_body_requirement(&self) -> BodyRequirement {
+        self.response_transforms
+            .iter()
+            .map(|t| t.body_requirement())
+            .fold(BodyRequirement::Streaming, |acc, r| acc.combine(r))
     }
 }
 
@@ -218,6 +233,21 @@ async fn handle_request(
         if is_upgrade { BodyRequirement::Streaming } else { handler.body_requirement() };
     let (body_handle, forward_body) = materialise(incoming, requirement).await?;
 
+    // Whether this is a JSON-RPC call is a property of the request, so it is read here rather
+    // than taken from layer evidence. That matters twice over: a layer returning `Deny`
+    // contributes no evidence, and a refusal from *any* layer — allowlist, dlp, rules — should
+    // still reach an MCP client as a protocol error rather than a transport failure.
+    let jsonrpc_id = match &body_handle {
+        BodyHandle::Buffered(bytes) => {
+            marshal_policy::jsonrpc::parse_request(bytes).map(|m| match m {
+                marshal_policy::jsonrpc::Message::ToolsCall(c) => c.id,
+                marshal_policy::jsonrpc::Message::ToolsList { id } => id,
+                marshal_policy::jsonrpc::Message::Other { id, .. } => id,
+            })
+        }
+        _ => None,
+    };
+
     // Policy now sees the real request, not just the tunnel destination.
     let mut cx = RequestContext {
         session: handler.session.clone(),
@@ -236,7 +266,7 @@ async fn handle_request(
     let outcome = handler.chain.evaluate(&cx).await;
     if outcome.action == Action::Deny {
         emit(&handler, &cx, &outcome.reason, Action::Deny, outcome.evidence, None, started).await;
-        return Ok(denial_response(&outcome.reason, &cx));
+        return Ok(denial_response(&outcome.reason, &cx, jsonrpc_id));
     }
 
     // Transforms run only once the chain has allowed.
@@ -247,7 +277,7 @@ async fn handle_request(
             // way that looks like an upstream problem.
             let reason = Reason::new(transform.name(), "transform_failed", e.to_string());
             emit(&handler, &cx, &reason, Action::Deny, outcome.evidence, None, started).await;
-            return Ok(denial_response(&reason, &cx));
+            return Ok(denial_response(&reason, &cx, jsonrpc_id));
         }
     }
 
@@ -318,17 +348,134 @@ async fn handle_request(
 
     let (mut parts, body) = response.into_parts();
     strip_hop_by_hop(&mut parts.headers, false);
-    // `Incoming` straight through: the response streams, and Content-Encoding is untouched
-    // because nothing here decodes it.
-    Ok(Response::from_parts(parts, body.boxed()))
+
+    if handler.response_transforms.is_empty() {
+        // `Incoming` straight through: the response streams, and Content-Encoding is
+        // untouched because nothing here decodes it.
+        return Ok(Response::from_parts(parts, body.boxed()));
+    }
+
+    // An SSE response is filtered event by event rather than buffered, because buffering it
+    // would undo the streaming the rest of the proxy guarantees. Anything else is
+    // materialised up to the declared cap.
+    if is_event_stream(&parts.headers) {
+        // Rewriting changes the length, and a stale Content-Length makes hyper tear the
+        // connection down mid-body. Dropping it moves the response to chunked encoding,
+        // which is what a stream of unknown length needs anyway.
+        parts.headers.remove(hyper::header::CONTENT_LENGTH);
+        let filtered = filter_event_stream(body, Arc::clone(&handler), cx.authority.host.clone());
+        return Ok(Response::from_parts(parts, filtered));
+    }
+
+    let (body_handle, forward) = materialise(body, handler.response_body_requirement()).await?;
+    let mut resp =
+        ResponseParts { status: parts.status, headers: parts.headers, body: body_handle };
+
+    for transform in &handler.response_transforms {
+        if let Err(e) = transform.apply(&cx, &mut resp).await {
+            // A response transform that cannot run must not be skipped: a `tools/list` that
+            // slipped past the filter advertises tools the agent is not allowed to call.
+            tracing::error!(transform = transform.name(), error = %e, "response transform failed");
+            let reason = Reason::new(transform.name(), "response_transform_failed", e.to_string());
+            return Ok(denial_response(&reason, &cx, jsonrpc_id));
+        }
+    }
+
+    parts.status = resp.status;
+    parts.headers = resp.headers;
+    let out = match resp.body {
+        BodyHandle::Buffered(bytes) => {
+            Full::new(bytes).map_err(|e: std::convert::Infallible| match e {}).boxed()
+        }
+        _ => forward,
+    };
+    Ok(Response::from_parts(parts, out))
+}
+
+fn is_event_stream(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream"))
+}
+
+/// Rewrite an SSE body chunk by chunk, so it keeps streaming.
+///
+/// A chunk boundary can fall mid-event, so a partial trailing event is held back until the
+/// rest of it arrives rather than being parsed as truncated JSON. Whatever is still held when
+/// the stream ends is flushed unmodified — a stream that stops mid-event is the upstream's
+/// business, and dropping those bytes would silently truncate the response.
+fn filter_event_stream(body: Incoming, handler: Arc<MitmHandler>, host: String) -> ProxyBody {
+    use http_body_util::BodyStream;
+
+    struct State {
+        stream: BodyStream<Incoming>,
+        pending: String,
+        done: bool,
+    }
+
+    let state = State { stream: BodyStream::new(body), pending: String::new(), done: false };
+
+    let stream = futures::stream::unfold(state, move |mut state| {
+        let handler = Arc::clone(&handler);
+        let host = host.clone();
+        async move {
+            use futures::StreamExt;
+
+            loop {
+                if state.done {
+                    return None;
+                }
+
+                match state.stream.next().await {
+                    Some(Err(e)) => {
+                        state.done = true;
+                        return Some((Err(e), state));
+                    }
+                    Some(Ok(frame)) => {
+                        let Ok(data) = frame.into_data() else { continue };
+                        state.pending.push_str(&String::from_utf8_lossy(&data));
+
+                        // Only whole events (terminated by a blank line) are safe to parse.
+                        let Some(end) = state.pending.rfind("\n\n").map(|i| i + 2) else {
+                            continue;
+                        };
+                        let ready: String = state.pending.drain(..end).collect();
+                        let out = rewrite(&handler, &host, ready);
+                        return Some((Ok(hyper::body::Frame::data(Bytes::from(out))), state));
+                    }
+                    None => {
+                        state.done = true;
+                        if state.pending.is_empty() {
+                            return None;
+                        }
+                        // Flush the partial event verbatim rather than discarding it.
+                        let tail = std::mem::take(&mut state.pending);
+                        return Some((Ok(hyper::body::Frame::data(Bytes::from(tail))), state));
+                    }
+                }
+            }
+        }
+    });
+
+    BodyExt::boxed(http_body_util::StreamBody::new(stream))
+}
+
+fn rewrite(handler: &MitmHandler, host: &str, mut chunk: String) -> String {
+    for transform in &handler.response_transforms {
+        if let Some(rewritten) = transform.rewrite_chunk(host, &chunk) {
+            chunk = rewritten;
+        }
+    }
+    chunk
 }
 
 /// Turn an incoming body into what policy sees plus what gets forwarded.
 ///
 /// When buffering is asked for, the body is collected up to the cap. If it exceeds the cap,
-/// policy is told the body is still streaming — so a layer like DLP applies its own
-/// oversize rule rather than silently scanning a truncated prefix — while the bytes already
-/// read are put back in front of the remainder so nothing is lost or reordered.
+/// policy is told the body is still streaming — so a layer like DLP applies its own oversize
+/// rule rather than silently scanning a truncated prefix — while the bytes already read are
+/// put back in front of the remainder so nothing is lost or reordered.
 async fn materialise(
     incoming: Incoming,
     requirement: BodyRequirement,
@@ -409,7 +556,31 @@ fn empty_body() -> ProxyBody {
     Full::new(Bytes::new()).map_err(|e: std::convert::Infallible| match e {}).boxed()
 }
 
-fn denial_response(reason: &Reason, cx: &RequestContext) -> Response<ProxyBody> {
+fn denial_response(
+    reason: &Reason,
+    cx: &RequestContext,
+    jsonrpc: Option<Option<serde_json::Value>>,
+) -> Response<ProxyBody> {
+    // A denied JSON-RPC call comes back as a JSON-RPC error, not an HTTP 403. The client is
+    // an MCP implementation: a transport-level failure reads as "the server is down" and
+    // produces reconnects, whereas a protocol error is something the agent can act on.
+    if let Some(id) = jsonrpc {
+        let doc = marshal_policy::jsonrpc::error_response(
+            id,
+            MCP_DENIED_CODE,
+            &format!("{} [{}]", reason.message, reason.code),
+        );
+        let bytes = Bytes::from(serde_json::to_vec(&doc).unwrap_or_default());
+        return Response::builder()
+            // 200 with a JSON-RPC error, which is what the protocol expects; the refusal is
+            // in the payload, not the status line.
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .header("proxy-agent", "bot-marshal")
+            .body(Full::new(bytes).map_err(|e: std::convert::Infallible| match e {}).boxed())
+            .expect("a static denial response is always valid");
+    }
+
     let body = serde_json::json!({
         "error": "egress_denied",
         "proxy": "bot-marshal",

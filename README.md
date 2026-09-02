@@ -71,6 +71,33 @@ some other way and is trying to send out, which destination filtering cannot see
 Without a CA the proxy still runs as a tunnel, sees destinations only, and says so at startup
 — including a warning naming any layer that will therefore never evaluate.
 
+## MCP
+
+To a host allowlist every MCP call looks identical — one POST to one endpoint. The difference
+between `search_repositories` and `delete_repository` is entirely in the body, so tool-level
+policy needs its own layer:
+
+```yaml
+- layer: mcp
+  servers:
+    - rules: [{ host: "mcp.example.com" }]
+      tools:
+        - name: "search_*"                       # glob over a family
+        - name: "create_issue"
+          when: [{ path: owner, equals: gregbacchus }]
+```
+
+Default-deny applies: a tool not listed cannot be called. A denied `tools/call` comes back as
+a **JSON-RPC error, not an HTTP 403** — the client is an MCP implementation, and a
+transport-level failure reads to it as "the server is down", producing reconnects rather than
+something the agent can act on.
+
+Denied tools are also removed from `tools/list`, which matters more than blocking the call:
+an error is something an LLM-driven agent retries and works around, whereas a tool it never
+sees produces no intent at all. Filtering works on JSON responses and on SSE, and the SSE
+path rewrites event by event rather than buffering, so MCP's streamable transport keeps
+streaming.
+
 ## Identity
 
 Which policy applies depends on *which agent* is connecting, and identity is derived from the
@@ -150,7 +177,7 @@ strictly.
 | M3 | Secret injection, egress DLP, CEL rules layer | done |
 | M4 | Session identity, profiles, `marshal run` | done |
 | M4.5 | LLM judge layer | |
-| M5 | MCP tool-level policy | |
+| M5 | MCP tool-level policy | done |
 | M6 | Transparent (nftables) and DNS interception | |
 | M7 | Management API, hot reload, OTEL | |
 

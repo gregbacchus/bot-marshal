@@ -70,10 +70,13 @@ pub enum LayerConfig {
         #[serde(default)]
         on_oversize: Oversize,
     },
-    /// MCP tool-level policy.
+    /// MCP tool-level policy: which tools an agent may call, and with what arguments.
     Mcp {
         #[serde(default)]
-        servers: Vec<serde_json::Value>,
+        servers: Vec<McpServer>,
+        /// Largest JSON-RPC message the layer will buffer in order to inspect it.
+        #[serde(default = "default_scan_cap")]
+        max_body_bytes: usize,
     },
     /// The LLM judge. Expensive, so it caches and circuit-breaks.
     Judge(Box<JudgeConfig>),
@@ -100,6 +103,55 @@ pub enum Oversize {
     #[default]
     Deny,
     PassUnscanned,
+}
+
+/// One MCP server and the tools permitted on it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServer {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Which hosts this applies to.
+    #[serde(default)]
+    pub rules: Vec<McpHostRule>,
+    /// Default-deny: a tool not listed here cannot be called, and is filtered out of
+    /// `tools/list` so the agent never sees it.
+    #[serde(default)]
+    pub tools: Vec<McpTool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpHostRule {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub cidr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpTool {
+    /// Glob over the tool name, so `search_*` covers a family.
+    pub name: String,
+    /// Constraints on the call's arguments. All must hold.
+    #[serde(default)]
+    pub when: Vec<McpArgConstraint>,
+}
+
+/// A constraint on one argument of a `tools/call`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpArgConstraint {
+    /// Dotted path into the arguments object, e.g. `owner` or `repo.name`.
+    pub path: String,
+    #[serde(default)]
+    pub equals: Option<serde_json::Value>,
+    #[serde(default, rename = "in")]
+    pub one_of: Option<Vec<serde_json::Value>>,
+    /// Regular expression the value must match, as a string.
+    #[serde(default)]
+    pub matches: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

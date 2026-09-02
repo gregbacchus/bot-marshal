@@ -163,4 +163,17 @@ pub trait ResponseTransform: Send + Sync + std::fmt::Debug {
     /// The request is available because a response is rarely interpretable without it — what
     /// to redact, or how aggressively to compact, usually depends on what was asked.
     async fn apply(&self, cx: &RequestContext, resp: &mut ResponseParts) -> Result<()>;
+
+    /// Rewrite one chunk of a streaming text body, if this transform can work incrementally.
+    ///
+    /// Returning `Some` is how a transform avoids forcing the response to be buffered.
+    /// Filtering a `tools/list` out of an SSE stream can be done event by event; summarising
+    /// a body cannot, and such a transform simply declines here and buffers instead.
+    ///
+    /// Only the host is supplied, not the whole request: a transform that works on a stream
+    /// by definition cannot depend on the request body, and saying so in the signature is
+    /// better than passing a context whose body is meaningless.
+    fn rewrite_chunk(&self, _host: &str, _chunk: &str) -> Option<String> {
+        None
+    }
 }

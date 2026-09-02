@@ -147,6 +147,52 @@ async fn upstream_service(
                 .unwrap())
         }
 
+        // A minimal MCP server: answers tools/list with three tools, and echoes any
+        // tools/call back so a test can see what actually reached it.
+        "/mcp" => {
+            let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+            let doc: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            let id = doc.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+            let reply = match doc.get("method").and_then(|m| m.as_str()) {
+                Some("tools/list") => serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "tools": [
+                        { "name": "search_code", "description": "search" },
+                        { "name": "create_issue", "description": "create" },
+                        { "name": "delete_repository", "description": "danger" }
+                    ]}
+                }),
+                _ => serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "called": doc.get("params").cloned() }
+                }),
+            };
+            Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body(full(serde_json::to_vec(&reply).unwrap()))
+                .unwrap())
+        }
+
+        // The same listing delivered as SSE, which is how MCP's streamable HTTP transport
+        // usually returns it.
+        "/mcp-sse" => {
+            let listing = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": { "tools": [
+                    { "name": "search_code" },
+                    { "name": "delete_repository" }
+                ]}
+            });
+            let events =
+                format!("event: message\ndata: {}\n\n", serde_json::to_string(&listing).unwrap());
+            Ok(Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(full(events.into_bytes()))
+                .unwrap())
+        }
+
         // Reports exactly what arrived, so a test can assert on what the *upstream* saw
         // rather than on what the proxy claims to have sent.
         "/reflect" => {
