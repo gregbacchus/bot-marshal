@@ -207,6 +207,52 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
                             .into(),
                     });
                 }
+                if !*enrich && map.iter().any(|e| e.gid.is_some() || e.groupname.is_some()) {
+                    out.push(Diagnostic {
+                        severity: Severity::Warning,
+                        location: format!("{at}.enrich"),
+                        message: "this resolver matches on `gid`/`groupname` with \
+                                  `enrich: false`: the kernel supplies gid directly for a Unix \
+                                  socket connection, but a TCP connection's gid can only be \
+                                  read via `enrich: true` — without it, these entries only \
+                                  ever match over the Unix listener"
+                            .into(),
+                    });
+                }
+                for (i, e) in map.iter().enumerate() {
+                    if e.uid.is_some() && e.username.is_some() {
+                        out.push(Diagnostic {
+                            severity: Severity::Error,
+                            location: format!("{at}.map[{i}]"),
+                            message: "`uid` and `username` both set — they resolve to the \
+                                      same thing, so name only one"
+                                .into(),
+                        });
+                    }
+                    if e.gid.is_some() && e.groupname.is_some() {
+                        out.push(Diagnostic {
+                            severity: Severity::Error,
+                            location: format!("{at}.map[{i}]"),
+                            message: "`gid` and `groupname` both set — they resolve to the \
+                                      same thing, so name only one"
+                                .into(),
+                        });
+                    }
+                    if e.uid.is_none()
+                        && e.username.is_none()
+                        && e.gid.is_none()
+                        && e.groupname.is_none()
+                        && e.cgroup.is_none()
+                    {
+                        out.push(Diagnostic {
+                            severity: Severity::Error,
+                            location: format!("{at}.map[{i}]"),
+                            message: "none of `uid`, `username`, `gid`, `groupname`, `cgroup` \
+                                      is set — this entry can never match anything"
+                                .into(),
+                        });
+                    }
+                }
                 map.iter().map(|e| &e.profile).collect()
             }
             crate::model::ResolverConfig::Launched => Vec::new(),

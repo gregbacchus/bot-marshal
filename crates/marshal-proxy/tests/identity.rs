@@ -270,7 +270,7 @@ async fn peer_cred_uid_selects_a_profile_over_a_real_connection() {
         .unwrap();
 
     let resolver = Arc::new(
-        PeerCredResolver::new([(uid, "me".to_string(), "permissive".to_string())], []).unwrap(),
+        PeerCredResolver::new([(uid, "me".to_string(), "permissive".to_string())], [], []).unwrap(),
     );
     let h = harness(vec![resolver], "restricted", false).await;
 
@@ -288,7 +288,7 @@ async fn peer_cred_uid_selects_a_profile_over_a_real_connection() {
 async fn an_unmapped_uid_falls_through_to_the_fallback() {
     // The control for the test above: a uid nobody is running as must not match.
     let resolver = Arc::new(
-        PeerCredResolver::new([(65534, "nobody".to_string(), "permissive".to_string())], [])
+        PeerCredResolver::new([(65534, "nobody".to_string(), "permissive".to_string())], [], [])
             .unwrap(),
     );
     let h = harness(vec![resolver], "restricted", false).await;
@@ -366,7 +366,7 @@ async fn the_unix_listener_identifies_by_so_peercred() {
         );
     }
     let resolver = Arc::new(
-        PeerCredResolver::new([(uid, "me".to_string(), "permissive".to_string())], []).unwrap(),
+        PeerCredResolver::new([(uid, "me".to_string(), "permissive".to_string())], [], []).unwrap(),
     );
 
     let server = Server::new(

@@ -627,13 +627,55 @@ fn build_sessions(
             }
             ResolverConfig::PeerCred { enrich: e, map } => {
                 enrich |= *e;
-                let uids = map
-                    .iter()
-                    .filter_map(|m| m.uid.map(|u| (u, m.session.clone(), m.profile.clone())));
-                let cgroups = map.iter().filter_map(|m| {
-                    m.cgroup.clone().map(|c| (c, m.session.clone(), m.profile.clone()))
-                });
-                resolvers.push(Arc::new(PeerCredResolver::new(uids, cgroups)?));
+                // `username`/`groupname` are resolved to a uid/gid here, once, via NSS —
+                // config validation already rejected setting both `uid` and `username` (or
+                // `gid` and `groupname`) on the same entry, so at most one of each pair is
+                // ever present. A name that fails to resolve is a config error, not an entry
+                // to silently drop: dropping it would leave that agent unidentified without
+                // saying why.
+                let mut uids = Vec::new();
+                let mut gids = Vec::new();
+                let mut cgroups = Vec::new();
+                for m in map {
+                    let uid = match (m.uid, &m.username) {
+                        (Some(uid), _) => Some(uid),
+                        (None, Some(name)) => Some(
+                            marshal_proxy::sessions::peercred::resolve_username(name).map_err(
+                                |e| {
+                                    anyhow::anyhow!(
+                                        "sessions.resolvers: peer_cred username `{name}` \
+                                         could not be resolved to a uid: {e}"
+                                    )
+                                },
+                            )?,
+                        ),
+                        (None, None) => None,
+                    };
+                    if let Some(uid) = uid {
+                        uids.push((uid, m.session.clone(), m.profile.clone()));
+                    }
+                    let gid = match (m.gid, &m.groupname) {
+                        (Some(gid), _) => Some(gid),
+                        (None, Some(name)) => Some(
+                            marshal_proxy::sessions::peercred::resolve_groupname(name).map_err(
+                                |e| {
+                                    anyhow::anyhow!(
+                                        "sessions.resolvers: peer_cred groupname `{name}` \
+                                         could not be resolved to a gid: {e}"
+                                    )
+                                },
+                            )?,
+                        ),
+                        (None, None) => None,
+                    };
+                    if let Some(gid) = gid {
+                        gids.push((gid, m.session.clone(), m.profile.clone()));
+                    }
+                    if let Some(cgroup) = &m.cgroup {
+                        cgroups.push((cgroup.clone(), m.session.clone(), m.profile.clone()));
+                    }
+                }
+                resolvers.push(Arc::new(PeerCredResolver::new(uids, gids, cgroups)?));
             }
             ResolverConfig::Launched => {
                 // The launcher's identity lives in the cgroup name, so this resolver only

@@ -46,22 +46,28 @@ impl SessionResolver for SourceIpResolver {
     }
 }
 
-/// Maps a kernel-supplied uid, or an enriched cgroup path, to a session.
+/// Maps a kernel-supplied uid or gid, or an enriched cgroup path, to a session.
 #[derive(Debug)]
 pub struct PeerCredResolver {
     uids: Vec<(u32, SessionId, Arc<str>)>,
+    gids: Vec<(u32, SessionId, Arc<str>)>,
     cgroups: Vec<(globset::GlobMatcher, SessionId, Arc<str>)>,
 }
 
 impl PeerCredResolver {
     pub fn new(
         uids: impl IntoIterator<Item = (u32, String, String)>,
+        gids: impl IntoIterator<Item = (u32, String, String)>,
         cgroups: impl IntoIterator<Item = (String, String, String)>,
     ) -> Result<Self, globset::Error> {
         Ok(Self {
             uids: uids
                 .into_iter()
                 .map(|(uid, s, p)| (uid, SessionId::new(s), Arc::from(p.as_str())))
+                .collect(),
+            gids: gids
+                .into_iter()
+                .map(|(gid, s, p)| (gid, SessionId::new(s), Arc::from(p.as_str())))
                 .collect(),
             cgroups: cgroups
                 .into_iter()
@@ -91,7 +97,10 @@ impl SessionResolver for PeerCredResolver {
     async fn resolve(&self, conn: &ConnInfo) -> Option<Resolved> {
         let cred = conn.peer_cred.as_ref()?;
 
-        // Uid first: it is the part the kernel guarantees.
+        // Uid first: it names exactly one user. Gid next: still kernel-supplied, but several
+        // uids can share it, so it's the weaker of the two exact-match kinds. Cgroup last —
+        // strong against a prompt-injected agent, not against one that moves itself between
+        // delegated cgroups.
         if let Some(uid) = cred.uid
             && let Some((_, session, profile)) = self.uids.iter().find(|(u, _, _)| *u == uid)
         {
@@ -100,6 +109,17 @@ impl SessionResolver for PeerCredResolver {
                 profile: Arc::clone(profile),
                 attributed: true,
                 resolver: Some("peer_cred:uid".into()),
+            });
+        }
+
+        if let Some(gid) = cred.gid
+            && let Some((_, session, profile)) = self.gids.iter().find(|(g, _, _)| *g == gid)
+        {
+            return Some(Resolved {
+                session: session.clone(),
+                profile: Arc::clone(profile),
+                attributed: true,
+                resolver: Some("peer_cred:gid".into()),
             });
         }
 
@@ -330,6 +350,7 @@ mod tests {
     async fn peer_cred_prefers_uid_over_cgroup() {
         let r = PeerCredResolver::new(
             [(1001, "by-uid".to_string(), "p-uid".to_string())],
+            [],
             [("*/agent.scope".to_string(), "by-cgroup".to_string(), "p-cg".to_string())],
         )
         .unwrap();

@@ -373,6 +373,17 @@ pub struct ListenerPortEntry {
 pub struct PeerCredEntry {
     #[serde(default)]
     pub uid: Option<u32>,
+    /// A system username, resolved to its uid via NSS when the config is built. Mutually
+    /// exclusive with `uid` — pick whichever is more convenient to write; matching still
+    /// happens on the numeric id the kernel reports.
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub gid: Option<u32>,
+    /// A system groupname, resolved to its gid the same way `username` resolves to a uid.
+    /// Mutually exclusive with `gid`.
+    #[serde(default)]
+    pub groupname: Option<String>,
     /// Glob over the cgroup path. Requires `enrich: true`.
     #[serde(default)]
     pub cgroup: Option<String>,

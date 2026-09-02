@@ -456,7 +456,7 @@ way to present a credential. Resolvers are tried in order, and they are not equa
 
 | resolver | strength | limitation |
 |---|---|---|
-| `peer_cred` uid | kernel-supplied, unspoofable | only separates agents running as different users |
+| `peer_cred` uid/gid | kernel-supplied, unspoofable | only separates agents running as different users/groups |
 | `launched` | cgroup naming from `marshal run`, inherited by child processes | a process can move itself between delegated cgroups |
 | `source_ip` | as trustworthy as the network | collapses when two agents share a namespace |
 | `proxy_auth` | client-asserted | an agent that can read another token can pick another profile |
@@ -468,11 +468,18 @@ each entry mapping something the connection carries to a `session` name and a `p
 ```yaml
 sessions:
   resolvers:
-    - type: peer_cred                 # kernel-supplied uid — strongest, list it first
-      enrich: true                    # needed for cgroup matching below; costs a /proc walk
+    - type: peer_cred                 # kernel-supplied uid/gid — strongest, list it first
+      enrich: true                    # needed for cgroup matching, and for gid over TCP —
+                                       # uid/username don't need it either way
       map:
-        - uid: 1001
+        - uid: 1001                   # numeric, or...
           session: "bot-ci"
+          profile: base
+        - username: "bot-nightly"     # ...a name — resolved to a uid once at config load,
+          session: "bot-nightly"      # so matching still happens on the numeric id the
+          profile: base                # kernel reports; exactly as strong as `uid:`
+        - groupname: "agents"         # same idea for `gid:`/`groupname:`
+          session: "shared-agents"
           profile: base
 
     - type: launched                  # sessions `marshal run` registers — no map needed,
@@ -495,6 +502,10 @@ sessions:
     profile: base                     # the most restrictive profile, never a permissive one
     action: allow_with_profile        # or `deny`, for a hard-fail posture
 ```
+
+`uid`/`username` are mutually exclusive on one entry (same for `gid`/`groupname`) — `marshal
+config check` rejects setting both, and rejects an entry with none of `uid`, `username`,
+`gid`, `groupname`, `cgroup` set, since it could never match anything.
 
 A resolved `session`/`profile` pair doesn't have to be declared anywhere else — the profile
 just has to exist under `profiles:` (see [The policy chain](#the-policy-chain)). Every audit

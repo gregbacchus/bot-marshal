@@ -115,7 +115,17 @@ fn same_addr(table: std::net::IpAddr, peer: SocketAddr) -> bool {
 /// Racy for short-lived processes and costs a directory walk, so it is opt-in and used for
 /// audit annotation rather than as a policy input — except for cgroup matching, which the
 /// launcher relies on and which the operator enables deliberately.
-pub fn enrich_from_inode(inode: u64) -> Option<(u32, Option<String>, Option<String>)> {
+/// What [`enrich_from_inode`] can recover about the owning process, beyond the uid the tuple
+/// lookup already has.
+#[derive(Debug)]
+pub struct Enrichment {
+    pub pid: u32,
+    pub gid: Option<u32>,
+    pub cgroup: Option<String>,
+    pub cmdline: Option<String>,
+}
+
+pub fn enrich_from_inode(inode: u64) -> Option<Enrichment> {
     let target = format!("socket:[{inode}]");
     for entry in std::fs::read_dir("/proc").ok()? {
         let Ok(entry) = entry else { continue };
@@ -125,27 +135,46 @@ pub fn enrich_from_inode(inode: u64) -> Option<(u32, Option<String>, Option<Stri
         let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
         for fd in fds.flatten() {
             if std::fs::read_link(fd.path()).is_ok_and(|l| l == std::path::Path::new(&target)) {
+                let gid = std::fs::read_to_string(format!("/proc/{pid}/status"))
+                    .ok()
+                    .and_then(|s| effective_gid_from_status(&s));
                 let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
                     .ok()
                     .map(|c| c.trim().to_owned());
                 let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
                     .ok()
                     .map(|c| c.replace('\0', " ").trim().to_owned());
-                return Some((pid, cgroup, cmdline));
+                return Some(Enrichment { pid, gid, cgroup, cmdline });
             }
         }
     }
     None
 }
 
+/// Parses the effective gid out of `/proc/<pid>/status`'s `Gid:` line (`real  effective  saved
+/// filesystem`, tab-separated) — the second field, matching what `SO_PEERCRED`'s `ucred.gid()`
+/// reports for a Unix peer.
+fn effective_gid_from_status(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("Gid:"))
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        .and_then(|g| g.parse().ok())
+}
+
 /// Full credentials for a TCP peer.
+///
+/// Unlike the Unix-socket path, gid is not available here without enrichment: `/proc/net/tcp`
+/// carries a uid column but no gid, so a gid match over a TCP listener requires `enrich: true`
+/// to read it from `/proc/<pid>/status` — the same cost cgroup matching already pays.
 pub fn peer_cred_for_tcp(peer: SocketAddr, enrich: bool) -> Option<PeerCred> {
     let (uid, inode) = uid_and_inode_for_tcp_peer(peer)?;
     let mut cred = PeerCred { uid: Some(uid), ..Default::default() };
-    if enrich && let Some((pid, cgroup, cmdline)) = enrich_from_inode(inode) {
-        cred.pid = Some(pid);
-        cred.cgroup = cgroup;
-        cred.cmdline = cmdline;
+    if enrich && let Some(e) = enrich_from_inode(inode) {
+        cred.pid = Some(e.pid);
+        cred.gid = e.gid;
+        cred.cgroup = e.cgroup;
+        cred.cmdline = e.cmdline;
     }
     Some(cred)
 }
@@ -168,6 +197,68 @@ pub fn peer_cred_for_unix(stream: &tokio::net::UnixStream, enrich: bool) -> Opti
             .map(|c| c.replace('\0', " ").trim().to_owned());
     }
     Some(cred)
+}
+
+/// Resolves a system username to its uid via NSS (`getpwnam_r`), for config that would
+/// rather name a user than look up its numeric id by hand.
+///
+/// The lookup happens once, when the config is built, and the entry then matches purely on
+/// the numeric uid the kernel reports at connection time — the same check `uid:` performs
+/// directly. What's weaker than configuring `uid:` isn't the check itself, it's operational:
+/// if the name gets reassigned to a different uid before the next reload, the entry silently
+/// follows it.
+pub fn resolve_username(name: &str) -> std::io::Result<u32> {
+    resolve_id(name, libc::getpwnam_r, |pwd| pwd.pw_uid)
+}
+
+/// The `gid` equivalent of [`resolve_username`], via `getgrnam_r`. Same caveat: a groupname
+/// that gets reassigned before the next reload silently follows it.
+pub fn resolve_groupname(name: &str) -> std::io::Result<u32> {
+    resolve_id(name, libc::getgrnam_r, |grp| grp.gr_gid)
+}
+
+/// Shared machinery for `getpwnam_r`/`getgrnam_r`: both are `(name, *out, buf, buflen,
+/// *result) -> c_int`, growing `buf` and retrying on `ERANGE` the way every correct caller of
+/// these has to.
+fn resolve_id<T: Copy>(
+    name: &str,
+    lookup: unsafe extern "C" fn(
+        *const libc::c_char,
+        *mut T,
+        *mut libc::c_char,
+        usize,
+        *mut *mut T,
+    ) -> libc::c_int,
+    field: impl Fn(&T) -> u32,
+) -> std::io::Result<u32> {
+    let c_name = std::ffi::CString::new(name).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "name contains a NUL byte")
+    })?;
+    #[allow(unsafe_code)]
+    let mut entry: T = unsafe { std::mem::zeroed() };
+    let mut buf_len = 1024usize;
+    loop {
+        let mut buf = vec![0i8; buf_len];
+        let mut result: *mut T = std::ptr::null_mut();
+        #[allow(unsafe_code)]
+        let rc = unsafe {
+            lookup(c_name.as_ptr(), &mut entry, buf.as_mut_ptr(), buf.len(), &mut result)
+        };
+        match rc {
+            0 if !result.is_null() => return Ok(field(&entry)),
+            0 => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no such name `{name}`"),
+                ));
+            }
+            libc::ERANGE => {
+                buf_len *= 2;
+                continue;
+            }
+            errno => return Err(std::io::Error::from_raw_os_error(errno)),
+        }
+    }
 }
 
 #[cfg(test)]
