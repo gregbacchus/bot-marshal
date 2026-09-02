@@ -1,0 +1,97 @@
+# Transforms
+
+Transforms decide **how** an allowed request is rewritten. They run only after the
+[policy chain](policy-layers.md) has allowed, and the two directions are independent:
+
+* **`request_transforms`** rewrite a request on its way out — header filtering, swapping a
+  placeholder for a real credential so the agent never holds it.
+* **`response_transforms`** rewrite what comes back — redacting a secret the upstream echoed,
+  compacting a body too large to be useful.
+
+## Header filtering
+
+```yaml
+request_transforms:
+  headers:
+    allow: ["accept*", "content-*", "user-agent", "authorization"]
+
+response_transforms:
+  headers:
+    allow: ["content-*", "date", "etag", "cache-control", "retry-after"]
+```
+
+An allow-list, not a deny-list: a header not named is dropped. Globs match a family.
+
+## Secret injection
+
+The agent holds only a placeholder. It can still authenticate to hosts the chain allows, but
+the real credential never exists in the agent's process, environment or filesystem — so
+compromising the agent no longer costs a rotation.
+
+```yaml
+request_transforms:
+  secrets:
+    - name: GITHUB_TOKEN
+      source: { type: env, var: GITHUB_TOKEN }
+      proxy_value: "marshal-github-placeholder"
+      match_headers: ["authorization"]
+      require: true
+      rules: [{ host: "api.github.com" }]
+```
+
+| field | |
+|---|---|
+| `source` | `{ type: env, var: ... }` or `{ type: file, path: ... }` |
+| `proxy_value` | the placeholder the agent is given and configured with |
+| `match_headers` | which headers to search for the placeholder |
+| `require` | fail the request if the real secret cannot be resolved, rather than forwarding the placeholder |
+| `rules` | the hosts this swap applies to — a credential is never offered to a host that shouldn't see it |
+
+Secrets are redacted in every audit path and log line. `require: true` is the safe setting:
+without it, an unresolvable secret means the placeholder goes upstream, which fails in a
+confusing way rather than an obvious one.
+
+## Response body transforms
+
+```yaml
+response_transforms:
+  body:
+    - transform: redact
+      patterns: ["github-pat"]
+```
+
+Redaction closes the loop on injection: never let an injected credential echo back to the
+agent through a response.
+
+**A body transform stops the response streaming.** Bodies stream by default, and a transform
+that rewrites content cannot run over a stream — so declaring one is a statement that the
+responses it applies to are no longer streamable. `marshal config check` warns, and the
+profile should scope it away from SSE and WebSocket endpoints.
+
+> `summarize` and `compact` are declared as config shapes but **not implemented** — a profile
+> naming one fails to start. See [Roadmap](../roadmap.md#not-built).
+
+## Named transform bundles
+
+A `transforms/` directory holds named transform bundles — `request_transforms` and/or
+`response_transforms` in one file, shared across profiles:
+
+```yaml
+# transforms/default-headers.yaml
+request_transforms:
+  headers:
+    allow: ["accept*", "content-*", "user-agent", "authorization"]
+```
+
+A profile opts in by name:
+
+```yaml
+# profiles/llm-agent.yaml
+default_action: deny
+transforms: default-headers
+policy: [...]
+```
+
+`transforms: <name>` and embedded `request_transforms:` / `response_transforms:` are
+**mutually exclusive on one profile** — `marshal config check` rejects setting both rather
+than silently picking one.
