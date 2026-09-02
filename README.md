@@ -461,6 +461,47 @@ way to present a credential. Resolvers are tried in order, and they are not equa
 | `source_ip` | as trustworthy as the network | collapses when two agents share a namespace |
 | `proxy_auth` | client-asserted | an agent that can read another token can pick another profile |
 
+Config-wise this is one `sessions:` block: an ordered `resolvers` list (first match wins),
+each entry mapping something the connection carries to a `session` name and a `profile`, plus
+`unidentified` for the fallback when nothing matches:
+
+```yaml
+sessions:
+  resolvers:
+    - type: peer_cred                 # kernel-supplied uid — strongest, list it first
+      enrich: true                    # needed for cgroup matching below; costs a /proc walk
+      map:
+        - uid: 1001
+          session: "bot-ci"
+          profile: base
+
+    - type: launched                  # sessions `marshal run` registers — no map needed,
+                                       # the cgroup naming convention *is* the registration
+
+    - type: source_ip                 # containers / netns: one IP per agent
+      map:
+        - cidr: "172.20.0.10/32"
+          session: "agent-a"
+          profile: coding-agent
+
+    - type: proxy_auth                # weakest — client-asserted — so it goes last
+      credentials:
+        - user: "agent-a"
+          password_env: "MARSHAL_AGENT_A_PW"
+          session: "agent-a"
+          profile: coding-agent
+
+  unidentified:                       # nothing matched
+    profile: base                     # the most restrictive profile, never a permissive one
+    action: allow_with_profile        # or `deny`, for a hard-fail posture
+```
+
+A resolved `session`/`profile` pair doesn't have to be declared anywhere else — the profile
+just has to exist under `profiles:` (see [The policy chain](#the-policy-chain)). Every audit
+record carries the resolved `session`, which `resolver` matched, and `attributed: false` when
+none did — that's what makes `attributed: false` in a record a hard signal to look at, not
+noise: it means every resolver missed and the request got the fallback profile above.
+
 Anything unresolved gets a synthetic session, the most restrictive profile, and
 `attributed: false` in every audit record — never a silent inheritance of a permissive one.
 
