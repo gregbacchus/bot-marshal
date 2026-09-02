@@ -1,6 +1,4 @@
-bundles:
-  crates-io:
-    domains:
-      - "crates.io"
-      - "index.crates.io"
-      - "static.crates.io"
+domains:
+  - "crates.io"
+  - "index.crates.io"
+  - "static.crates.io"

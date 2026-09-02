@@ -183,46 +183,45 @@ environment variable substitution inside a path string.
 
 One `config.yaml` is fine to start, but a base file plus one file per profile scales better as
 profiles multiply — each is independently readable, reviewable in its own PR, and easy to hand
-to someone who owns just that agent. The base file lists `include` globs, and each matched file
-is a complete config document using the same schema, merged in:
+to someone who owns just that agent. This is a **fixed convention, not an arbitrary include**:
+every `.yaml`/`.yml` file directly under a `profiles/` directory next to your config file is
+loaded automatically as one profile, keyed by its filename — no line in the base file has to
+name it.
 
 ```yaml
-# config.yaml
-include:
-  - "profiles/*.yaml"
-  - "bundles/*.yaml"           # the same mechanism ships curated allowlists (see below)
-
+# config.yaml — no profiles: block needed if every profile lives in profiles/
 tls:
   ca_cert: "~/.config/bot-marshal/ca.crt"
   ca_key: "~/.config/bot-marshal/ca.key"
 ```
 
 ```yaml
-# profiles/coding-agent.yaml
-profiles:
-  coding-agent:
-    default_action: deny
-    policy:
-      - layer: allowlist
-        allow: { bundles: [github, npm] }
-        on_match: allow
+# profiles/coding-agent.yaml — the filename is the profile's name; no wrapping
+# `profiles:` / `coding-agent:` keys, just the profile's own fields directly
+default_action: deny
+policy:
+  - layer: allowlist
+    allow: { bundles: [github, npm] }
+    on_match: allow
 ```
 
-Globs are resolved relative to the file that lists them, so `profiles/*.yaml` here means the
-`profiles/` directory next to `config.yaml`. Matches are read in sorted order for a
-deterministic merge, and **the base file always wins**: it's merged in last, so a profile it
-also defines under the same key replaces (not deep-merges with) whatever an include set for
-that key — splitting is by *whole profile*, not by field, so put a profile entirely in one
-file or entirely in the base, not split across both. Includes don't recurse — a file matched
-by `include` can't list its own `include` and have it followed — which keeps the merge order
-easy to reason about at a glance rather than needing to trace a chain of files.
+A sibling `bundles/` directory works the same way for named allow-lists (`config/bundles/*.yaml`
+in this repo — `github.yaml`, `npm.yaml`, …), which a policy references by name
+(`allow: { bundles: [github] }`) instead of repeating domains in every profile that needs them.
 
-`profiles:` and `bundles:` merge by key across every matched file (that's what makes one
-profile per file work at all); `listeners:`/`tls:`/`upstream:`/`sessions:` are wholesale —
-whichever file sets one last wins in full, they don't merge field-by-field either. Bundles
-(`config/bundles/*.yaml` in this repo — `github.yaml`, `npm.yaml`, …) are the same mechanism
-used for a different purpose: named, reusable allow-lists a policy references by name
-(`allow: { bundles: [github] }`) rather than repeating domains in every profile that needs them.
+The point of a fixed convention over a generic glob-of-full-documents is that each file's
+*schema* is scoped to what its directory promises: a file under `profiles/` deserialises
+directly as a profile, so it structurally cannot also set `tls:`/`listeners:`/anything else —
+`marshal config check` rejects an unknown field there as a parse error, not a silent no-op. And
+because the filename *is* the key, two profiles can't collide the way two arbitrary files both
+defining `profiles.coding-agent` once could — the filesystem itself won't let two files share a
+name in one directory.
+
+The base file may still define `profiles:`/`bundles:` inline too, for a config small enough
+not to need the split (that's what `config/marshal.yaml` in this repo does). The one thing
+**not** allowed is naming the same profile both inline and as a file — `marshal config check`
+treats that as a load error rather than picking a winner, since silently preferring one over
+the other is exactly the ambiguity this convention exists to avoid.
 
 ## Running as a service
 

@@ -10,9 +10,6 @@ use crate::layer::LayerConfig;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Globs, relative to this file, merged before the rest of the document is interpreted.
-    #[serde(default)]
-    pub include: Vec<String>,
     #[serde(default)]
     pub listeners: Listeners,
     #[serde(default)]

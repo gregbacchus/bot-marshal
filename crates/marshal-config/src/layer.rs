@@ -16,6 +16,7 @@ pub enum Outcome {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostSet {
     #[serde(default)]
     pub domains: Vec<String>,

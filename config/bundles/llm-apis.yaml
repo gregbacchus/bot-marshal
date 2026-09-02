@@ -1,5 +1,3 @@
-bundles:
-  llm-apis:
-    domains:
-      - "api.anthropic.com"
-      - "api.openai.com"
+domains:
+  - "api.anthropic.com"
+  - "api.openai.com"
