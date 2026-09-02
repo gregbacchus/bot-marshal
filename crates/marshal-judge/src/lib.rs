@@ -10,18 +10,20 @@
 //!
 //! # Hardening against the request being adversarial
 //!
-//! See [`provider`] for the specific mechanisms: the untrusted content travels as explicitly
+//! See [`providers`] for the specific mechanisms: the untrusted content travels as explicitly
 //! delimited data rather than being concatenated into the system prompt, and the verdict
 //! comes back through a forced tool call rather than free-text parsing.
 
 pub mod breaker;
 pub mod judge;
-pub mod provider;
+pub mod providers;
 pub mod request;
 pub mod scope;
 
 pub use breaker::CircuitBreaker;
 pub use judge::Judge;
-pub use provider::{AnthropicProvider, Decision, JudgeVerdict, Provider, ProviderError};
+pub use providers::{
+    AnthropicProvider, Decision, JudgeVerdict, OpenAiProvider, Provider, ProviderError,
+};
 pub use request::JudgeRequest;
 pub use scope::CompiledScope;

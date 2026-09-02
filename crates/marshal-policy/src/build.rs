@@ -13,7 +13,7 @@ use crate::layers::{Allowlist, Denylist, Dlp, Mcp, Rules};
 use crate::mcp::McpPolicy;
 use crate::patterns;
 use crate::transforms::McpToolFilter;
-use marshal_judge::{AnthropicProvider, CompiledScope, Judge, Provider};
+use marshal_judge::{AnthropicProvider, CompiledScope, Judge, OpenAiProvider, Provider};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -217,6 +217,15 @@ pub fn build_chain(
                                 source,
                             })?,
                     ),
+                    marshal_config::layer::Provider::OpenAi { model, api_key_env, max_tokens } => {
+                        Arc::new(
+                            OpenAiProvider::from_env(model.clone(), api_key_env, *max_tokens)
+                                .map_err(|source| BuildError::JudgeProvider {
+                                    profile: profile_name.to_owned(),
+                                    source,
+                                })?,
+                        )
+                    }
                 };
 
                 layers.push(Arc::new(Judge::new(

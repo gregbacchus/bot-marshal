@@ -10,7 +10,7 @@ use marshal_core::{
 };
 
 use crate::breaker::CircuitBreaker;
-use crate::provider::{Decision, JudgeVerdict, Provider};
+use crate::providers::{Decision, JudgeVerdict, Provider};
 use crate::request::JudgeRequest;
 use crate::scope::{self, CompiledScope};
 
@@ -207,7 +207,7 @@ impl PolicyLayer for Judge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ProviderError;
+    use crate::providers::ProviderError;
     use marshal_core::{Authority, BodyHandle, IngressMode, Phase, SessionId};
 
     #[derive(Debug)]

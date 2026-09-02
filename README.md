@@ -321,9 +321,19 @@ loudly rather than silently.
 ```yaml
 - layer: judge
   provider: { type: anthropic, model: "claude-haiku-4-5-20251001", api_key_env: ANTHROPIC_API_KEY }
+  # or: provider: { type: openai, model: "...", api_key_env: OPENAI_API_KEY }
   scope: [{ host: "api.github.com", methods: ["POST", "PATCH", "DELETE"] }]
   prompt: "Allow only changes to repositories owned by gregbacchus. Deny anything ..."
 ```
+
+Adding a provider is additive by design: the scoping constraints below live in the layer
+itself, not in `AnthropicProvider`, so a new `Provider` implementation inherits them without
+rework — one more config variant, one more `match` arm in `build_chain`. The two providers'
+response shapes genuinely differ in a way worth knowing about if you add a third: Anthropic's
+tool-use `input` is a native JSON object, while OpenAI's `function.arguments` is a
+**JSON-encoded string** requiring a second decode — verified against OpenAI's own published
+OpenAPI spec rather than assumed, specifically because guessing wrong here fails in a way
+that looks like "the model returned nonsense" rather than "this needed one more parse".
 
 The judge sees **method, host, path, and header names — never header values, never the
 body**. It sends a description of the request to a third-party API, so anything shown there

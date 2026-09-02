@@ -221,6 +221,13 @@ pub enum Provider {
         #[serde(default)]
         max_tokens: Option<u32>,
     },
+    #[serde(rename = "openai")]
+    OpenAi {
+        model: String,
+        api_key_env: String,
+        #[serde(default)]
+        max_tokens: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
