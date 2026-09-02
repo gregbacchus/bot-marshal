@@ -32,6 +32,10 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tracing-journald.workspace = true
+syslog.workspace = true
+
 [[bin]]
 name = "marshal"
 path = "src/main.rs"

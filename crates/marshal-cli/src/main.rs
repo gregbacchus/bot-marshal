@@ -95,7 +95,7 @@ enum Command {
         #[arg(long)]
         listen: Option<String>,
 
-        /// Write JSON audit records to this file instead of stdout.
+        /// Also write JSON audit records to this file, in addition to the OS log system.
         #[arg(long)]
         audit_log: Option<PathBuf>,
     },
@@ -254,20 +254,24 @@ async fn serve(
     let redactor = marshal_core::Redactor::new(secret_values.clone());
     let tracing_redactor = marshal_core::Redactor::new(secret_values);
 
-    let json: Arc<dyn AuditSink> = match &audit_log {
-        Some(path) => {
-            let file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await
-                .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;
-            Arc::new(JsonSink::new(file).redacting(redactor))
-        }
-        None => Arc::new(JsonSink::new(tokio::io::stdout()).redacting(redactor)),
-    };
-    let audit: Arc<dyn AuditSink> =
-        Arc::new(MultiSink::new(vec![json, Arc::new(TracingSink::redacting(tracing_redactor))]));
+    // The tracing sink always runs: it's the one path to the console/journal, carrying
+    // structured fields that `journalctl` (under systemd) or the terminal (interactively)
+    // can already filter and follow — no separate "watch" command needed. A JSON-lines file
+    // sink is added on top only when --audit-log names a path, e.g. for shipping records
+    // to something outside journald. Without this split, JsonSink defaulted to stdout too
+    // and every record printed twice in two different formats on the same stream.
+    let mut sinks: Vec<Arc<dyn AuditSink>> =
+        vec![Arc::new(TracingSink::redacting(tracing_redactor))];
+    if let Some(path) = &audit_log {
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;
+        sinks.push(Arc::new(JsonSink::new(file).redacting(redactor)));
+    }
+    let audit: Arc<dyn AuditSink> = Arc::new(MultiSink::new(sinks));
 
     let listen = listen
         .or_else(|| cfg.listeners.explicit.as_ref().map(|e| e.listen.clone()))
@@ -756,9 +760,90 @@ fn resolve_config_path(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     }
 }
 
+/// Sends every event to the local syslog daemon over `/dev/log` (or `/var/run/syslog`),
+/// mapping `tracing` level to syslog severity so `err`/`warning` show up as such to whatever
+/// is consuming syslog (journald-on-top-of-syslog, `rsyslog`, a SIEM forwarder).
+#[cfg(target_os = "linux")]
+struct SyslogLayer(std::sync::Mutex<syslog::Logger<syslog::LoggerBackend, syslog::Formatter3164>>);
+
+#[cfg(target_os = "linux")]
+struct SyslogVisitor(String);
+
+#[cfg(target_os = "linux")]
+impl tracing::field::Visit for SyslogVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?} ");
+        } else {
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SyslogLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = SyslogVisitor(String::new());
+        event.record(&mut visitor);
+        let Ok(mut logger) = self.0.lock() else { return };
+        let _ = match *event.metadata().level() {
+            tracing::Level::ERROR => logger.err(&visitor.0),
+            tracing::Level::WARN => logger.warning(&visitor.0),
+            tracing::Level::INFO => logger.info(&visitor.0),
+            tracing::Level::DEBUG | tracing::Level::TRACE => logger.debug(&visitor.0),
+        };
+    }
+}
+
 fn init_tracing(filter: &str) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // Prefer whatever OS-level log system is already there over inventing our own file
+    // management: journald (structured fields, no re-parsing) first, then classic syslog
+    // (still gets rotation/forwarding for free on non-systemd Linux), then plain stdout —
+    // which is itself already captured by Docker, most init scripts, or an interactive
+    // terminal. Each tier is a real connection attempt, not a guess from `/proc`, so a
+    // machine that merely looks like it has journald but doesn't actually accept the
+    // connection still falls through correctly.
+    #[cfg(target_os = "linux")]
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        // systemd sets JOURNAL_STREAM for any unit whose stdout/stderr is connected to the
+        // journal. When it's set, log straight to the journal socket instead of formatting
+        // text for systemd to recapture — that's what makes fields like `session`/`host`
+        // real, filterable journal fields (`journalctl -o json`, `journalctl FIELD=value`)
+        // rather than substrings of a formatted line someone has to grep.
+        if std::env::var_os("JOURNAL_STREAM").is_some() {
+            if let Ok(journald) = tracing_journald::layer() {
+                tracing_subscriber::registry().with(filter).with(journald).init();
+                return;
+            }
+            eprintln!(
+                "warning: JOURNAL_STREAM is set but connecting to the journal failed; trying syslog"
+            );
+        }
+
+        let formatter = syslog::Formatter3164 {
+            facility: syslog::Facility::LOG_DAEMON,
+            hostname: None,
+            process: "marshal".to_owned(),
+            pid: std::process::id(),
+        };
+        if let Ok(logger) = syslog::unix(formatter) {
+            let layer = SyslogLayer(std::sync::Mutex::new(logger));
+            tracing_subscriber::registry().with(filter).with(layer).init();
+            return;
+        }
+    }
+
     tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
 }
 

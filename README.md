@@ -132,8 +132,10 @@ or a trust store update without regenerating anything.
 proxy until `Ctrl-C`. `--profile` overrides `sessions.unidentified.profile` for the
 unattributed fallback; it does not select a single profile to run — every profile in the
 config gets built and is reachable by whatever resolves a session into it. `--listen`
-overrides `listeners.explicit.listen`. `--audit-log` writes JSON lines to a file (append
-mode, created if missing) instead of stdout.
+overrides `listeners.explicit.listen`. `--audit-log` additionally writes JSON lines to a
+file (append mode, created if missing) — see [Watching activity](#watching-activity) for
+where audit records go by default (journald, syslog, or stdout — auto-detected) and how to
+follow them live.
 
 **`marshal run --profile <name> [--isolation netns|cgroup|none] [--proxy <url>] [--dry-run] -- <command...>`**
 — launches an agent under a profile. `--isolation` defaults to `netns` (see
@@ -164,7 +166,7 @@ What bot-marshal writes to disk, and only what it writes:
 | CA certificate | `tls.ca_cert` | created by `ca init`; world-readable is fine, it is a certificate |
 | CA private key | `tls.ca_key` | created by `ca init` at mode `0600`; whoever holds it can impersonate every site the agent talks to |
 | Unix socket | `listeners.explicit.unix_socket` | recreated on every start — a leftover socket from a previous run is removed automatically, never left to block a restart |
-| Audit log | `--audit-log <path>`, or stdout if omitted | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
+| Audit log | `--audit-log <path>`, optional | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
 
 That is the complete list. There is no database, no cache directory, and no other state
 persisted between runs — `/v1/sessions` and `/v1/metrics` counters, and the judge's response
@@ -222,6 +224,38 @@ one; a bare service account usually does not, unless lingering is enabled for it
 (`sudo loginctl enable-linger bot-marshal`). Without that, `marshal run` fails outright rather
 than silently falling back to a weaker mode — the same "fail loud, not quiet" choice made
 everywhere else identity is involved.
+
+## Watching activity
+
+bot-marshal doesn't ship its own log storage, rotation, or `tail -f`-style command — it hands
+every event to `tracing` and, on Linux, auto-detects and defers to whatever OS-level log
+system is already running, trying each in turn at startup:
+
+1. **journald**, if `JOURNAL_STREAM` is set (true for any systemd unit whose stdout/stderr is
+   the journal) *and* the connection to the journal socket actually succeeds. Fields land as
+   real, structured journal fields — `session`, `host`, `method`, `profile`, `duration_ms`,
+   the deciding `layer` (`F_SESSION`, `F_HOST`, …) — not substrings of a formatted line, so
+   `journalctl` *is* `marshal watch`:
+
+   ```bash
+   journalctl -u bot-marshal -f                                   # follow, human-readable
+   journalctl -u bot-marshal -o json -f | jq -c 'select(.MESSAGE=="allow" or .MESSAGE=="deny")'
+   journalctl -u bot-marshal FIELD=F_HOST=api.github.com          # everything for one host
+   ```
+
+2. **Classic syslog** (`/dev/log` or `/var/run/syslog`), if journald wasn't reachable but a
+   syslog daemon is — the common case on non-systemd or minimal Linux. Severity maps
+   (`error`→`err`, `warn`→`warning`, …) so denials still stand out to whatever consumes
+   syslog, and rotation/forwarding are that daemon's job, not bot-marshal's.
+
+3. **Plain stdout**, formatted for a human, if neither is available — an interactive
+   terminal, or any supervisor (Docker, an init script) that already captures stdout into its
+   own log system.
+
+This selection happens automatically and needs no flag. `--audit-log <path>` is additive,
+for the separate case of needing a durable JSON-lines copy regardless of which of the above
+is active — e.g. shipping to something none of them forward to — and gets no console mirror
+of its own.
 
 ## The policy chain
 
