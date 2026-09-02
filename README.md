@@ -128,13 +128,13 @@ which governs the much shorter-lived per-host leaves the CA signs while it is va
 the same trust instructions `ca init` prints. Useful for piping into a container image build
 or a trust store update without regenerating anything.
 
-**`marshal serve [--profile <name>] [--listen <addr>] [--audit-sink <kinds>] [--audit-log <path>]`**
+**`marshal serve [--profile <name>] [--listen <addr>] [--audit-sink <kinds>] [--audit-sink-file <path>]`**
 — runs the proxy until `Ctrl-C`. `--profile` overrides `sessions.unidentified.profile` for
 the unattributed fallback; it does not select a single profile to run — every profile in the
 config gets built and is reachable by whatever resolves a session into it. `--listen`
 overrides `listeners.explicit.listen`. `--audit-sink` (comma-separated: `trace`, `file`)
 picks where audit records go — see [Watching activity](#watching-activity) for the default
-and the distinction from `--trace-sink`. `--audit-log <path>` is the file `--audit-sink file`
+and the distinction from `--trace-sink`. `--audit-sink-file <path>` is the file `--audit-sink file`
 writes JSON lines to (append mode, created if missing) and implies `file` if `--audit-sink`
 wasn't given explicitly.
 
@@ -167,7 +167,7 @@ What bot-marshal writes to disk, and only what it writes:
 | CA certificate | `tls.ca_cert` | created by `ca init`; world-readable is fine, it is a certificate |
 | CA private key | `tls.ca_key` | created by `ca init` at mode `0600`; whoever holds it can impersonate every site the agent talks to |
 | Unix socket | `listeners.explicit.unix_socket` | recreated on every start — a leftover socket from a previous run is removed automatically, never left to block a restart |
-| Audit log | `--audit-log <path>`, optional | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
+| Audit log | `--audit-sink-file <path>`, optional | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
 
 That is the complete list. There is no database, no cache directory, and no other state
 persisted between runs — `/v1/sessions` and `/v1/metrics` counters, and the judge's response
@@ -235,10 +235,10 @@ about which is which before either one's options make sense:
   audit record (`allow session=... host=...`). Controlled by `--trace-sink`.
 * **The audit trail** — the canonical structured record per request, with the full
   `Evidence` trail, redacted, meant to answer "what did this agent do." Controlled by
-  `--audit-sink`, and (when it includes `file`) written to `--audit-log <path>`.
+  `--audit-sink`, and (when it includes `file`) written to `--audit-sink-file <path>`.
 
 By default the audit trail's only destination *is* the trace stream's human-readable mirror
-— `--audit-sink` defaults to `trace`, or `trace,file` once `--audit-log` is given. Pass
+— `--audit-sink` defaults to `trace`, or `trace,file` once `--audit-sink-file` is given. Pass
 `--audit-sink file` explicitly to get only the structured file and a quiet console — useful
 once something else is already consuming the JSON file and the mirrored lines are just
 duplication.

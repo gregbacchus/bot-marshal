@@ -27,7 +27,7 @@ struct Cli {
     log: String,
 
     /// Where the general trace stream goes — startup messages, warnings, and a
-    /// human-readable mirror of each audit record. Distinct from `--audit-log`, which is the
+    /// human-readable mirror of each audit record. Distinct from `--audit-sink-file`, which is the
     /// canonical structured (JSON) audit trail. `auto` (default) picks the first of journald,
     /// syslog, or stdout that's actually reachable; the others force one, failing if it isn't
     /// available rather than silently falling back — useful for debugging under a supervisor
@@ -114,18 +114,17 @@ enum Command {
 
         /// Where audit records go, beyond the always-on trace-stream mirror (see
         /// `--trace-sink`): `trace` is that mirror on its own, `file` is the canonical
-        /// structured JSON trail (requires `--audit-log`). Comma-separated; defaults to
-        /// `trace` alone, or `trace,file` once `--audit-log` is given — pass this explicitly
+        /// structured JSON trail (requires `--audit-sink-file`). Comma-separated; defaults to
+        /// `trace` alone, or `trace,file` once `--audit-sink-file` is given — pass this explicitly
         /// to get `file` without the trace-stream mirror, e.g. for a quiet console with a
         /// full audit file.
         #[arg(long, value_delimiter = ',')]
         audit_sink: Option<Vec<AuditSinkKind>>,
 
-        /// The file `file` in `--audit-sink` writes JSON audit records to (append mode,
-        /// created if missing). Also implies `file` in `--audit-sink` if that wasn't given
-        /// explicitly.
+        /// Where the `file` audit sink writes JSON audit records to (append mode, created if
+        /// missing). Also implies `file` in `--audit-sink` if that wasn't given explicitly.
         #[arg(long)]
-        audit_log: Option<PathBuf>,
+        audit_sink_file: Option<PathBuf>,
     },
 }
 
@@ -133,7 +132,7 @@ enum Command {
 enum AuditSinkKind {
     /// The human-readable mirror already going through `--trace-sink`.
     Trace,
-    /// The canonical structured JSON trail, written to `--audit-log`.
+    /// The canonical structured JSON trail, written to `--audit-sink-file`.
     File,
 }
 
@@ -234,16 +233,16 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Serve { profile, listen, audit_sink, audit_log } => {
+        Command::Serve { profile, listen, audit_sink, audit_sink_file } => {
             let audit_sink = audit_sink.unwrap_or_else(|| {
                 let mut kinds = vec![AuditSinkKind::Trace];
-                if audit_log.is_some() {
+                if audit_sink_file.is_some() {
                     kinds.push(AuditSinkKind::File);
                 }
                 kinds
             });
-            if audit_sink.contains(&AuditSinkKind::File) && audit_log.is_none() {
-                eprintln!("error: --audit-sink file requires --audit-log <path>");
+            if audit_sink.contains(&AuditSinkKind::File) && audit_sink_file.is_none() {
+                eprintln!("error: --audit-sink file requires --audit-sink-file <path>");
                 return ExitCode::FAILURE;
             }
             let rt = match tokio::runtime::Runtime::new() {
@@ -253,7 +252,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match rt.block_on(serve(&config_path, profile, listen, audit_sink, audit_log)) {
+            match rt.block_on(serve(&config_path, profile, listen, audit_sink, audit_sink_file)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
@@ -269,7 +268,7 @@ async fn serve(
     profile_override: Option<String>,
     listen: Option<String>,
     audit_sink: Vec<AuditSinkKind>,
-    audit_log: Option<PathBuf>,
+    audit_sink_file: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // Startup and reload go through the same builder, so a reload cannot succeed on a
     // config the proxy would have refused to start with — or the reverse.
@@ -306,7 +305,7 @@ async fn serve(
     let tracing_redactor = marshal_core::Redactor::new(secret_values);
 
     // `--audit-sink` picks which of these run; by default that's the trace-stream mirror
-    // alone, or plus the JSON file once `--audit-log` is given (main() already rejected
+    // alone, or plus the JSON file once `--audit-sink-file` is given (main() already rejected
     // `file` without a path). Neither is forced on: a deployment that wants a quiet console
     // and only the audit file can ask for exactly that.
     let mut sinks: Vec<Arc<dyn AuditSink>> = Vec::new();
@@ -314,7 +313,7 @@ async fn serve(
         sinks.push(Arc::new(TracingSink::redacting(tracing_redactor)));
     }
     if audit_sink.contains(&AuditSinkKind::File) {
-        let path = audit_log.as_ref().expect("checked in main()");
+        let path = audit_sink_file.as_ref().expect("checked in main()");
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
