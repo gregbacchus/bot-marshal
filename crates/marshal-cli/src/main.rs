@@ -31,15 +31,15 @@ struct Cli {
     /// Which of the three channels are active: `log` (operational messages — "listening on
     /// port", warnings, startup/shutdown), `access` (one line per request: who, host,
     /// method, which layer decided), `audit` (the full record — same as `access` plus
-    /// status code and the complete evidence trail). Comma-separated; all three by default.
-    /// Turn one off once it's no longer useful, e.g. `log,access` to drop `audit`'s bulk
-    /// once a policy has settled and you no longer need the full trail on every line.
+    /// status code and the complete evidence trail). Comma-separated; defaults to `log,access`
+    /// — add `audit` (`log,access,audit`) when the full evidence trail on every line is
+    /// worth the bulk, e.g. while a policy is still being worked out.
     #[arg(
         long,
         global = true,
         env = "MARSHAL_LOG_CHANNELS",
         value_delimiter = ',',
-        default_value = "log,access,audit"
+        default_value = "log,access"
     )]
     log_channels: Vec<LogChannel>,
 

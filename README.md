@@ -107,7 +107,7 @@ Every subcommand accepts two global flags, before the subcommand name:
 |---|---|---|---|
 | `--config`, `-c <path>` | `MARSHAL_CONFIG` | `$XDG_CONFIG_HOME/bot-marshal/config.yaml` | usually `~/.config/bot-marshal/config.yaml`; a system service should pass an explicit path (see [Running as a service](#running-as-a-service)) |
 | `--log <level>` | `MARSHAL_LOG` | `info` | `error`, `warn`, `info`, `debug`, `trace` — the `log` channel's verbosity only; see [Watching activity](#watching-activity) |
-| `--log-channels <list>` | `MARSHAL_LOG_CHANNELS` | `log,access,audit` | comma-separated subset of `log`, `access`, `audit` |
+| `--log-channels <list>` | `MARSHAL_LOG_CHANNELS` | `log,access` | comma-separated subset of `log`, `access`, `audit` |
 | `--log-sink <dest>` | `MARSHAL_LOG_SINK` | `auto` | `auto`, `stdout`, `journald`, `syslog` |
 | `--log-format <fmt>` | `MARSHAL_LOG_FORMAT` | `auto` | `auto`, `pretty`, `json` — stdout only |
 
@@ -237,10 +237,11 @@ Everything bot-marshal logs falls into three channels:
 * **`audit`** — the same, plus everything `access` leaves out: status code, whether the
   verdict was cached, `would_deny`, and the full evidence trail.
 
-`--log-channels` (default `log,access,audit` — everything) picks which are active; drop one
-you don't want, e.g. `--log-channels log,access` once a policy has settled and the full
-trail on every line is no longer worth the bulk. All three, when active, go to the same
-place and render the same way — there's one destination and one format, not one per channel:
+`--log-channels` (default `log,access`) picks which are active; add `audit`
+(`--log-channels log,access,audit`) when the full evidence trail per line is worth the bulk
+— e.g. while a policy is still being worked out — and drop it again once it's settled. All
+active channels go to the same place and render the same way — there's one destination and
+one format, not one per channel:
 
 * **`--log-sink`** (`auto` by default) picks the destination: **journald**, if `JOURNAL_STREAM`
   is set (true for any systemd unit whose stdout/stderr is the journal) and the socket
