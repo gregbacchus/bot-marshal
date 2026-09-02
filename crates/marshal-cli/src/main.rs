@@ -112,17 +112,18 @@ enum Command {
         #[arg(long)]
         listen: Option<String>,
 
-        /// Where audit records go, beyond the always-on trace-stream mirror (see
-        /// `--trace-sink`): `trace` is that mirror on its own, `file` is the canonical
-        /// structured JSON trail (requires `--audit-sink-file`). Comma-separated; defaults to
-        /// `trace` alone, or `trace,file` once `--audit-sink-file` is given — pass this explicitly
-        /// to get `file` without the trace-stream mirror, e.g. for a quiet console with a
-        /// full audit file.
+        /// Where audit records go: `trace` is a one-line human-readable summary through the
+        /// trace stream (see `--trace-sink`) — no evidence trail, no status code. `file` is
+        /// the canonical structured JSON record with everything, written to
+        /// `--audit-sink-file` (requires it). Comma-separated; defaults to `trace` alone, or
+        /// `trace,file` once `--audit-sink-file` is given.
         #[arg(long, value_delimiter = ',')]
         audit_sink: Option<Vec<AuditSinkKind>>,
 
-        /// Where the `file` audit sink writes JSON audit records to (append mode, created if
-        /// missing). Also implies `file` in `--audit-sink` if that wasn't given explicitly.
+        /// Where the `file` audit sink writes full JSON audit records to (append mode,
+        /// created if missing). Pass `-` for stdout, to get the full structured record on
+        /// the console instead of just the trace mirror's summary. Also implies `file` in
+        /// `--audit-sink` if that wasn't given explicitly.
         #[arg(long)]
         audit_sink_file: Option<PathBuf>,
     },
@@ -314,13 +315,20 @@ async fn serve(
     }
     if audit_sink.contains(&AuditSinkKind::File) {
         let path = audit_sink_file.as_ref().expect("checked in main()");
-        let file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await
-            .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;
-        sinks.push(Arc::new(JsonSink::new(file).redacting(redactor)));
+        // `-` is the conventional stdout placeholder — it's what makes the full structured
+        // record (the Evidence trail, status code, etc. that the trace mirror leaves out)
+        // available on the console without a real file.
+        if path.as_os_str() == "-" {
+            sinks.push(Arc::new(JsonSink::new(tokio::io::stdout()).redacting(redactor)));
+        } else {
+            let file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .await
+                .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;
+            sinks.push(Arc::new(JsonSink::new(file).redacting(redactor)));
+        }
     }
     let audit: Arc<dyn AuditSink> = Arc::new(MultiSink::new(sinks));
 

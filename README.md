@@ -238,10 +238,13 @@ about which is which before either one's options make sense:
   `--audit-sink`, and (when it includes `file`) written to `--audit-sink-file <path>`.
 
 By default the audit trail's only destination *is* the trace stream's human-readable mirror
-— `--audit-sink` defaults to `trace`, or `trace,file` once `--audit-sink-file` is given. Pass
-`--audit-sink file` explicitly to get only the structured file and a quiet console — useful
-once something else is already consuming the JSON file and the mirrored lines are just
-duplication.
+— `--audit-sink` defaults to `trace`, or `trace,file` once `--audit-sink-file` is given. That
+mirror leaves out the evidence trail and status code, so pass `--audit-sink-file -` (`-` for
+stdout) to get the full structured JSON record on the console too — `--audit-sink trace,file
+--audit-sink-file -` reproduces the original two-things-per-request output (a summary line
+plus the full JSON) on stdout. Pass `--audit-sink file` alone (with a real path) to get only
+the structured file and a quiet console — useful once something else is already consuming
+the JSON file and the mirrored lines are just duplication.
 
 bot-marshal doesn't ship its own log storage, rotation, or `tail -f`-style command for the
 trace stream — it hands every event to `tracing` and, on Linux, auto-detects and defers to
