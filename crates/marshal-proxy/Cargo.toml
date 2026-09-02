@@ -26,6 +26,7 @@ http.workspace = true
 bytes.workspace = true
 tokio-rustls.workspace = true
 socket2.workspace = true
+libc.workspace = true
 ipnet.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true

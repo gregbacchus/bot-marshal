@@ -19,4 +19,6 @@ pub mod peercred;
 pub mod resolvers;
 
 pub use launched::LaunchedResolver;
-pub use resolvers::{PeerCredResolver, ProxyAuthResolver, SessionRegistry, SourceIpResolver};
+pub use resolvers::{
+    ListenerPortResolver, PeerCredResolver, ProxyAuthResolver, SessionRegistry, SourceIpResolver,
+};

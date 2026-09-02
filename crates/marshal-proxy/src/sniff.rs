@@ -132,23 +132,13 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Test helpers shared with other modules' tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_protocols() {
-        assert_eq!(detect(0x05), Protocol::Socks5);
-        assert_eq!(detect(0x04), Protocol::Socks4);
-        assert_eq!(detect(b'C'), Protocol::Http); // CONNECT
-        assert_eq!(detect(b'G'), Protocol::Http); // GET
-    }
-
+pub(crate) mod tests_support {
     /// Build a minimal but well-formed ClientHello carrying one SNI name.
-    fn client_hello(host: &str) -> Vec<u8> {
+    pub fn client_hello(host: &str) -> Vec<u8> {
         let name = host.as_bytes();
-        let mut sni_list = Vec::new();
-        sni_list.push(0x00); // host_name
+        let mut sni_list = vec![0x00];
         sni_list.extend((name.len() as u16).to_be_bytes());
         sni_list.extend(name);
 
@@ -157,32 +147,42 @@ mod tests {
         sni_ext.extend(&sni_list);
 
         let mut exts = Vec::new();
-        exts.extend(0x0000u16.to_be_bytes()); // server_name
+        exts.extend(0x0000u16.to_be_bytes());
         exts.extend((sni_ext.len() as u16).to_be_bytes());
         exts.extend(&sni_ext);
 
-        let mut body = Vec::new();
-        body.extend([0x03, 0x03]); // legacy_version
-        body.extend([0u8; 32]); // random
-        body.push(0); // session_id len
-        body.extend(2u16.to_be_bytes()); // cipher suites len
+        let mut body = vec![0x03, 0x03];
+        body.extend([0u8; 32]);
+        body.push(0);
+        body.extend(2u16.to_be_bytes());
         body.extend([0x13, 0x01]);
-        body.push(1); // compression len
+        body.push(1);
         body.push(0);
         body.extend((exts.len() as u16).to_be_bytes());
         body.extend(&exts);
 
-        let mut hs = Vec::new();
-        hs.push(0x01); // ClientHello
-        hs.extend(&(body.len() as u32).to_be_bytes()[1..]); // u24
+        let mut hs = vec![0x01];
+        hs.extend(&(body.len() as u32).to_be_bytes()[1..]);
         hs.extend(&body);
 
-        let mut rec = Vec::new();
-        rec.push(0x16); // handshake
-        rec.extend([0x03, 0x01]);
+        let mut rec = vec![0x16, 0x03, 0x01];
         rec.extend((hs.len() as u16).to_be_bytes());
         rec.extend(&hs);
         rec
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tests_support::client_hello;
+
+    #[test]
+    fn detects_protocols() {
+        assert_eq!(detect(0x05), Protocol::Socks5);
+        assert_eq!(detect(0x04), Protocol::Socks4);
+        assert_eq!(detect(b'C'), Protocol::Http); // CONNECT
+        assert_eq!(detect(b'G'), Protocol::Http); // GET
     }
 
     #[test]

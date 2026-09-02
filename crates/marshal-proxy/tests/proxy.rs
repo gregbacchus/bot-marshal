@@ -41,6 +41,7 @@ async fn start_proxy_with_guard(
         ServerConfig {
             listen: "127.0.0.1:0".into(),
             unix_socket: None,
+            transparent: Vec::new(),
             // No CA: these tests cover the tunnel path, where policy sees only the
             // destination. Interception is covered in tests/mitm.rs.
             tls: None,

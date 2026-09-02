@@ -107,6 +107,7 @@ async fn harness(
         ServerConfig {
             listen: "127.0.0.1:0".into(),
             unix_socket: None,
+            transparent: Vec::new(),
             tls: None,
             passthrough: HostMatcher::default(),
         },
@@ -372,6 +373,7 @@ async fn the_unix_listener_identifies_by_so_peercred() {
         ServerConfig {
             listen: "127.0.0.1:0".into(),
             unix_socket: Some(sock.clone()),
+            transparent: Vec::new(),
             tls: None,
             passthrough: HostMatcher::default(),
         },

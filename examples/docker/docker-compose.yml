@@ -1,0 +1,59 @@
+# An agent captured without being configured.
+#
+# The client container sets no proxy environment variables and knows nothing about
+# bot-marshal. Its resolver points at the proxy, so every hostname resolves to the proxy's
+# address and connections arrive there on their own.
+#
+# Identity comes from the source address: each container has its own, and the `source_ip`
+# resolver maps it to a profile. That is why they are given static addresses rather than
+# whatever the network hands out.
+
+services:
+  proxy:
+    build:
+      context: ../..
+      dockerfile: examples/docker/Dockerfile
+    command: ["serve", "--config", "/etc/marshal/marshal.yaml"]
+    environment:
+      MARSHAL_LOG: info
+    volumes:
+      - ./marshal.yaml:/etc/marshal/marshal.yaml:ro
+      - ./ca:/etc/marshal/ca
+    networks:
+      demo:
+        ipv4_address: 172.28.0.2
+
+  # Allowed to reach GitHub and nothing else.
+  agent-a:
+    image: curlimages/curl:latest
+    depends_on: [proxy]
+    dns: [172.28.0.2]
+    # No *_PROXY variables anywhere: capture comes from DNS, not cooperation.
+    volumes:
+      - ./ca:/ca:ro
+    environment:
+      CURL_CA_BUNDLE: /ca/ca.crt
+    command: ["sleep", "infinity"]
+    networks:
+      demo:
+        ipv4_address: 172.28.0.10
+
+  # A different profile, distinguished only by its address.
+  agent-b:
+    image: curlimages/curl:latest
+    depends_on: [proxy]
+    dns: [172.28.0.2]
+    volumes:
+      - ./ca:/ca:ro
+    environment:
+      CURL_CA_BUNDLE: /ca/ca.crt
+    command: ["sleep", "infinity"]
+    networks:
+      demo:
+        ipv4_address: 172.28.0.11
+
+networks:
+  demo:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

@@ -196,7 +196,9 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
                 map.iter().map(|e| &e.profile).collect()
             }
             crate::model::ResolverConfig::Launched => Vec::new(),
-            crate::model::ResolverConfig::ListenerPort { .. } => Vec::new(),
+            crate::model::ResolverConfig::ListenerPort { map } => {
+                map.iter().map(|e| &e.profile).collect()
+            }
         };
         for profile in referenced {
             if !cfg.profiles.contains_key(profile) {

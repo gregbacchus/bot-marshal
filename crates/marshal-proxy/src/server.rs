@@ -38,6 +38,10 @@ pub struct ServerConfig {
     /// tunnel destination — which is the honest behaviour when no CA has been created, not a
     /// degraded mode to hide.
     pub tls: Option<Arc<TlsEngine>>,
+    /// Transparent listeners. Each carries its own address so `listener_port` identity —
+    /// nftables steering different uids or cgroups to different ports — has something to key
+    /// on.
+    pub transparent: Vec<String>,
     /// Hosts tunnelled without interception. Certificate-pinned clients belong here, as does
     /// anything whose traffic must demonstrably not be read.
     pub passthrough: marshal_policy::HostMatcher,
@@ -187,7 +191,40 @@ impl Server {
         }
         on_bind(local);
 
+        let transparent_addrs = self.config.transparent.clone();
         let this = Arc::new(self);
+
+        // Transparent listeners run alongside the explicit one. A connection arriving here
+        // was redirected by the firewall and does not know it is proxied, so the destination
+        // has to be recovered from conntrack rather than asked for.
+        let mut transparent = Vec::new();
+        for addr in &transparent_addrs {
+            match TcpListener::bind(addr).await {
+                Ok(l) => {
+                    tracing::info!(listen = %l.local_addr()?, "transparent listener ready");
+                    transparent.push(l);
+                }
+                Err(e) => {
+                    tracing::error!(listen = %addr, error = %e,
+                        "could not bind a transparent listener");
+                }
+            }
+        }
+        for listener in transparent {
+            let this = Arc::clone(&this);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, peer)) = listener.accept().await else { continue };
+                    let this = Arc::clone(&this);
+                    tokio::spawn(async move {
+                        if let Err(e) = this.serve_transparent(stream, peer).await {
+                            tracing::debug!(peer = %peer, error = %e,
+                                "transparent connection ended");
+                        }
+                    });
+                }
+            });
+        }
 
         // The Unix listener exists for `SO_PEERCRED`, which is the only identity on a single
         // host that is both unspoofable and free of a lookup race.
@@ -234,6 +271,112 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// A transparently redirected connection.
+    ///
+    /// The client believes it is talking to the origin, so there is no CONNECT and no proxy
+    /// header. The destination comes from `SO_ORIGINAL_DST` and the hostname from the TLS SNI
+    /// or the HTTP `Host` header; policy is evaluated on the name, because an address is only
+    /// what the client's DNS happened to return.
+    async fn serve_transparent(
+        self: Arc<Self>,
+        stream: TcpStream,
+        peer: std::net::SocketAddr,
+    ) -> std::io::Result<()> {
+        let started = Instant::now();
+        let local = stream.local_addr()?;
+        let _ = stream.set_nodelay(true);
+
+        let destination = match crate::transparent::original_dst(&stream) {
+            Ok(d) => d,
+            Err(e) => {
+                // Without a destination there is nowhere to send the connection, and guessing
+                // would mean connecting somewhere the client never asked for.
+                tracing::warn!(peer = %peer, error = %e,
+                    "dropping a connection whose original destination could not be recovered");
+                return Ok(());
+            }
+        };
+
+        // Read the opening bytes to recover the hostname, then replay them upstream.
+        let mut opening = vec![0u8; 4096];
+        let n = match stream.try_read(&mut opening) {
+            Ok(n) => n,
+            Err(_) => {
+                stream.readable().await?;
+                stream.try_read(&mut opening).unwrap_or(0)
+            }
+        };
+        opening.truncate(n);
+
+        let intercepted = crate::transparent::classify(destination, &opening);
+        let authority = intercepted.authority();
+        let mut client = Rewind::new(stream, opening);
+
+        let mut conn = self.conn_info(peer, local);
+        conn.ingress = IngressMode::Transparent;
+        self.sessions.attach_peer_cred(&mut conn);
+
+        let Some(session) = self.session_for(&conn).await else { return Ok(()) };
+        if !session.resolved.attributed && self.sessions.deny_unidentified() {
+            return Ok(());
+        }
+
+        // Phase::Request: unlike a CONNECT, a transparent connection already carries the
+        // hostname, so host-level layers can decide properly. Request-level layers still need
+        // interception to see method and path.
+        let cx = self.context(
+            &session,
+            peer,
+            authority.clone(),
+            if intercepted.tls { "CONNECT" } else { "GET" },
+            "/",
+            marshal_core::Phase::Connect,
+        );
+        let outcome = session.chain.evaluate(&cx).await;
+
+        if outcome.action == Action::Deny {
+            // There is no proxy protocol to answer with, so a refusal is a closed connection.
+            // Recording it is the only way anyone learns it happened.
+            self.emit_session(
+                &session,
+                &cx,
+                &outcome.reason,
+                Action::Deny,
+                outcome.evidence,
+                None,
+                started,
+            )
+            .await;
+            return Ok(());
+        }
+
+        // Connect to the address the client itself resolved, checked by the guard. Resolving
+        // the name again here would let a hostile DNS answer differ between the check and
+        // the connect.
+        let literal = Authority { host: destination.ip().to_string(), port: destination.port() };
+        let mut upstream = match self.guard.connect(&literal).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.emit_guard_failure(&session, &cx, &e, outcome.evidence, started).await;
+                return Ok(());
+            }
+        };
+
+        self.emit_session(
+            &session,
+            &cx,
+            &outcome.reason,
+            Action::Allow,
+            outcome.evidence,
+            None,
+            started,
+        )
+        .await;
+
+        let _ = tunnel::relay(&mut client, &mut upstream).await;
+        Ok(())
     }
 
     /// A Unix-domain connection. Identity comes from `SO_PEERCRED` rather than from any

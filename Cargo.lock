@@ -1113,6 +1113,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hickory-resolver",
+ "hickory-server",
  "humantime-serde",
  "marshal-audit",
  "marshal-config",
@@ -1162,10 +1164,12 @@ dependencies = [
 name = "marshal-dns"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "hickory-resolver",
  "hickory-server",
  "marshal-config",
  "marshal-core",
+ "marshal-policy",
  "thiserror",
  "tokio",
  "tracing",
@@ -1231,6 +1235,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ipnet",
+ "libc",
  "marshal-audit",
  "marshal-config",
  "marshal-core",

@@ -11,6 +11,21 @@ listeners:
   explicit:
     listen: "127.0.0.1:8080"          # HTTP CONNECT and SOCKS5, protocol sniffed
     unix_socket: "/run/user/1000/marshal.sock"   # unlocks SO_PEERCRED identity
+
+  # Transparent interception: connections redirected here by nftables, from clients that do
+  # not know they are proxied. See deploy/nftables.conf.
+  transparent:
+    enabled: false
+    listen: ["127.0.0.1:8081"]
+
+  # DNS interception: resolve every name to the proxy so unconfigured workloads arrive on
+  # their own. A convenience for clients that cannot be configured, not a containment
+  # boundary — anything with its own resolver never asks us.
+  dns:
+    enabled: false
+    listen: "127.0.0.1:5353"
+    proxy_ip: "127.0.0.1"
+    passthrough: ["*.internal.corp", "localhost"]
   management:
     listen: "127.0.0.1:9092"
     api_key_env: "MARSHAL_MANAGEMENT_KEY"

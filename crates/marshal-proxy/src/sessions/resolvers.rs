@@ -119,6 +119,48 @@ impl SessionResolver for PeerCredResolver {
     }
 }
 
+/// Maps the port a connection arrived on to a session.
+///
+/// The fallback for agents that share a uid. nftables steers each identity to a different
+/// port — `meta skuid 1001 ... redirect to :8081` — so the accepting listener *is* the
+/// identity.
+///
+/// Weaker than it looks: it only holds if the agent cannot reach the other ports directly.
+/// The shipped ruleset drops direct connections to them, and without that an agent picks its
+/// own profile by choosing a port.
+#[derive(Debug)]
+pub struct ListenerPortResolver {
+    entries: Vec<(u16, SessionId, Arc<str>)>,
+}
+
+impl ListenerPortResolver {
+    pub fn new(entries: impl IntoIterator<Item = (u16, String, String)>) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|(port, s, p)| (port, SessionId::new(s), Arc::from(p.as_str())))
+                .collect(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionResolver for ListenerPortResolver {
+    fn name(&self) -> &str {
+        "listener_port"
+    }
+
+    async fn resolve(&self, conn: &ConnInfo) -> Option<Resolved> {
+        let port = conn.local_addr.port();
+        self.entries.iter().find(|(p, _, _)| *p == port).map(|(_, session, profile)| Resolved {
+            session: session.clone(),
+            profile: Arc::clone(profile),
+            attributed: true,
+            resolver: Some("listener_port".into()),
+        })
+    }
+}
+
 /// Matches a `Proxy-Authorization` credential, or a SOCKS5 username/password.
 ///
 /// Client-asserted, so it is only as strong as the secret. Listed last in the shipped config
@@ -307,6 +349,18 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(r.resolve(&c).await.unwrap().session.to_string(), "by-cgroup");
+    }
+
+    #[tokio::test]
+    async fn listener_port_identifies_by_the_accepting_socket() {
+        let r = ListenerPortResolver::new([(8081, "agent-a".to_string(), "coding".to_string())]);
+
+        let mut c = conn();
+        c.local_addr = "127.0.0.1:8081".parse().unwrap();
+        assert_eq!(r.resolve(&c).await.unwrap().session.to_string(), "agent-a");
+
+        c.local_addr = "127.0.0.1:8082".parse().unwrap();
+        assert!(r.resolve(&c).await.is_none());
     }
 
     #[tokio::test]

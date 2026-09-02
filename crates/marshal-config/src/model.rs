@@ -57,8 +57,10 @@ pub struct ExplicitListener {
 pub struct TransparentListener {
     #[serde(default)]
     pub enabled: bool,
-    pub http: String,
-    pub https: String,
+    /// Addresses to accept redirected connections on. More than one so nftables can steer
+    /// different identities to different ports.
+    #[serde(default)]
+    pub listen: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,9 +69,24 @@ pub struct DnsListener {
     #[serde(default)]
     pub enabled: bool,
     pub listen: String,
+    /// What intercepted names resolve to: the address the proxy is reachable at from the
+    /// client's perspective.
     pub proxy_ip: String,
+    /// Names answered by the real resolver instead of being intercepted.
     #[serde(default)]
     pub passthrough: Vec<String>,
+    /// Fixed answers. Highest precedence, because they are the operator saying explicitly
+    /// what a name means.
+    #[serde(default)]
+    pub records: Vec<DnsRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsRecord {
+    pub name: String,
+    #[serde(default, rename = "value", alias = "values")]
+    pub values: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,10 +302,10 @@ pub enum ResolverConfig {
     },
     /// Sessions created by `marshal run`, identified by the cgroup scope it names.
     Launched,
-    /// Identity by which listener accepted. Needs multi-listener binding, which is M6.
+    /// Identity by which listener accepted, for agents that share a uid.
     ListenerPort {
         #[serde(default)]
-        map: Vec<serde_json::Value>,
+        map: Vec<ListenerPortEntry>,
     },
 }
 
@@ -319,6 +336,14 @@ pub struct ProxyAuthEntry {
 #[serde(deny_unknown_fields)]
 pub struct SourceIpEntry {
     pub cidr: String,
+    pub session: String,
+    pub profile: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListenerPortEntry {
+    pub port: u16,
     pub session: String,
     pub profile: String,
 }

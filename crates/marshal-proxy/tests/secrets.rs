@@ -106,6 +106,7 @@ async fn harness(yaml: &str, swaps: Vec<SecretSwap>, redact: &[&str]) -> Harness
         ServerConfig {
             listen: "127.0.0.1:0".into(),
             unix_socket: None,
+            transparent: Vec::new(),
             tls: Some(engine),
             passthrough: HostMatcher::default(),
         },

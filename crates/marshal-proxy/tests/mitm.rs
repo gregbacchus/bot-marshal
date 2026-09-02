@@ -59,6 +59,7 @@ async fn harness(yaml: &str, passthrough: &[&str]) -> Harness {
         ServerConfig {
             listen: "127.0.0.1:0".into(),
             unix_socket: None,
+            transparent: Vec::new(),
             tls: Some(engine),
             passthrough: HostMatcher::new(passthrough.iter(), Vec::<&str>::new()).unwrap(),
         },
@@ -278,6 +279,7 @@ async fn passthrough_hosts_are_tunnelled_not_intercepted() {
         ServerConfig {
             listen: "127.0.0.1:0".into(),
             unix_socket: None,
+            transparent: Vec::new(),
             tls: Some(engine),
             passthrough: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
         },

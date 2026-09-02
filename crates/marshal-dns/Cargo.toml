@@ -13,8 +13,13 @@ workspace = true
 [dependencies]
 marshal-core.workspace = true
 marshal-config.workspace = true
+marshal-policy.workspace = true
 hickory-server.workspace = true
 hickory-resolver.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

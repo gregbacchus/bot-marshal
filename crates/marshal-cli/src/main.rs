@@ -297,13 +297,21 @@ async fn serve(
         .and_then(|e| e.unix_socket.as_ref())
         .map(|p| expand_tilde(p));
 
+    let transparent = cfg
+        .listeners
+        .transparent
+        .as_ref()
+        .filter(|t| t.enabled)
+        .map(|t| t.listen.clone())
+        .unwrap_or_default();
+
     let mut transforms: Vec<Arc<dyn marshal_core::RequestTransform>> = Vec::new();
     if !injector.is_empty() {
         transforms.push(Arc::new(injector));
     }
 
     let server = Server::new(
-        ServerConfig { listen, unix_socket, tls, passthrough },
+        ServerConfig { listen, unix_socket, transparent, tls, passthrough },
         chains,
         sessions,
         Arc::new(guard),
@@ -312,13 +320,69 @@ async fn serve(
     .with_request_transforms(transforms)
     .with_response_transforms(response_transforms);
 
+    // DNS interception, when configured. Started alongside the proxy rather than as a
+    // separate process, because a resolver pointing at a proxy that is not running turns
+    // every lookup into a timeout.
+    let dns = match cfg.listeners.dns.as_ref().filter(|d| d.enabled) {
+        Some(dns_cfg) => Some(start_dns(dns_cfg).await?),
+        None => None,
+    };
+
+    let dns_task = async move {
+        match dns {
+            Some(mut server) => server.block_until_done().await.map_err(anyhow::Error::from),
+            None => std::future::pending().await,
+        }
+    };
+
     tokio::select! {
         r = server.run(|_| {}) => r.map_err(Into::into),
+        r = dns_task => r,
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutting down");
             Ok(())
         }
     }
+}
+
+/// Build and bind the DNS interceptor.
+async fn start_dns(
+    cfg: &marshal_config::model::DnsListener,
+) -> anyhow::Result<hickory_server::Server<marshal_dns::DnsServer>> {
+    let proxy_ip: std::net::IpAddr = cfg
+        .proxy_ip
+        .parse()
+        .map_err(|e| anyhow::anyhow!("listeners.dns.proxy_ip `{}`: {e}", cfg.proxy_ip))?;
+
+    let records = cfg.records.iter().map(|r| {
+        let ips: Vec<std::net::IpAddr> = r.values.iter().filter_map(|v| v.parse().ok()).collect();
+        (r.name.clone(), ips)
+    });
+
+    let policy = marshal_dns::DnsPolicy::new(proxy_ip, &cfg.passthrough, records)?;
+
+    // The system resolver handles passthrough names. Reading the host's own configuration
+    // means "passthrough" genuinely means what the host would have answered.
+    let upstream = Arc::new(
+        hickory_resolver::Resolver::builder_tokio()
+            .map_err(|e| anyhow::anyhow!("reading the system resolver configuration: {e}"))?
+            .build()
+            .map_err(|e| anyhow::anyhow!("building the upstream resolver: {e}"))?,
+    );
+
+    tracing::info!(
+        listen = %cfg.listen,
+        %proxy_ip,
+        passthrough = ?cfg.passthrough,
+        "dns interception listening"
+    );
+    tracing::warn!(
+        "DNS interception is a convenience for clients that cannot be configured, not a \
+         containment boundary: anything with its own resolver never asks us"
+    );
+
+    Ok(marshal_dns::serve(marshal_dns::DnsServer::new(Arc::new(policy), upstream), &cfg.listen)
+        .await?)
 }
 
 /// Build the resolver chain from config.
@@ -378,12 +442,10 @@ fn build_sessions(
                 enrich = true;
                 resolvers.push(Arc::new(LaunchedResolver::new(cfg.profiles.keys().cloned())));
             }
-            ResolverConfig::ListenerPort { .. } => {
-                anyhow::bail!(
-                    "the `listener_port` resolver needs multi-listener binding, which is not \
-                     implemented yet. Remove it rather than leaving a resolver configured \
-                     that never matches."
-                );
+            ResolverConfig::ListenerPort { map } => {
+                resolvers.push(Arc::new(marshal_proxy::sessions::ListenerPortResolver::new(
+                    map.iter().map(|e| (e.port, e.session.clone(), e.profile.clone())),
+                )));
             }
         }
     }

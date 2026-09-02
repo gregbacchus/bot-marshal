@@ -71,6 +71,34 @@ some other way and is trying to send out, which destination filtering cannot see
 Without a CA the proxy still runs as a tunnel, sees destinations only, and says so at startup
 — including a warning naming any layer that will therefore never evaluate.
 
+## Capture
+
+Three ways traffic reaches the proxy, in decreasing order of how much the client must
+cooperate:
+
+| mode | client must | strength |
+|---|---|---|
+| explicit | set `HTTP_PROXY` / use SOCKS5 | relies entirely on cooperation |
+| transparent | nothing — nftables redirects it | holds while the firewall rules do |
+| DNS | point its resolver at the proxy | a convenience, not a boundary |
+
+**Transparent** interception recovers the pre-redirect destination from conntrack via
+`SO_ORIGINAL_DST`, then recovers the *hostname* separately from the TLS SNI or the HTTP
+`Host` header. Both are needed: policy is written in terms of names, and an address is only
+what the client's DNS happened to return, so a proxy that could see only `140.82.121.4` would
+be back to the coarse filtering this project exists to improve on. `deploy/nftables.conf`
+ships the ruleset, including the `filter` chain that makes the redirect binding rather than
+advisory — without it, an agent using a non-standard port or QUIC walks straight past.
+
+**DNS** mode resolves every name to the proxy so unconfigured workloads arrive on their own.
+Static records beat passthrough, which beats interception; TTLs are short so a stale answer
+cannot outlive a policy change. `examples/docker/` shows two containers captured with no
+proxy environment variables at all, told apart purely by source address.
+
+Be clear about what DNS mode is not: a client that ships its own resolver, uses DNS-over-HTTPS,
+or connects to a literal address never asks us. It is for workloads that cannot be configured.
+Where bypass actually matters, use `marshal run --isolation netns`, or the firewall rules.
+
 ## MCP
 
 To a host allowlist every MCP call looks identical — one POST to one endpoint. The difference
@@ -178,7 +206,7 @@ strictly.
 | M4 | Session identity, profiles, `marshal run` | done |
 | M4.5 | LLM judge layer | |
 | M5 | MCP tool-level policy | done |
-| M6 | Transparent (nftables) and DNS interception | |
+| M6 | Transparent (nftables) and DNS interception | done |
 | M7 | Management API, hot reload, OTEL | |
 
 ## Try it
