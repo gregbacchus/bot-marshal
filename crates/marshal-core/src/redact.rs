@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 /// Holds the real secret values currently in play, so they can be removed from output.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Redactor {
     /// Sorted longest-first, so a secret that contains another is replaced whole.
     values: Vec<String>,

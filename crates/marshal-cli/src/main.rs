@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use marshal_audit::{JsonSink, MultiSink, TracingSink};
+use marshal_audit::{AccessTracingSink, AuditTracingSink, JsonSink, MultiSink};
 use marshal_config::{Severity, validate};
 use marshal_core::{AuditSink, DenyingDecider};
 use marshal_policy::build_chain;
@@ -22,27 +22,50 @@ struct Cli {
     #[arg(long, short, global = true, env = "MARSHAL_CONFIG")]
     config: Option<PathBuf>,
 
-    /// Log level filter (`error`, `warn`, `info`, `debug`, `trace`).
+    /// Verbosity of the `log` channel (`error`, `warn`, `info`, `debug`, `trace`). Doesn't
+    /// affect `access`/`audit` — those fire at their own fixed level whenever their channel
+    /// is on, regardless of this.
     #[arg(long, global = true, env = "MARSHAL_LOG", default_value = "info")]
     log: String,
 
-    /// Where logs go — every message, including one line per allow/deny. `auto` (default)
-    /// picks the first of journald, syslog, or stdout that's actually reachable; the others
-    /// force one, failing if it isn't available rather than silently falling back — useful
-    /// for debugging under a supervisor that sets `JOURNAL_STREAM` but where you want plain
-    /// stdout anyway.
+    /// Which of the three channels are active: `log` (operational messages — "listening on
+    /// port", warnings, startup/shutdown), `access` (one line per request: who, host,
+    /// method, which layer decided), `audit` (the full record — same as `access` plus
+    /// status code and the complete evidence trail). Comma-separated; all three by default.
+    /// Turn one off once it's no longer useful, e.g. `log,access` to drop `audit`'s bulk
+    /// once a policy has settled and you no longer need the full trail on every line.
+    #[arg(
+        long,
+        global = true,
+        env = "MARSHAL_LOG_CHANNELS",
+        value_delimiter = ',',
+        default_value = "log,access,audit"
+    )]
+    log_channels: Vec<LogChannel>,
+
+    /// Where every active channel goes. `auto` (default) picks the first of journald,
+    /// syslog, or stdout that's actually reachable; the others force one, failing if it
+    /// isn't available rather than silently falling back — useful for debugging under a
+    /// supervisor that sets `JOURNAL_STREAM` but where you want plain stdout anyway.
     #[arg(long, global = true, env = "MARSHAL_LOG_SINK", default_value = "auto")]
     log_sink: LogSink,
 
-    /// How stdout is formatted (journald and syslog format themselves and ignore this).
-    /// `auto` (default) is `pretty` on a terminal and `json` otherwise — piping to a file,
-    /// `docker logs`, or anything else non-interactive gets the machine-readable form
-    /// automatically, with no flag needed.
+    /// How stdout renders every active channel, consistently (journald and syslog format
+    /// themselves and ignore this). `auto` (default) is `pretty` on a terminal and `json`
+    /// otherwise — piping to a file, `docker logs`, or anything else non-interactive gets
+    /// the machine-readable form automatically, with no flag needed.
     #[arg(long, global = true, env = "MARSHAL_LOG_FORMAT", default_value = "auto")]
     log_format: LogFormat,
 
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum LogChannel {
+    Log,
+    Access,
+    Audit,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -159,7 +182,7 @@ enum CaCommand {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if let Err(e) = init_tracing(&cli.log, cli.log_sink, cli.log_format) {
+    if let Err(e) = init_tracing(&cli.log, &cli.log_channels, cli.log_sink, cli.log_format) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
@@ -238,7 +261,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match rt.block_on(serve(&config_path, profile, listen, audit_log)) {
+            match rt.block_on(serve(&config_path, profile, listen, &cli.log_channels, audit_log)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
@@ -253,6 +276,7 @@ async fn serve(
     config_path: &std::path::Path,
     profile_override: Option<String>,
     listen: Option<String>,
+    log_channels: &[LogChannel],
     audit_log: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // Startup and reload go through the same builder, so a reload cannot succeed on a
@@ -286,15 +310,19 @@ async fn serve(
     if !secret_names.is_empty() {
         tracing::info!(secrets = ?secret_names, "boundary secret injection active");
     }
-    let redactor = marshal_core::Redactor::new(secret_values.clone());
-    let tracing_redactor = marshal_core::Redactor::new(secret_values);
+    let redactor = marshal_core::Redactor::new(secret_values);
 
-    // Every record always goes through the log (as a one-line summary, formatted per
-    // --log-format/--log-sink like everything else); --audit-log is purely additive, for a
-    // durable copy of the full structured record — evidence trail, status code — that the
-    // summary line doesn't carry.
-    let mut sinks: Vec<Arc<dyn AuditSink>> =
-        vec![Arc::new(TracingSink::redacting(tracing_redactor))];
+    // `access`/`audit` each go through the log only when their channel is on — see
+    // `init_tracing`, which also pins their target's level so the general `--log` verbosity
+    // can't accidentally suppress them. `--audit-log` is separate from both: a durable,
+    // natively-nested copy of the full record, independent of what's active on the console.
+    let mut sinks: Vec<Arc<dyn AuditSink>> = Vec::new();
+    if log_channels.contains(&LogChannel::Access) {
+        sinks.push(Arc::new(AccessTracingSink::redacting(redactor.clone())));
+    }
+    if log_channels.contains(&LogChannel::Audit) {
+        sinks.push(Arc::new(AuditTracingSink::redacting(redactor.clone())));
+    }
     if let Some(path) = &audit_log {
         let file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -889,9 +917,26 @@ fn init_stdout(filter: tracing_subscriber::EnvFilter, format: LogFormat) {
     }
 }
 
-fn init_tracing(filter: &str, sink: LogSink, format: LogFormat) -> anyhow::Result<()> {
+/// Turns the `--log` level plus which channels are on into one `EnvFilter` directive string.
+/// `access`/`audit` are pinned to their own target-specific level (on) or `off` — that's what
+/// keeps them showing up (or not) independently of whatever verbosity `--log` asks for on
+/// everything else, since `AccessTracingSink`/`AuditTracingSink` always emit at info/warn.
+fn filter_directive(level: &str, channels: &[LogChannel]) -> String {
+    let base = if channels.contains(&LogChannel::Log) { level } else { "off" };
+    let access = if channels.contains(&LogChannel::Access) { "info" } else { "off" };
+    let audit = if channels.contains(&LogChannel::Audit) { "info" } else { "off" };
+    format!("{base},access={access},audit={audit}")
+}
+
+fn init_tracing(
+    filter: &str,
+    channels: &[LogChannel],
+    sink: LogSink,
+    format: LogFormat,
+) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
-    let parsed = || EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
+    let directive = filter_directive(filter, channels);
+    let parsed = || EnvFilter::try_new(&directive).unwrap_or_else(|_| EnvFilter::new("info"));
 
     // `auto` prefers whatever OS-level log system is already there over inventing our own
     // file management: journald (structured fields, no re-parsing) first, then classic

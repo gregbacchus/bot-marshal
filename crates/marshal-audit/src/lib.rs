@@ -78,14 +78,16 @@ impl<W: AsyncWrite + Unpin + Send + std::fmt::Debug> AuditSink for JsonSink<W> {
     }
 }
 
-/// Mirrors records into `tracing` in addition to the JSON stream, at a level chosen by the
-/// outcome: denials are warnings, because they are the events a human wants surfaced.
+/// Emits a one-line summary per request via `tracing`, `target: "access"`: who, what host,
+/// which layer decided, how long it took. No evidence trail, no status code — that's
+/// `AuditTracingSink`. Denials are warnings, because they are the events a human watching
+/// the log wants to see stand out.
 #[derive(Debug, Default)]
-pub struct TracingSink {
+pub struct AccessTracingSink {
     redactor: Redactor,
 }
 
-impl TracingSink {
+impl AccessTracingSink {
     pub fn new() -> Self {
         Self::default()
     }
@@ -96,12 +98,13 @@ impl TracingSink {
 }
 
 #[async_trait::async_trait]
-impl AuditSink for TracingSink {
+impl AuditSink for AccessTracingSink {
     async fn emit(&self, r: AuditRecord) {
         // The message is the only free-text field, and so the only one a secret could reach.
         let message = self.redactor.redact(&r.reason.message);
         match r.action {
             Action::Allow => tracing::info!(
+                target: "access",
                 session = %r.session,
                 profile = %r.profile,
                 host = %r.host,
@@ -111,12 +114,86 @@ impl AuditSink for TracingSink {
                 "allow"
             ),
             Action::Deny => tracing::warn!(
+                target: "access",
                 session = %r.session,
                 profile = %r.profile,
                 host = %r.host,
                 method = %r.method,
                 layer = %r.reason.layer,
                 code = %r.reason.code,
+                "deny: {message}",
+            ),
+        }
+    }
+}
+
+/// Emits the full record per request via `tracing`, `target: "audit"`: everything
+/// `AccessTracingSink` carries, plus the status code, cache/would-deny flags, and the full
+/// layer trail.
+///
+/// `tracing`'s fields are flat, so the trail (a nested structure) travels as a JSON string
+/// rather than a real nested value — still fully queryable (`journalctl -o json | jq
+/// '.F_TRAIL | fromjson'`, or the same idea piping a JSON-formatted stdout through `jq`), just
+/// not natively nested the way a file written by [`JsonSink`] is. Reach for `JsonSink` (via
+/// `--audit-log`) instead of this when a pristine, natively-nested structure matters more than
+/// having it flow through the same sink as everything else.
+#[derive(Debug, Default)]
+pub struct AuditTracingSink {
+    redactor: Redactor,
+}
+
+impl AuditTracingSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn redacting(redactor: Redactor) -> Self {
+        Self { redactor }
+    }
+}
+
+#[async_trait::async_trait]
+impl AuditSink for AuditTracingSink {
+    async fn emit(&self, r: AuditRecord) {
+        let message = self.redactor.redact(&r.reason.message);
+        let trail = self.redactor.redact(&serde_json::to_string(&r.trail).unwrap_or_default());
+        match r.action {
+            Action::Allow => tracing::info!(
+                target: "audit",
+                session = %r.session,
+                attributed = r.attributed,
+                resolver = r.resolver.as_deref().unwrap_or(""),
+                profile = %r.profile,
+                ingress = %r.ingress,
+                host = %r.host,
+                method = %r.method,
+                path = %r.path,
+                layer = %r.reason.layer,
+                code = %r.reason.code,
+                cached = r.reason.cached,
+                would_deny = r.would_deny,
+                status_code = r.status_code.unwrap_or_default(),
+                duration_ms = r.duration_ms,
+                trail = %trail,
+                "allow"
+            ),
+            Action::Deny => tracing::warn!(
+                target: "audit",
+                session = %r.session,
+                attributed = r.attributed,
+                resolver = r.resolver.as_deref().unwrap_or(""),
+                profile = %r.profile,
+                ingress = %r.ingress,
+                host = %r.host,
+                method = %r.method,
+                path = %r.path,
+                layer = %r.reason.layer,
+                code = %r.reason.code,
+                cached = r.reason.cached,
+                would_deny = r.would_deny,
+                status_code = r.status_code.unwrap_or_default(),
+                duration_ms = r.duration_ms,
+                trail = %trail,
                 "deny: {message}",
             ),
         }

@@ -106,9 +106,10 @@ Every subcommand accepts two global flags, before the subcommand name:
 | flag | env var | default | |
 |---|---|---|---|
 | `--config`, `-c <path>` | `MARSHAL_CONFIG` | `$XDG_CONFIG_HOME/bot-marshal/config.yaml` | usually `~/.config/bot-marshal/config.yaml`; a system service should pass an explicit path (see [Running as a service](#running-as-a-service)) |
-| `--log <level>` | `MARSHAL_LOG` | `info` | `error`, `warn`, `info`, `debug`, or `trace` |
-| `--log-sink <dest>` | `MARSHAL_LOG_SINK` | `auto` | `auto`, `stdout`, `journald`, `syslog` — see [Watching activity](#watching-activity) |
-| `--log-format <fmt>` | `MARSHAL_LOG_FORMAT` | `auto` | `auto`, `pretty`, `json` — stdout only; see [Watching activity](#watching-activity) |
+| `--log <level>` | `MARSHAL_LOG` | `info` | `error`, `warn`, `info`, `debug`, `trace` — the `log` channel's verbosity only; see [Watching activity](#watching-activity) |
+| `--log-channels <list>` | `MARSHAL_LOG_CHANNELS` | `log,access,audit` | comma-separated subset of `log`, `access`, `audit` |
+| `--log-sink <dest>` | `MARSHAL_LOG_SINK` | `auto` | `auto`, `stdout`, `journald`, `syslog` |
+| `--log-format <fmt>` | `MARSHAL_LOG_FORMAT` | `auto` | `auto`, `pretty`, `json` — stdout only |
 
 ```bash
 marshal --config /etc/bot-marshal/marshal.yaml --log debug serve
@@ -228,48 +229,48 @@ everywhere else identity is involved.
 
 ## Watching activity
 
-Every log line, including one per allow/deny, goes to one place — `--log-sink` picks it, and
-it's auto-detected by default. bot-marshal doesn't ship its own log storage, rotation, or
-`tail -f`-style command; it hands every event to `tracing` and, on Linux, defers to whatever
-OS-level log system is already running, trying each in turn at startup:
+Everything bot-marshal logs falls into three channels:
 
-1. **journald**, if `JOURNAL_STREAM` is set (true for any systemd unit whose stdout/stderr is
-   the journal) *and* the connection to the journal socket actually succeeds. Fields land as
-   real, structured journal fields — `session`, `host`, `method`, `profile`, `duration_ms`,
-   the deciding `layer` (`F_SESSION`, `F_HOST`, …) — not substrings of a formatted line, so
-   `journalctl` *is* `marshal watch`:
+* **`log`** — operational messages: startup ("explicit proxy listening"), warnings, shutdown.
+* **`access`** — one line per request: session, host, method, profile, which layer decided,
+  how long it took. This is what you watch to see traffic.
+* **`audit`** — the same, plus everything `access` leaves out: status code, whether the
+  verdict was cached, `would_deny`, and the full evidence trail.
 
-   ```bash
-   journalctl -u bot-marshal -f                                   # follow, human-readable
-   journalctl -u bot-marshal -o json -f | jq -c 'select(.MESSAGE=="allow" or .MESSAGE=="deny")'
-   journalctl -u bot-marshal FIELD=F_HOST=api.github.com          # everything for one host
-   ```
+`--log-channels` (default `log,access,audit` — everything) picks which are active; drop one
+you don't want, e.g. `--log-channels log,access` once a policy has settled and the full
+trail on every line is no longer worth the bulk. All three, when active, go to the same
+place and render the same way — there's one destination and one format, not one per channel:
 
-2. **Classic syslog** (`/dev/log` or `/var/run/syslog`), if journald wasn't reachable but a
-   syslog daemon is — the common case on non-systemd or minimal Linux. Severity maps
-   (`error`→`err`, `warn`→`warning`, …) so denials still stand out to whatever consumes
-   syslog, and rotation/forwarding are that daemon's job, not bot-marshal's.
+* **`--log-sink`** (`auto` by default) picks the destination: **journald**, if `JOURNAL_STREAM`
+  is set (true for any systemd unit whose stdout/stderr is the journal) and the socket
+  connection actually succeeds; else classic **syslog** (`/dev/log` or `/var/run/syslog`),
+  the common case on non-systemd or minimal Linux; else plain **stdout**. Each tier is a real
+  connection attempt, not a guess. `stdout`/`journald`/`syslog` force one, erroring out if
+  it's not actually reachable rather than silently landing somewhere else — useful when you
+  want plain stdout while running under something that sets `JOURNAL_STREAM`.
 
-3. **Plain stdout**, if neither is available — an interactive terminal, or any supervisor
-   (Docker, an init script) that already captures stdout into its own log system. Here,
-   `--log-format` also matters (it's a no-op for journald and syslog, which format
-   themselves): `auto` (default) checks whether stdout is actually a terminal and switches
-   automatically — a human watching `marshal serve` in a shell gets short, coloured lines;
-   anything reading the stream programmatically (`docker logs`, a file redirect, a collector
-   that doesn't set `JOURNAL_STREAM`) gets one JSON object per line, unprompted. `pretty` or
-   `json` forces one regardless of what stdout actually is.
+* **`--log-format`** (`auto` by default; stdout only — journald and syslog format
+  themselves) decides how stdout renders every active channel: `auto` checks whether stdout
+  is actually a terminal — a human watching `marshal serve` in a shell gets short, coloured
+  lines; anything reading the stream programmatically (`docker logs`, a file redirect, a
+  collector that doesn't set `JOURNAL_STREAM`) gets one JSON object per line, unprompted, no
+  flag needed. `pretty`/`json` forces one regardless of what stdout actually is.
 
-Both selections happen automatically and need no flag — `--log-sink auto|stdout|journald|syslog`
-(`MARSHAL_LOG_SINK`) forces a destination, erroring out if it isn't actually reachable rather
-than silently falling back to another (useful when you want plain stdout while running under
-something that sets `JOURNAL_STREAM`); `--log-format auto|pretty|json` (`MARSHAL_LOG_FORMAT`)
-forces stdout's rendering.
+Under journald, every field lands as a real, structured journal field (`session` → `F_SESSION`,
+`host` → `F_HOST`, …), so `journalctl` *is* the follow/watch command:
 
-Every log line — audit or otherwise — is one summary, not the full record: an `allow`/`deny`
-line carries `session`, `host`, `method`, `profile`, and which `layer` decided, but not the
-full `Evidence` trail or response status code. For that, `--audit-log <path>` additionally
-writes the complete structured JSON record to a file (append mode, created if missing) —
-durable, and independent of whatever `--log-sink`/`--log-format` chose for the console.
+```bash
+journalctl -u bot-marshal -f                                       # follow, human-readable
+journalctl -u bot-marshal -o json -f | jq -c 'select(.TARGET=="access")'
+journalctl -u bot-marshal FIELD=F_HOST=api.github.com               # everything for one host
+```
+
+`tracing`'s fields are flat, so `audit`'s evidence trail travels as a JSON *string* rather
+than a nested value there and in the `json` stdout format — still fully queryable
+(`jq '.trail | fromjson'`), just not natively nested. For a pristine, natively-nested,
+durable copy independent of all of the above, `--audit-log <path>` additionally writes the
+full record as real JSON to a file (append mode, created if missing).
 
 ## The policy chain
 
