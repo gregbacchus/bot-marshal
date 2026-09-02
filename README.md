@@ -15,6 +15,204 @@ holds them, produces a complete audit trail, and does not break streaming.
 Conceptually indebted to [iron-proxy](https://github.com/paradigmxyz/iron-proxy); an
 independent Rust implementation rather than a port.
 
+## Quickstart
+
+Build it:
+
+```bash
+cargo build --release
+alias marshal=./target/release/marshal   # or install it onto PATH
+```
+
+This walkthrough uses a minimal config you create yourself, deliberately not the fuller
+example shipped at `config/marshal.yaml` — that one also defines profiles using the judge
+layer, and **`serve` builds every profile in the config up front, not just the one `--profile`
+selects**, so it refuses to start at all without `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` set.
+Once you have the basics working, `config/marshal.yaml` is worth reading as a fuller example;
+just export those variables first if you want to run it as-is.
+
+```bash
+mkdir -p ~/.bot-marshal-quickstart
+cat > ~/.bot-marshal-quickstart/marshal.yaml <<'CFG'
+tls:
+  ca_cert: "~/.bot-marshal-quickstart/ca.crt"
+  ca_key: "~/.bot-marshal-quickstart/ca.key"
+profiles:
+  base:
+    default_action: deny
+    policy:
+      - layer: allowlist
+        allow: { domains: ["api.github.com"] }
+        on_match: allow
+        on_miss: pass
+CFG
+```
+
+Check it's valid before anything else — this catches most mistakes before they matter:
+
+```bash
+marshal --config ~/.bot-marshal-quickstart/marshal.yaml config check
+```
+
+Generate a CA. `ca init` writes the cert and key to the paths named by `tls.ca_cert` /
+`tls.ca_key` and prints per-runtime trust instructions, preferring scoped environment
+variables over touching the system store:
+
+```bash
+marshal --config ~/.bot-marshal-quickstart/marshal.yaml ca init
+```
+
+Start the proxy:
+
+```bash
+marshal --config ~/.bot-marshal-quickstart/marshal.yaml serve --listen 127.0.0.1:8080
+```
+
+Point something at it, trusting the CA you just generated (`--cacert` here is standing in for
+whichever of `ca init`'s printed trust instructions fits your setup):
+
+```bash
+curl --cacert ~/.bot-marshal-quickstart/ca.crt -x http://127.0.0.1:8080 https://api.github.com/zen
+```
+
+That succeeds — `api.github.com` is explicitly allowlisted above. Anything not allowlisted
+comes back as a 403 whose body says which layer refused and why, a bare 403 just makes agents
+retry-loop:
+
+```bash
+curl --cacert ~/.bot-marshal-quickstart/ca.crt -x http://127.0.0.1:8080 https://example.com/
+```
+
+SOCKS5 works on the same port; the protocol is sniffed from the first byte:
+
+```bash
+curl --cacert ~/.bot-marshal-quickstart/ca.crt --socks5-hostname 127.0.0.1:8080 https://api.github.com/zen
+```
+
+From here, `config/marshal.yaml` in the repo is worth reading as the fuller example — bundles,
+secret injection, DLP, MCP, and a judge-gated profile — and [Launch an agent](#identity) covers
+`marshal run`, which is how a real agent should be pointed at the proxy rather than by hand.
+
+## CLI reference
+
+Every subcommand accepts two global flags, before the subcommand name:
+
+| flag | env var | default | |
+|---|---|---|---|
+| `--config`, `-c <path>` | `MARSHAL_CONFIG` | `config/marshal.yaml` | relative to the current directory — pass an absolute path for anything other than local development |
+| `--log <level>` | `MARSHAL_LOG` | `info` | `error`, `warn`, `info`, `debug`, or `trace` |
+
+```bash
+marshal --config /etc/bot-marshal/marshal.yaml --log debug serve
+```
+
+**`marshal config check`** — loads and validates the config, prints every diagnostic, exits
+non-zero on any error. Warnings do not fail the check but are worth reading; `serve` logs
+them at startup and refuses to start on an error the same way.
+
+**`marshal ca init [--common-name <name>] [--days <n>]`** — generates a CA at the paths named
+by `tls.ca_cert` / `tls.ca_key`. Refuses to overwrite an existing one. `--days` is the CA's
+own validity period, defaulting to 825 (~2.3 years); it is unrelated to `tls.leaf_expiry_hours`,
+which governs the much shorter-lived per-host leaves the CA signs while it is valid.
+
+**`marshal ca export [--pem-only]`** — prints the CA certificate and, unless `--pem-only`,
+the same trust instructions `ca init` prints. Useful for piping into a container image build
+or a trust store update without regenerating anything.
+
+**`marshal serve [--profile <name>] [--listen <addr>] [--audit-log <path>]`** — runs the
+proxy until `Ctrl-C`. `--profile` overrides `sessions.unidentified.profile` for the
+unattributed fallback; it does not select a single profile to run — every profile in the
+config gets built and is reachable by whatever resolves a session into it. `--listen`
+overrides `listeners.explicit.listen`. `--audit-log` writes JSON lines to a file (append
+mode, created if missing) instead of stdout.
+
+**`marshal run --profile <name> [--isolation netns|cgroup|none] [--proxy <url>] [--dry-run] -- <command...>`**
+— launches an agent under a profile. `--isolation` defaults to `netns` (see
+[Identity](#identity) for what each mode actually buys). `--proxy` is the address the agent
+is told to use — it is **not** read from the config file, so it must match whatever `serve`
+is actually listening on (default `http://127.0.0.1:8080` matches `serve`'s own default).
+`--dry-run` prints the command, environment, and (for `netns`) the sandbox wiring without
+running anything — useful for checking what a launch would actually do before trusting it
+with a real agent.
+
+`marshal sandbox` also exists, is intentionally undocumented in `--help`, and should never be
+invoked directly — it is the half of `--isolation netns` that `marshal run` re-execs itself as
+inside the network namespace.
+
+## Configuration and storage
+
+There is no built-in default location beyond the relative path `config/marshal.yaml` — that
+default exists for running from a checkout during development, not as a system convention.
+In anything other than that, pass `--config` or set `MARSHAL_CONFIG` explicitly. A
+conventional system layout looks like `/etc/bot-marshal/marshal.yaml`, with bundle includes
+and any secret files it references kept alongside or under it.
+
+What bot-marshal writes to disk, and only what it writes:
+
+| what | where | notes |
+|---|---|---|
+| CA certificate | `tls.ca_cert` | created by `ca init`; world-readable is fine, it is a certificate |
+| CA private key | `tls.ca_key` | created by `ca init` at mode `0600`; whoever holds it can impersonate every site the agent talks to |
+| Unix socket | `listeners.explicit.unix_socket` | recreated on every start — a leftover socket from a previous run is removed automatically, never left to block a restart |
+| Audit log | `--audit-log <path>`, or stdout if omitted | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
+
+That is the complete list. There is no database, no cache directory, and no other state
+persisted between runs — `/v1/sessions` and `/v1/metrics` counters, and the judge's response
+cache, all live in memory and reset on restart. A config `include` glob and any files a
+`file`-type secret source or `tls.upstream_ca_certs` entry points at are read, never written.
+
+`~/` at the start of a path (`tls.ca_cert`, `tls.upstream_ca_certs` entries, secret `file`
+source paths) expands against `$HOME`. Nothing else is expanded — no `~user/`, no
+environment variable substitution inside a path string.
+
+## Running as a service
+
+The proxy itself, and the agents `marshal run` launches, are two separate concerns that can
+run as different users. Nothing requires them to be the same, and there is a reason to keep
+them apart: the proxy process holds the CA private key and the real credentials
+`request_transforms.secrets` inject, so it is worth minimising what else runs as that user.
+
+A minimal systemd unit for the proxy itself:
+
+```ini
+# /etc/systemd/system/bot-marshal.service
+[Unit]
+Description=bot-marshal egress proxy
+After=network.target
+
+[Service]
+User=bot-marshal
+Group=bot-marshal
+ExecStart=/usr/local/bin/marshal --config /etc/bot-marshal/marshal.yaml serve
+Restart=on-failure
+# Only if listeners.dns or listeners.explicit binds a port below 1024.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo useradd --system --no-create-home --home-dir /var/lib/bot-marshal bot-marshal
+sudo mkdir -p /etc/bot-marshal /var/lib/bot-marshal
+sudo chown bot-marshal:bot-marshal /var/lib/bot-marshal
+# tls.ca_cert / tls.ca_key in marshal.yaml should point under /var/lib/bot-marshal
+sudo -u bot-marshal marshal --config /etc/bot-marshal/marshal.yaml ca init
+sudo systemctl enable --now bot-marshal
+```
+
+If `listeners.transparent` is enabled, point `deploy/nftables.conf`'s `$MARSHAL_UID` at this
+user's uid (`id -u bot-marshal`) so the ruleset excludes the proxy's own egress from the
+redirect — see [Transparent](#capture) for why that matters.
+
+**A genuine gotcha if you also run `marshal run` from automation as this same service user:**
+`--isolation cgroup` and `--isolation netns` both go through `systemd-run --user`, which
+needs a running *user* systemd instance for that account. An interactive login session has
+one; a bare service account usually does not, unless lingering is enabled for it
+(`sudo loginctl enable-linger bot-marshal`). Without that, `marshal run` fails outright rather
+than silently falling back to a weaker mode — the same "fail loud, not quiet" choice made
+everywhere else identity is involved.
+
 ## The policy chain
 
 Requests pass through an ordered chain of layers. Each returns **ALLOW**, **DENY**, or
@@ -272,49 +470,6 @@ same trade a certificate-pinned client always makes by opting out of interceptio
 | M5 | MCP tool-level policy | done |
 | M6 | Transparent (nftables) and DNS interception | done |
 | M7 | Management API, hot reload, warn mode, metrics | done¹ |
-
-## Try it
-
-```bash
-cargo run --bin marshal -- config check
-```
-
-Create a CA and trust it — `ca init` prints per-runtime instructions, and prefers scoped
-environment variables over touching the system store:
-
-```bash
-cargo run --bin marshal -- ca init
-```
-
-Then run the proxy and point something at it:
-
-```bash
-cargo run --bin marshal -- serve --profile base --listen 127.0.0.1:8080
-```
-
-```bash
-curl -x http://127.0.0.1:8080 https://api.github.com/zen
-```
-
-`api.github.com` is in the `github` bundle, so that succeeds. Anything not allowlisted comes
-back as a 403 whose body says which layer refused and why — a bare 403 just makes agents
-retry-loop.
-
-```bash
-curl -x http://127.0.0.1:8080 https://example.com/
-```
-
-SOCKS5 works on the same port; the protocol is sniffed from the first byte.
-
-```bash
-curl --socks5-hostname 127.0.0.1:8080 https://api.github.com/zen
-```
-
-Starting `--profile coding-agent` still fails, but for a narrower and now-honest reason: it
-also configures a `redact` response transform, which — unlike every policy layer, all of
-which are implemented — remains a declared config shape with no implementation. Running it
-without one would serve a response that was supposed to be scrubbed, unscrubbed, so it fails
-loudly rather than silently.
 
 ## The judge
 
