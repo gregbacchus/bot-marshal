@@ -36,6 +36,9 @@ tracing-subscriber.workspace = true
 tracing-journald.workspace = true
 syslog.workspace = true
 
+[dev-dependencies]
+serde_yaml_ng.workspace = true
+
 [[bin]]
 name = "marshal"
 path = "src/main.rs"

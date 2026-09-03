@@ -1215,22 +1215,50 @@ fn build_injector(
         let name = spec.name.clone().unwrap_or_else(|| source.name().to_owned());
         let hosts = build_host_matcher(&spec.rules, cfg)?;
 
-        swaps.push(SecretSwap {
-            name,
-            source,
-            proxy_value: spec.proxy_value,
-            sites: MatchSites {
-                headers: if spec.match_headers.is_empty() {
-                    vec!["authorization".into()]
-                } else {
-                    spec.match_headers
+        let matchers_set =
+            !spec.match_headers.is_empty() || spec.match_body || spec.match_query || spec.require;
+
+        let kind = match (spec.proxy_value, spec.inject) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "request_transforms.secrets[{i}]: set either `proxy_value` (the agent \
+                 presents a placeholder) or `inject` (the proxy adds the credential \
+                 unconditionally), not both"
+            ),
+            (None, None) => anyhow::bail!(
+                "request_transforms.secrets[{i}]: needs either `proxy_value` or `inject`"
+            ),
+            (Some(proxy_value), None) => marshal_secrets::SwapKind::Placeholder {
+                proxy_value,
+                sites: MatchSites {
+                    headers: if spec.match_headers.is_empty() {
+                        vec!["authorization".into()]
+                    } else {
+                        spec.match_headers
+                    },
+                    query: spec.match_query,
+                    body: spec.match_body,
                 },
-                query: spec.match_query,
-                body: spec.match_body,
+                require: spec.require,
             },
-            require: spec.require,
-            hosts,
-        });
+            (None, Some(inject)) => {
+                if matchers_set {
+                    anyhow::bail!(
+                        "request_transforms.secrets[{i}]: `match_headers`/`match_body`/\
+                         `match_query`/`require` have no effect with `inject` — the credential \
+                         is added unconditionally, so there is nothing to match against"
+                    );
+                }
+                match inject {
+                    InjectSpec::Basic { username } => {
+                        marshal_secrets::SwapKind::Inject(marshal_secrets::Injection::Basic {
+                            username,
+                        })
+                    }
+                }
+            }
+        };
+
+        swaps.push(SecretSwap { name, source, kind, hosts });
     }
     Ok(SecretInjector::new(swaps))
 }
@@ -1251,8 +1279,10 @@ struct SecretSpec {
     #[serde(default)]
     name: Option<String>,
     source: SecretSourceSpec,
-    /// What the agent sends in place of the credential.
-    proxy_value: String,
+    /// What the agent sends in place of the credential — set this for a cooperating client
+    /// that presents a placeholder. Mutually exclusive with `inject`.
+    #[serde(default)]
+    proxy_value: Option<String>,
     #[serde(default)]
     match_headers: Vec<String>,
     #[serde(default)]
@@ -1261,8 +1291,22 @@ struct SecretSpec {
     match_query: bool,
     #[serde(default)]
     require: bool,
+    /// Construct the credential and add it to every allowed request unconditionally — for a
+    /// client that has no notion of the endpoint being authenticated at all. Mutually
+    /// exclusive with `proxy_value` and the `match_*`/`require` fields, which have nothing to
+    /// apply to when nothing is being matched.
+    #[serde(default)]
+    inject: Option<InjectSpec>,
     #[serde(default)]
     rules: Vec<HostRule>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum InjectSpec {
+    /// `Authorization: Basic base64("{username}:{secret}")` — what git, most package
+    /// registries, and container registry logins use.
+    Basic { username: String },
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1446,5 +1490,80 @@ profile:
 
         assert_eq!(request.headers["accept"], "application/json");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn profile(yaml: &str) -> marshal_config::model::Profile {
+        serde_yaml_ng::from_str(yaml).expect("test profile parses")
+    }
+
+    #[test]
+    fn a_swap_needs_either_proxy_value_or_inject() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: env, var: X }
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
+        assert!(err.to_string().contains("needs either `proxy_value` or `inject`"), "{err}");
+    }
+
+    #[test]
+    fn a_swap_cannot_set_both_proxy_value_and_inject() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: env, var: X }
+      proxy_value: "placeholder"
+      inject: { type: basic, username: "user" }
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn inject_rejects_match_fields_that_have_nothing_to_apply_to() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: env, var: X }
+      inject: { type: basic, username: "user" }
+      require: true
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
+        assert!(err.to_string().contains("have no effect with `inject`"), "{err}");
+    }
+
+    #[test]
+    fn a_well_formed_inject_swap_builds() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: env, var: X }
+      inject: { type: basic, username: "x-access-token" }
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        assert!(!injector.is_empty());
+        // Inject swaps have no placeholder — nothing the client sends is a stand-in for it.
+        assert!(injector.proxy_values().is_empty());
     }
 }

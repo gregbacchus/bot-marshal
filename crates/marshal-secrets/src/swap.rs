@@ -1,17 +1,23 @@
-//! Boundary secret injection: swapping a placeholder the agent holds for the real credential.
+//! Boundary secret injection: the agent never holds the real credential.
 //!
-//! # Why a placeholder rather than blind injection
+//! Two independent modes, chosen per swap by [`SwapKind`] — not a spectrum, two genuinely
+//! different trust models:
 //!
-//! The alternative — the proxy simply adding an `Authorization` header to every request to a
-//! host — is easier for the agent but strictly weaker: any request the agent can be tricked
-//! into making becomes an authenticated one.
+//! * [`SwapKind::Placeholder`] — the agent is a cooperating participant. It holds and sends a
+//!   stand-in value (in a header, the query string, or the body), and this swaps it for the
+//!   real credential wherever it's found. A prompt-injected agent can still *use* its
+//!   placeholder against hosts the chain allows, but it cannot exfiltrate anything of value:
+//!   the placeholder is worthless outside this proxy.
+//! * [`SwapKind::Inject`] — the agent knows nothing about authentication at all. Every
+//!   allowed request to the configured host gets the credential added, unconditionally. This
+//!   is for a client that has no notion of the endpoint being authenticated in the first
+//!   place — an anonymous `git clone`, a `docker pull` with no login step, an npm install
+//!   against a registry that requires a token the agent was never given. There is nothing to
+//!   swap because nothing was sent.
 //!
-//! With a placeholder, the security property is narrower and more useful than "the agent
-//! cannot authenticate". A prompt-injected agent *can* still use its placeholder against
-//! hosts the chain allows. What it cannot do is exfiltrate anything of value: the placeholder
-//! is worthless outside this proxy, and the real credential never exists inside the agent's
-//! process, filesystem, or environment. Compromise of the agent stops costing you a
-//! credential rotation.
+//! `Inject` is a real trade-off, not a strictly worse `Placeholder`: within its host scope,
+//! *every* request the chain allows is now authenticated, not just ones the agent specifically
+//! constructed to carry a credential. See `docs/adr/0026-blind-credential-injection.md`.
 
 use std::sync::Arc;
 
@@ -35,26 +41,52 @@ impl Default for MatchSites {
     }
 }
 
-/// One placeholder-to-secret mapping.
+/// Which of the two trust models a swap uses. See the module documentation.
+#[derive(Debug)]
+pub enum SwapKind {
+    /// The agent sends `proxy_value`, found in whichever of `sites` it's configured to scan.
+    Placeholder {
+        /// What the agent sends. Safe to log; useless anywhere but here.
+        proxy_value: String,
+        sites: MatchSites,
+        /// Refuse a matching request that does not carry the placeholder, rather than
+        /// forwarding it unauthenticated and letting the agent see a confusing 401 from the
+        /// upstream.
+        require: bool,
+    },
+    /// The proxy constructs the credential itself and sets `Authorization` on every request
+    /// this swap matches — the client sends nothing related to authentication.
+    Inject(Injection),
+}
+
+/// A credential constructed and injected unconditionally, with no involvement from the
+/// client. More variants (`Bearer`, a named custom header) follow the same shape if needed;
+/// `Basic` is what git, most package registries, and container registry logins actually use.
+#[derive(Debug)]
+pub enum Injection {
+    /// `Authorization: Basic base64("{username}:{secret}")`.
+    Basic { username: String },
+}
+
+/// One credential rule: how it's authenticated ([`SwapKind`]), resolved from ([`SecretSource`]),
+/// and where it applies ([`HostMatcher`]).
 pub struct SecretSwap {
     /// Name for the audit trail. Never the value.
     pub name: String,
     pub source: Arc<dyn SecretSource>,
-    /// What the agent sends. Safe to log; useless anywhere but here.
-    pub proxy_value: String,
-    pub sites: MatchSites,
-    /// Refuse a matching request that does not carry the placeholder, rather than forwarding
-    /// it unauthenticated and letting the agent see a confusing 401 from the upstream.
-    pub require: bool,
+    pub kind: SwapKind,
     pub hosts: HostMatcher,
 }
 
 impl std::fmt::Debug for SecretSwap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match &self.kind {
+            SwapKind::Placeholder { .. } => "Placeholder",
+            SwapKind::Inject(Injection::Basic { .. }) => "Inject(Basic)",
+        };
         f.debug_struct("SecretSwap")
             .field("name", &self.name)
-            .field("proxy_value", &self.proxy_value)
-            .field("require", &self.require)
+            .field("kind", &kind)
             .finish_non_exhaustive()
     }
 }
@@ -75,8 +107,16 @@ impl SecretInjector {
     }
 
     /// Every placeholder configured, so the audit layer can tell them apart from real values.
+    /// `Inject` swaps have no placeholder — there is nothing the client ever sends to confuse
+    /// with the real credential.
     pub fn proxy_values(&self) -> Vec<String> {
-        self.swaps.iter().map(|s| s.proxy_value.clone()).collect()
+        self.swaps
+            .iter()
+            .filter_map(|s| match &s.kind {
+                SwapKind::Placeholder { proxy_value, .. } => Some(proxy_value.clone()),
+                SwapKind::Inject(_) => None,
+            })
+            .collect()
     }
 
     /// Resolve every source once, for seeding the redactor at startup.
@@ -101,9 +141,14 @@ impl RequestTransform for SecretInjector {
     }
 
     fn body_requirement(&self) -> BodyRequirement {
-        // Only if some swap actually scans bodies. Buffering every request because one
-        // profile *might* need it would silently stop uploads streaming.
-        if self.swaps.iter().any(|s| s.sites.body) {
+        // Only if some Placeholder swap actually scans bodies. Buffering every request
+        // because one profile *might* need it would silently stop uploads streaming. Inject
+        // swaps never need the body at all.
+        let needs_body = self
+            .swaps
+            .iter()
+            .any(|s| matches!(&s.kind, SwapKind::Placeholder { sites, .. } if sites.body));
+        if needs_body {
             BodyRequirement::Buffered { cap: 1024 * 1024 }
         } else {
             BodyRequirement::Streaming
@@ -116,94 +161,134 @@ impl RequestTransform for SecretInjector {
                 continue;
             }
 
-            let mut swapped_anywhere = false;
-
-            // Resolve lazily: a request that never presents the placeholder should not cause
-            // the real credential to be read at all.
-            let present = placeholder_present(cx, swap);
-            if !present {
-                if swap.require {
-                    return Err(Error::Config(format!(
-                        "requests to `{}` must carry the `{}` placeholder, but this one did \
-                         not. Send `{}` where the credential would normally go.",
-                        cx.authority.host, swap.name, swap.proxy_value
-                    )));
+            match &swap.kind {
+                SwapKind::Placeholder { proxy_value, sites, require } => {
+                    apply_placeholder(cx, swap, proxy_value, sites, *require).await?;
                 }
-                continue;
-            }
-
-            let real = swap.source.resolve().await?;
-
-            for (name, value) in cx.headers.clone().iter() {
-                if !swap.sites.headers.is_empty()
-                    && !swap.sites.headers.iter().any(|h| h.eq_ignore_ascii_case(name.as_str()))
-                {
-                    continue;
+                SwapKind::Inject(injection) => {
+                    apply_inject(cx, swap, injection).await?;
                 }
-                let Ok(text) = value.to_str() else { continue };
-                let Some(replaced) = replace_in_header(text, &swap.proxy_value, real.expose())
-                else {
-                    continue;
-                };
-                if let Ok(v) = http::HeaderValue::from_str(&replaced) {
-                    cx.headers.insert(name.clone(), v);
-                    swapped_anywhere = true;
-                }
-            }
-
-            if swap.sites.query
-                && let Some(q) = cx.uri.query()
-                && q.contains(&swap.proxy_value)
-            {
-                let new_q = q.replace(&swap.proxy_value, real.expose());
-                let path = cx.uri.path();
-                if let Ok(uri) = format!("{path}?{new_q}").parse::<http::Uri>() {
-                    cx.uri = uri;
-                    swapped_anywhere = true;
-                }
-            }
-
-            if swap.sites.body
-                && let marshal_core::BodyHandle::Buffered(bytes) = &cx.body
-                && let Ok(text) = std::str::from_utf8(bytes)
-                && text.contains(&swap.proxy_value)
-            {
-                let replaced = text.replace(&swap.proxy_value, real.expose());
-                cx.body = marshal_core::BodyHandle::Buffered(bytes::Bytes::from(replaced));
-                swapped_anywhere = true;
-            }
-
-            if swapped_anywhere {
-                // The name, never the value.
-                cx.evidence.record(format!("secrets.swapped.{}", swap.name), true);
             }
         }
         Ok(())
     }
 }
 
-/// Whether the placeholder appears anywhere this swap is configured to look.
-fn placeholder_present(cx: &RequestContext, swap: &SecretSwap) -> bool {
+/// The client is a cooperating participant: find `proxy_value` wherever `sites` says to look,
+/// and replace it with the real credential.
+async fn apply_placeholder(
+    cx: &mut RequestContext,
+    swap: &SecretSwap,
+    proxy_value: &str,
+    sites: &MatchSites,
+    require: bool,
+) -> Result<()> {
+    let mut swapped_anywhere = false;
+
+    // Resolve lazily: a request that never presents the placeholder should not cause the
+    // real credential to be read at all.
+    if !placeholder_present(cx, proxy_value, sites) {
+        if require {
+            return Err(Error::Config(format!(
+                "requests to `{}` must carry the `{}` placeholder, but this one did not. Send \
+                 `{proxy_value}` where the credential would normally go.",
+                cx.authority.host, swap.name
+            )));
+        }
+        return Ok(());
+    }
+
+    let real = swap.source.resolve().await?;
+
+    for (name, value) in cx.headers.clone().iter() {
+        if !sites.headers.is_empty()
+            && !sites.headers.iter().any(|h| h.eq_ignore_ascii_case(name.as_str()))
+        {
+            continue;
+        }
+        let Ok(text) = value.to_str() else { continue };
+        let Some(replaced) = replace_in_header(text, proxy_value, real.expose()) else {
+            continue;
+        };
+        if let Ok(v) = http::HeaderValue::from_str(&replaced) {
+            cx.headers.insert(name.clone(), v);
+            swapped_anywhere = true;
+        }
+    }
+
+    if sites.query
+        && let Some(q) = cx.uri.query()
+        && q.contains(proxy_value)
+    {
+        let new_q = q.replace(proxy_value, real.expose());
+        let path = cx.uri.path();
+        if let Ok(uri) = format!("{path}?{new_q}").parse::<http::Uri>() {
+            cx.uri = uri;
+            swapped_anywhere = true;
+        }
+    }
+
+    if sites.body
+        && let marshal_core::BodyHandle::Buffered(bytes) = &cx.body
+        && let Ok(text) = std::str::from_utf8(bytes)
+        && text.contains(proxy_value)
+    {
+        let replaced = text.replace(proxy_value, real.expose());
+        cx.body = marshal_core::BodyHandle::Buffered(bytes::Bytes::from(replaced));
+        swapped_anywhere = true;
+    }
+
+    if swapped_anywhere {
+        // The name, never the value.
+        cx.evidence.record(format!("secrets.swapped.{}", swap.name), true);
+    }
+    Ok(())
+}
+
+/// The client sent nothing: construct the credential and set it unconditionally. Every
+/// request that reaches here already passed the policy chain — that host allowlist is the
+/// only gate, since there is no placeholder to check for.
+async fn apply_inject(
+    cx: &mut RequestContext,
+    swap: &SecretSwap,
+    injection: &Injection,
+) -> Result<()> {
+    let real = swap.source.resolve().await?;
+    let value = match injection {
+        Injection::Basic { username } => {
+            format!("Basic {}", base64_encode(format!("{username}:{}", real.expose()).as_bytes()))
+        }
+    };
+    if let Ok(v) = http::HeaderValue::from_str(&value) {
+        cx.headers.insert(http::header::AUTHORIZATION, v);
+        // The name, never the value.
+        cx.evidence.record(format!("secrets.injected.{}", swap.name), true);
+    }
+    Ok(())
+}
+
+/// Whether the placeholder appears anywhere `sites` says to look.
+fn placeholder_present(cx: &RequestContext, proxy_value: &str, sites: &MatchSites) -> bool {
     let in_headers = cx.headers.iter().any(|(name, value)| {
-        if !swap.sites.headers.is_empty()
-            && !swap.sites.headers.iter().any(|h| h.eq_ignore_ascii_case(name.as_str()))
+        if !sites.headers.is_empty()
+            && !sites.headers.iter().any(|h| h.eq_ignore_ascii_case(name.as_str()))
         {
             return false;
         }
-        value.to_str().map(|t| header_contains(t, &swap.proxy_value)).unwrap_or(false)
+        value.to_str().map(|t| header_contains(t, proxy_value)).unwrap_or(false)
     });
     if in_headers {
         return true;
     }
 
-    if swap.sites.query && cx.uri.query().map(|q| q.contains(&swap.proxy_value)).unwrap_or(false) {
+    if sites.query && cx.uri.query().map(|q| q.contains(proxy_value)).unwrap_or(false) {
         return true;
     }
 
-    if swap.sites.body
+    if sites.body
         && let marshal_core::BodyHandle::Buffered(bytes) = &cx.body
         && let Ok(text) = std::str::from_utf8(bytes)
-        && text.contains(&swap.proxy_value)
+        && text.contains(proxy_value)
     {
         return true;
     }

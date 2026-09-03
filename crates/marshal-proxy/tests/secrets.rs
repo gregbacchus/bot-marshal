@@ -12,7 +12,7 @@ use marshal_core::{AuditSink, DenyingDecider, RequestTransform};
 use marshal_policy::{HostMatcher, build_chain};
 use marshal_proxy::mitm::TlsEngine;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
-use marshal_secrets::{MatchSites, SecretInjector, SecretSwap};
+use marshal_secrets::{Injection, MatchSites, SecretInjector, SecretSwap, SwapKind};
 use support::*;
 
 /// The real credential. Deliberately shaped like a GitHub token so the DLP tests can use the
@@ -158,9 +158,16 @@ fn swap(sites: MatchSites, require: bool) -> SecretSwap {
     SecretSwap {
         name: "TEST_SECRET".into(),
         source: Arc::new(FixedSecret(REAL_SECRET)),
-        proxy_value: PLACEHOLDER.into(),
-        sites,
-        require,
+        kind: SwapKind::Placeholder { proxy_value: PLACEHOLDER.into(), sites, require },
+        hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
+    }
+}
+
+fn inject_swap(injection: Injection) -> SecretSwap {
+    SecretSwap {
+        name: "TEST_SECRET".into(),
+        source: Arc::new(FixedSecret(REAL_SECRET)),
+        kind: SwapKind::Inject(injection),
         hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
     }
 }
@@ -230,6 +237,45 @@ async fn a_basic_auth_challenge_without_the_placeholder_is_left_alone() {
         reflect(&h, |b| b.header("authorization", unrelated.clone()).body(empty()).unwrap()).await;
 
     assert_eq!(seen["authorization"], unrelated, "an unrelated Basic header must pass through");
+}
+
+#[tokio::test]
+async fn inject_adds_basic_auth_the_client_never_sent_at_all() {
+    // The defining property of Inject mode: the client presents nothing related to
+    // authentication — no placeholder, no header — and the credential appears anyway.
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![inject_swap(Injection::Basic { username: "x-access-token".into() })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
+
+    use base64_test_helper::b64;
+    let expected = format!("Basic {}", b64(&format!("x-access-token:{REAL_SECRET}")));
+    assert_eq!(seen["authorization"], expected);
+}
+
+#[tokio::test]
+async fn inject_overwrites_whatever_authorization_the_client_did_send() {
+    // If a client sends its own (irrelevant) Authorization header, Inject mode replaces it —
+    // the configured credential is authoritative for this host, not a fallback.
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![inject_swap(Injection::Basic { username: "x-access-token".into() })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    let seen = reflect(&h, |b| {
+        b.header("authorization", "Bearer something-unrelated").body(empty()).unwrap()
+    })
+    .await;
+
+    use base64_test_helper::b64;
+    let expected = format!("Basic {}", b64(&format!("x-access-token:{REAL_SECRET}")));
+    assert_eq!(seen["authorization"], expected);
 }
 
 mod base64_test_helper {

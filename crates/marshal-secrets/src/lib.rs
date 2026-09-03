@@ -4,4 +4,4 @@ pub mod source;
 pub mod swap;
 
 pub use source::{EnvSource, FileSource};
-pub use swap::{MatchSites, SecretInjector, SecretSwap};
+pub use swap::{Injection, MatchSites, SecretInjector, SecretSwap, SwapKind};
