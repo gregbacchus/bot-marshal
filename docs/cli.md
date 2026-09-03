@@ -64,7 +64,7 @@ this flag only changes which one catches traffic nothing could attribute.
 one-line summary — in append mode, created if missing. See
 [Observability](observability.md#the-audit-log).
 
-## `marshal run --profile <name> [--isolation netns|cgroup|none] [--proxy <url>] [--dry-run] -- <command...>`
+## `marshal run --profile <name> [--isolation netns|cgroup|none] [--proxy <url>] [--bind <path>] [--dry-run] -- <command...>`
 
 Launches an agent under a profile. See
 [Identity › Launching an agent](configuration/identity.md#launching-an-agent) for what each
@@ -75,13 +75,26 @@ isolation mode actually buys.
 | `--profile <name>` | required | a *named* profile, from `profiles/` |
 | `--isolation` | `netns` | `netns` enforces, `cgroup` identifies, `none` sets env vars only |
 | `--proxy <url>` | `http://127.0.0.1:8080` | the address the agent is told to use |
+| `--bind <path>` | none, repeatable | extra path bound read-write inside `--isolation netns`; ignored by other modes |
 | `--dry-run` | off | print the command, environment and sandbox wiring; run nothing |
 
 `--proxy` is **not** read from the config file, so it must match whatever `serve` is actually
 listening on. The default matches `serve`'s own default.
 
 `--dry-run` is useful for checking what a launch would actually do before trusting it with a
-real agent.
+real agent — for `--isolation netns` specifically, it prints the exact bind list the sandbox
+gets, which is the fastest way to tell whether a missing file will be the difference between
+the agent working and failing.
+
+`--isolation netns` gives the agent only the workspace, the standard system directories, the
+CA certificate, and the marshal socket — not the whole filesystem (see
+[Identity](configuration/identity.md#netns-enforces-rather-than-identifies)). A tool that
+needs something else, such as a package manager cache kept outside the workspace, needs
+`--bind` for it explicitly:
+
+```bash
+marshal run --profile coding-agent --bind ~/.cache/uv -- uv sync
+```
 
 ```bash
 marshal run --profile coding-agent -- claude

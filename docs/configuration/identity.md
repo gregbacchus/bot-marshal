@@ -176,8 +176,15 @@ never sees. And a tool that ignores proxy environment variables gets no network 
 than silently bypassing — failing closed is the point, but it does surface badly-behaved
 tooling as a hard error.
 
-Only the network is isolated; the filesystem is passed through, because the agent needs its
-workspace. **This is an egress firewall, not a sandbox.**
+Only the network is isolated. The filesystem is **not** passed through wholesale: the agent
+sees the workspace it was launched from, the standard read-only system directories, the CA
+certificate, and the marshal socket — nothing else, and specifically not `/run` or the host's
+real `/tmp`, which is where another process's Unix socket (Docker's, for instance) would
+otherwise still be reachable from inside a namespace that was supposed to remove every other
+route out. `--bind <path>` on `marshal run` opts a specific extra path in, explicitly, when an
+agent genuinely needs one. **This is an egress firewall, not a general-purpose sandbox** —
+the workspace itself is fully read-write, and nothing here defends against what the agent does
+with the files it can already reach.
 
 ```bash
 marshal run --profile coding-agent --isolation cgroup -- claude   # identify only

@@ -105,6 +105,12 @@ enum Command {
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         proxy: String,
 
+        /// Extra path to bind read-write inside `--isolation netns`'s namespace, beyond the
+        /// workspace and the standard system directories — a package manager cache outside
+        /// the workspace, for instance. Repeatable. Ignored by every other isolation mode.
+        #[arg(long = "bind")]
+        binds: Vec<PathBuf>,
+
         /// Print the command and environment instead of running anything.
         #[arg(long)]
         dry_run: bool,
@@ -220,8 +226,8 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Config(ConfigCommand::Check) => config_check(&config_path),
         Command::Ca(cmd) => ca_command(&config_path, cmd),
-        Command::Run { profile, isolation, proxy, dry_run, command } => {
-            run_command(&config_path, &profile, &isolation, &proxy, dry_run, &command)
+        Command::Run { profile, isolation, proxy, binds, dry_run, command } => {
+            run_command(&config_path, &profile, &isolation, &proxy, &binds, dry_run, &command)
         }
         Command::Sandbox { socket, listen, ca, command } => {
             let listen = match listen.parse() {
@@ -739,6 +745,7 @@ fn run_command(
     profile: &str,
     isolation: &str,
     proxy: &str,
+    binds: &[PathBuf],
     dry_run: bool,
     command: &[String],
 ) -> ExitCode {
@@ -822,6 +829,7 @@ fn run_command(
         &endpoint,
         command,
         unix_socket.as_deref(),
+        binds,
     ) {
         Ok(c) => c,
         Err(e) => {

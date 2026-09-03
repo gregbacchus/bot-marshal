@@ -140,10 +140,12 @@ pub fn build_command(
     endpoint: &ProxyEndpoint,
     argv: &[String],
 ) -> Result<Command, LaunchError> {
-    build_command_with(isolation, profile, id, endpoint, argv, None)
+    build_command_with(isolation, profile, id, endpoint, argv, None, &[])
 }
 
-/// As [`build_command`], with the Unix socket that netns isolation forwards to.
+/// As [`build_command`], with the Unix socket that netns isolation forwards to and any extra
+/// paths (`extra_binds`) the caller wants bound read-write inside the namespace — outside the
+/// workspace and the fixed system paths, ignored by every isolation mode but `netns`.
 pub fn build_command_with(
     isolation: Isolation,
     profile: &str,
@@ -151,12 +153,13 @@ pub fn build_command_with(
     endpoint: &ProxyEndpoint,
     argv: &[String],
     unix_socket: Option<&std::path::Path>,
+    extra_binds: &[PathBuf],
 ) -> Result<Command, LaunchError> {
     let (program, args) = argv.split_first().ok_or(LaunchError::NoCommand)?;
     let env = proxy_env(endpoint);
 
     if isolation == Isolation::Netns {
-        return build_netns_command(profile, id, endpoint, argv, unix_socket);
+        return build_netns_command(profile, id, endpoint, argv, unix_socket, extra_binds);
     }
 
     let mut cmd = match isolation {
@@ -190,22 +193,47 @@ pub fn build_command_with(
     Ok(cmd)
 }
 
+/// Read-only system directories bound into the namespace verbatim, via `--ro-bind-try` so a
+/// merged-`/usr` system (where several of these are a symlink into `/usr`, or simply do not
+/// exist as their own directory) does not turn a missing one into a hard launch failure —
+/// binding `/usr` alone already covers what a missing one would have added.
+const READONLY_SYSTEM_DIRS: &[&str] = &["/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64"];
+
 /// `systemd-run --user --scope --unit=… -- bwrap --unshare-net -- marshal sandbox -- <agent>`
 ///
 /// The scope supplies identity (the `launched` resolver reads the profile back out of the
 /// cgroup name); `bwrap` supplies the empty network namespace; `marshal sandbox` supplies the
 /// only way out of it.
 ///
-/// Only the network is unshared. The filesystem is passed through with `--dev-bind / /`
-/// because the agent needs its workspace — this is an egress firewall, not a sandbox. `/proc`
-/// is remounted so that `/proc/net` reflects the namespace the agent is actually in, rather
-/// than the host's.
+/// Only the network is unshared, but the filesystem is no longer `--dev-bind / /` — binding
+/// the whole host root put every other Unix socket reachable from this user in scope too
+/// (Docker's, Podman's, anything else listening under `/run` or `/var/run`), which let an
+/// agent reach host-level control planes the network namespace was supposed to remove it
+/// from entirely. What is bound instead, and nothing else:
+///
+/// * the workspace (the directory `marshal run` was invoked from), read-write — the agent
+///   needs to do its actual work;
+/// * `READONLY_SYSTEM_DIRS`, read-only — the standard binaries and libraries any agent needs
+///   to run at all;
+/// * the CA certificate, read-only, bound as a single file — never its containing directory,
+///   which on the default config layout also holds the CA *private key*, and that must never
+///   be readable from inside the sandbox;
+/// * the marshal Unix socket, read-write, as a single file — the only route out;
+/// * `extra_binds`, read-write — the documented, explicit opt-in for anything else a
+///   particular agent genuinely needs (a package manager cache outside the workspace, for
+///   instance), rather than reopening the whole filesystem to get it.
+///
+/// `/proc` is bwrap's own mount, so `/proc/net` reflects the namespace the agent is actually
+/// in rather than the host's. `/dev` and `/tmp` are bwrap's own synthetic, empty ones —
+/// `/dev` because devices are not filesystem access this proxy has any opinion on, `/tmp`
+/// because the host's real one may hold other processes' sockets exactly like `/run` does.
 fn build_netns_command(
     profile: &str,
     id: u32,
     endpoint: &ProxyEndpoint,
     argv: &[String],
     unix_socket: Option<&std::path::Path>,
+    extra_binds: &[PathBuf],
 ) -> Result<Command, LaunchError> {
     let socket = unix_socket.ok_or_else(|| {
         LaunchError::Sandbox(
@@ -217,6 +245,9 @@ fn build_netns_command(
     sandbox::check_socket_path(socket).map_err(LaunchError::Sandbox)?;
 
     let self_exe = std::env::current_exe().map_err(LaunchError::NoSelfExe)?;
+    let workspace = std::env::current_dir().map_err(|e| {
+        LaunchError::Sandbox(format!("determining the current directory to bind: {e}"))
+    })?;
 
     let mut cmd = Command::new("systemd-run");
     cmd.arg("--user")
@@ -226,11 +257,37 @@ fn build_netns_command(
         .arg(format!("--unit={}", scope_name(profile, id)))
         .arg("--")
         .arg("bwrap")
-        .arg("--dev-bind")
-        .arg("/")
-        .arg("/")
+        .arg("--dev")
+        .arg("/dev")
+        .arg("--tmpfs")
+        .arg("/tmp")
         .arg("--proc")
         .arg("/proc")
+        .arg("--bind")
+        .arg(&workspace)
+        .arg(&workspace);
+
+    for dir in READONLY_SYSTEM_DIRS {
+        cmd.arg("--ro-bind-try").arg(dir).arg(dir);
+    }
+
+    // `marshal sandbox` re-execs this same binary *inside* the namespace, so it must be
+    // reachable there too. A system install under `/usr` is already covered by the loop
+    // above; this exists for the equally normal case of running a locally built binary from
+    // an arbitrary path, which is not.
+    cmd.arg("--ro-bind-try").arg(&self_exe).arg(&self_exe);
+
+    if let Some(ca) = &endpoint.ca_cert {
+        cmd.arg("--ro-bind").arg(ca).arg(ca);
+    }
+
+    for extra in extra_binds {
+        cmd.arg("--bind").arg(extra).arg(extra);
+    }
+
+    cmd.arg("--bind")
+        .arg(socket)
+        .arg(socket)
         .arg("--unshare-net")
         .arg("--")
         .arg(self_exe)
@@ -270,8 +327,28 @@ pub fn bwrap_available() -> bool {
 /// and finding that out at launch time gives a far better message than the agent silently
 /// having no network.
 pub fn netns_available() -> bool {
+    // `/usr`, `/lib` and `/lib64` are bound read-only purely so there is a `true` binary and
+    // a dynamic linker to exec at all — this is a capability probe for `--unshare-net`, not a
+    // rehearsal of the real launch's bind list, so it deliberately stays minimal rather than
+    // tracking `READONLY_SYSTEM_DIRS`. `-try` tolerates whichever of `/lib`/`/lib64` this
+    // system does not have as a real directory.
     Command::new("bwrap")
-        .args(["--dev-bind", "/", "/", "--unshare-net", "--", "true"])
+        .args([
+            "--dev",
+            "/dev",
+            "--unshare-net",
+            "--ro-bind-try",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--",
+            "/usr/bin/true",
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -365,6 +442,7 @@ mod tests {
             &endpoint(),
             &["claude".to_string()],
             Some(&sock),
+            &[],
         )
         .unwrap();
 
@@ -385,10 +463,111 @@ mod tests {
     }
 
     #[test]
+    fn netns_no_longer_binds_the_whole_host_root() {
+        // The finding this fixes: `--dev-bind / /` put every Unix socket reachable from this
+        // user in scope — Docker's, Podman's, anything else under `/run` — which let an agent
+        // reach host-level control planes the namespace was supposed to remove it from.
+        let sock = std::path::PathBuf::from(format!("/tmp/mnb-noroot-{}.sock", std::process::id()));
+        std::fs::write(&sock, b"").unwrap();
+
+        let cmd = build_command_with(
+            Isolation::Netns,
+            "p",
+            1,
+            &endpoint(),
+            &["true".to_string()],
+            Some(&sock),
+            &[],
+        )
+        .unwrap();
+
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+
+        assert!(!args.contains(&"--dev-bind".to_string()), "{args:?}");
+        assert!(!args.contains(&"/run".to_string()), "{args:?}");
+        assert!(!args.contains(&"/var/run".to_string()), "{args:?}");
+        // The real host /tmp is not bound either — bwrap's own private, empty one is used
+        // instead, via `--tmpfs`, so another process's socket living there is unreachable too.
+        assert!(args.contains(&"--tmpfs".to_string()), "{args:?}");
+        assert!(!args.windows(2).any(|w| w[0] == "--bind" && w[1] == "/tmp"), "{args:?}");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn netns_binds_the_workspace_and_the_ca_cert_as_a_single_file() {
+        let sock = std::path::PathBuf::from(format!("/tmp/mnb-ws-{}.sock", std::process::id()));
+        std::fs::write(&sock, b"").unwrap();
+
+        let cmd = build_command_with(
+            Isolation::Netns,
+            "p",
+            1,
+            &endpoint(),
+            &["true".to_string()],
+            Some(&sock),
+            &[],
+        )
+        .unwrap();
+
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+
+        assert!(
+            args.windows(3).any(|w| w[0] == "--bind" && w[1] == cwd && w[2] == cwd),
+            "workspace must be bound read-write: {args:?}"
+        );
+        // The CA cert is bound by exact file path, read-only — never its parent directory,
+        // which on the default config layout also holds the CA private key.
+        let ca = endpoint().ca_cert.unwrap().to_string_lossy().into_owned();
+        assert!(
+            args.windows(3).any(|w| w[0] == "--ro-bind" && w[1] == ca && w[2] == ca),
+            "CA cert must be bound read-only by file path: {args:?}"
+        );
+        assert!(!args.contains(&"/etc/bot-marshal".to_string()), "{args:?}");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn netns_includes_extra_binds_read_write() {
+        let sock = std::path::PathBuf::from(format!("/tmp/mnb-extra-{}.sock", std::process::id()));
+        std::fs::write(&sock, b"").unwrap();
+        let extra = std::path::PathBuf::from("/opt/cache");
+
+        let cmd = build_command_with(
+            Isolation::Netns,
+            "p",
+            1,
+            &endpoint(),
+            &["true".to_string()],
+            Some(&sock),
+            std::slice::from_ref(&extra),
+        )
+        .unwrap();
+
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let extra = extra.to_string_lossy().into_owned();
+        assert!(
+            args.windows(3).any(|w| w[0] == "--bind" && w[1] == extra && w[2] == extra),
+            "{args:?}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[test]
     fn netns_without_a_unix_socket_is_refused_with_the_reason() {
-        let err =
-            build_command_with(Isolation::Netns, "p", 1, &endpoint(), &["true".to_string()], None)
-                .unwrap_err();
+        let err = build_command_with(
+            Isolation::Netns,
+            "p",
+            1,
+            &endpoint(),
+            &["true".to_string()],
+            None,
+            &[],
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unix_socket"), "{err}");
     }
 

@@ -34,6 +34,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0021](0021-identity-not-session.md) | "Identity", not "session" | Accepted |
 | [0022](0022-remove-transparent-capture.md) | Remove transparent (nftables REDIRECT) capture | Accepted |
 | [0023](0023-multi-port-explicit-listeners.md) | Multi-port explicit listeners, to restore `listener_port` identity | Accepted |
+| [0024](0024-netns-binds-an-explicit-allowlist.md) | `netns` isolation binds an explicit allowlist, not the whole host root | Accepted |
 
 ## Writing a new one
 
