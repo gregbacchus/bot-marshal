@@ -85,3 +85,9 @@ rebinding.
 
 `allow_private: true` is needed when the proxy and its clients are on a private network the
 proxy must also route out of — the docker example sets it for exactly that reason.
+
+`max_response_bytes` is a deployment-wide floor on response size, `0` meaning uncapped. It
+only fills a gap: a profile that declares its own `response_transforms.body` limit (see
+[Transforms](configuration/transforms.md)) uses that instead, entirely — the two are not
+combined. Set here rather than per-profile, it protects a profile that scans or forwards
+responses without ever having considered how large one could get.

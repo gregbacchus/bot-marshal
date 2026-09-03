@@ -372,3 +372,68 @@ profile:
     let BodyHandle::Buffered(body) = within_limit.body else { panic!("response was not buffered") };
     assert_eq!(body, "123456");
 }
+
+#[tokio::test]
+async fn upstream_max_response_bytes_applies_when_the_profile_declares_no_limit_of_its_own() {
+    // Finding 5's literal ask: `upstream.max_response_bytes` had zero consumers anywhere, so
+    // a zero-config profile had no response size ceiling at all regardless of what an operator
+    // set it to.
+    let c = cfg(r#"
+upstream:
+  max_response_bytes: 8
+profile:
+  default_action: deny
+"#);
+    let transforms = build_response_transforms(&c, "p", &c.profile).unwrap();
+    assert_eq!(transforms.len(), 1, "the upstream default must produce exactly one limiter");
+
+    let mut response = marshal_core::ResponseParts {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+        body: BodyHandle::Buffered(bytes::Bytes::from_static(b"way too long")),
+    };
+    transforms[0].apply(&request("api.example.com"), &mut response).await.unwrap();
+    assert_eq!(response.status, http::StatusCode::BAD_GATEWAY);
+    assert_eq!(response.headers["x-marshal-response-limited"], "fail");
+}
+
+#[tokio::test]
+async fn a_profiles_own_limit_takes_precedence_over_the_upstream_default() {
+    let c = cfg(r#"
+upstream:
+  max_response_bytes: 8
+profile:
+  default_action: deny
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 10
+        on_oversize: { action: replace, body: "trimmed" }
+"#);
+    let transforms = build_response_transforms(&c, "p", &c.profile).unwrap();
+    assert_eq!(
+        transforms.len(),
+        1,
+        "the profile's own limit must be used instead of the upstream default, not alongside it"
+    );
+
+    let mut response = marshal_core::ResponseParts {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+        body: BodyHandle::Buffered(bytes::Bytes::from_static(b"way too long for 10 bytes")),
+    };
+    transforms[0].apply(&request("api.example.com"), &mut response).await.unwrap();
+    // The profile's own action (replace) fired, not the upstream default's (fail) — proving
+    // it was the profile's limiter that ran, not a second one layered on top.
+    assert_eq!(response.headers["x-marshal-response-limited"], "replace");
+}
+
+#[tokio::test]
+async fn max_response_bytes_zero_stays_uncapped() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+"#);
+    let transforms = build_response_transforms(&c, "p", &c.profile).unwrap();
+    assert!(transforms.is_empty(), "the documented default of 0 must mean no cap at all");
+}

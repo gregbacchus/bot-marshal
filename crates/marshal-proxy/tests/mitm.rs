@@ -93,6 +93,35 @@ async fn interception_terminates_tls_and_forwards() {
 }
 
 #[tokio::test]
+async fn upstream_max_response_bytes_caps_a_profile_with_no_limit_of_its_own() {
+    // Finding 5: `upstream.max_response_bytes` had zero consumers, so a profile that never
+    // considered response size had no ceiling at all through the real interception pipeline.
+    let h = harness(
+        r#"
+upstream:
+  max_response_bytes: 10
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
+"#,
+        &[],
+    )
+    .await;
+    let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;
+
+    let resp = sender.send_request(request(h.upstream, "/large")).await.unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.headers()["x-marshal-response-limited"], "fail");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"], "response_too_large");
+}
+
+#[tokio::test]
 async fn an_oversized_response_is_truncated_on_the_wire() {
     let h = harness(
         r#"

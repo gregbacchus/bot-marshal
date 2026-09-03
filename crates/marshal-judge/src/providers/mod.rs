@@ -72,6 +72,8 @@ pub enum ProviderError {
     Http(#[from] hyper::Error),
     #[error("the provider returned {status}: {body}")]
     Status { status: u16, body: String },
+    #[error("the provider's response exceeded {limit} bytes without completing")]
+    ResponseTooLarge { limit: usize },
     #[error("the provider's response did not contain a verdict tool call")]
     NoToolCall,
     #[error("the verdict tool call was malformed: {0}")]

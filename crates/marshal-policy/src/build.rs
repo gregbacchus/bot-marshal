@@ -327,10 +327,21 @@ pub fn build_response_transforms(
             out.push(Arc::new(McpToolFilter::new(policy, *max_body_bytes)));
         }
     }
+    let mut has_explicit_limit = false;
     for transform in &profile.response_transforms.body {
         if let marshal_config::model::BodyTransform::Limit { max_bytes, on_oversize } = transform {
+            has_explicit_limit = true;
             out.push(Arc::new(ResponseLimiter::new(*max_bytes, on_oversize.clone())));
         }
+    }
+    // `upstream.max_response_bytes` is a deployment-wide floor, not a per-profile choice — it
+    // applies only when the profile hasn't already made its own choice via
+    // `response_transforms.body`, and `0` keeps its documented meaning of "uncapped".
+    if !has_explicit_limit && cfg.upstream.max_response_bytes > 0 {
+        out.push(Arc::new(ResponseLimiter::new(
+            cfg.upstream.max_response_bytes as usize,
+            marshal_config::model::ResponseOversizeAction::default(),
+        )));
     }
     Ok(out)
 }

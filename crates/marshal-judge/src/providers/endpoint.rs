@@ -117,6 +117,12 @@ impl Endpoint {
     }
 }
 
+/// A verdict is a few hundred bytes of JSON; a provider or a compromised endpoint sending
+/// megabytes has nothing legitimate to say. Capped independently of `timeout` — a slow trickle
+/// under this size still completes within the timeout, and this exists for the orthogonal
+/// case of a response that never stops sending.
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
 /// Connect, send one JSON request, parse one JSON response. Every provider so far is a
 /// single POST-and-parse over HTTP(S), so this is the whole client: resolve, connect,
 /// optionally TLS, send, check status, parse. Connection reuse is an optimisation deferred
@@ -138,7 +144,19 @@ pub(crate) async fn post_json(
 
     let resp = sender.send_request(req).await?;
     let status = resp.status();
-    let body = resp.into_body().collect().await?.to_bytes();
+
+    let mut body = bytes::BytesMut::new();
+    let mut incoming = resp.into_body();
+    while let Some(frame) = incoming.frame().await {
+        let frame = frame?;
+        if let Some(data) = frame.data_ref() {
+            if body.len() + data.len() > MAX_RESPONSE_BYTES {
+                return Err(ProviderError::ResponseTooLarge { limit: MAX_RESPONSE_BYTES });
+            }
+            body.extend_from_slice(data);
+        }
+    }
+    let body = body.freeze();
 
     if !status.is_success() {
         return Err(ProviderError::Status {
@@ -221,5 +239,34 @@ mod tests {
     fn uri_builds_the_full_request_url() {
         let e = Endpoint::parse("https://api.openai.com").unwrap();
         assert_eq!(e.uri("/v1/chat/completions"), "https://api.openai.com:443/v1/chat/completions");
+    }
+
+    #[tokio::test]
+    async fn a_response_over_the_size_cap_is_refused_rather_than_buffered_without_bound() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Drain the request, then answer with a body well past MAX_RESPONSE_BYTES. The
+            // provider is malicious or broken either way; the point is the proxy must stop
+            // reading rather than buffer all of it.
+            let mut buf = [0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+            let oversized = "x".repeat(MAX_RESPONSE_BYTES + 1024);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", oversized.len());
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(oversized.as_bytes()).await;
+        });
+
+        let endpoint = Endpoint { https: false, host: "127.0.0.1".into(), port: addr.port() };
+        let req = json_post_request(&endpoint, "/", &[], serde_json::json!({}));
+        let result = post_json(&endpoint, &super::super::default_tls_config(), req).await;
+
+        assert!(
+            matches!(result, Err(ProviderError::ResponseTooLarge { .. })),
+            "expected ResponseTooLarge, got {result:?}"
+        );
     }
 }

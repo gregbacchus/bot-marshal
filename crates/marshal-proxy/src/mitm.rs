@@ -436,6 +436,16 @@ fn is_event_stream(headers: &hyper::HeaderMap) -> bool {
         .is_some_and(|v| v.starts_with("text/event-stream"))
 }
 
+/// Cap on `pending` in [`filter_event_stream`], independent of any configured
+/// `response_transforms.body` limit — which cannot apply to SSE at all, since a limit
+/// transform needs to buffer the whole body and this must keep streaming. Without this, an
+/// upstream that never sends a blank-line event terminator (accidentally, or as a deliberate
+/// resource-exhaustion attempt against the proxy) grows `pending` without bound. When the cap
+/// is hit the accumulated bytes are flushed as one chunk and filtering resumes on a fresh
+/// buffer, so a single pathological "event" degrades to passing through unfiltered rather
+/// than consuming unbounded memory.
+const MAX_PENDING_SSE_EVENT_BYTES: usize = 1024 * 1024;
+
 /// Rewrite an SSE body chunk by chunk, so it keeps streaming.
 ///
 /// A chunk boundary can fall mid-event, so a partial trailing event is held back until the
@@ -473,11 +483,11 @@ fn filter_event_stream(body: Incoming, handler: Arc<MitmHandler>, host: String) 
                         let Ok(data) = frame.into_data() else { continue };
                         state.pending.push_str(&String::from_utf8_lossy(&data));
 
-                        // Only whole events (terminated by a blank line) are safe to parse.
-                        let Some(end) = state.pending.rfind("\n\n").map(|i| i + 2) else {
+                        let Some(ready) =
+                            next_sse_chunk(&mut state.pending, MAX_PENDING_SSE_EVENT_BYTES)
+                        else {
                             continue;
                         };
-                        let ready: String = state.pending.drain(..end).collect();
                         let out = rewrite(&handler, &host, ready);
                         return Some((Ok(hyper::body::Frame::data(Bytes::from(out))), state));
                     }
@@ -496,6 +506,29 @@ fn filter_event_stream(body: Incoming, handler: Arc<MitmHandler>, host: String) 
     });
 
     BodyExt::boxed(http_body_util::StreamBody::new(stream))
+}
+
+/// Decide what, if anything, is ready to emit from `pending` after new bytes were appended to
+/// it: everything up to the last blank-line event terminator (batching multiple events that
+/// arrived in one read), or — once `pending` has grown past `cap` with no terminator in
+/// sight — everything held so far, flushed unfiltered. `None` means keep accumulating.
+///
+/// Pulled out of `filter_event_stream` as a pure function specifically so the cap can be unit
+/// tested without a real hyper body or network connection.
+fn next_sse_chunk(pending: &mut String, cap: usize) -> Option<String> {
+    if let Some(end) = pending.rfind("\n\n").map(|i| i + 2) {
+        return Some(pending.drain(..end).collect());
+    }
+    if pending.len() > cap {
+        tracing::warn!(
+            bytes = pending.len(),
+            cap,
+            "SSE event exceeded the buffering cap with no terminator; flushing unfiltered \
+             rather than growing further"
+        );
+        return Some(std::mem::take(pending));
+    }
+    None
 }
 
 fn rewrite(handler: &MitmHandler, host: &str, mut chunk: String) -> String {
@@ -688,6 +721,41 @@ async fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_sse_chunk_waits_for_a_terminator() {
+        let mut pending = "data: partial".to_string();
+        assert_eq!(next_sse_chunk(&mut pending, 1024), None);
+        assert_eq!(pending, "data: partial", "nothing should be consumed while waiting");
+    }
+
+    #[test]
+    fn next_sse_chunk_emits_a_complete_event() {
+        let mut pending = "data: hello\n\n".to_string();
+        assert_eq!(next_sse_chunk(&mut pending, 1024), Some("data: hello\n\n".to_string()));
+        assert_eq!(pending, "", "the emitted bytes must be drained");
+    }
+
+    #[test]
+    fn next_sse_chunk_batches_multiple_ready_events_in_one_read() {
+        let mut pending = "data: a\n\ndata: b\n\ndata: partial".to_string();
+        let ready = next_sse_chunk(&mut pending, 1024).unwrap();
+        assert_eq!(ready, "data: a\n\ndata: b\n\n");
+        assert_eq!(pending, "data: partial", "the trailing partial event stays held");
+    }
+
+    #[test]
+    fn next_sse_chunk_flushes_once_the_cap_is_exceeded_with_no_terminator() {
+        // The exact property finding 5 is about: an upstream that never sends a blank line
+        // must not be able to grow this buffer without bound.
+        let mut pending = "x".repeat(100);
+        assert_eq!(next_sse_chunk(&mut pending, 100), None, "exactly at the cap: keep waiting");
+
+        pending.push('x');
+        let flushed = next_sse_chunk(&mut pending, 100).unwrap();
+        assert_eq!(flushed.len(), 101, "everything held must be flushed, not truncated");
+        assert_eq!(pending, "", "the buffer must actually be cleared, not just read");
+    }
 
     #[test]
     fn hop_by_hop_headers_are_stripped() {
