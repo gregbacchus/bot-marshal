@@ -11,6 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+http.workspace = true
 marshal-core.workspace = true
 marshal-config.workspace = true
 marshal-policy.workspace = true

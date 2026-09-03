@@ -77,16 +77,28 @@ including nothing at all.
 | field | |
 |---|---|
 | `source` | `{ type: env, var: ... }` or `{ type: file, path: ... }` |
-| `inject` | how to construct the `Authorization` header — see below |
+| `inject` | how, and on which header, to set the credential — see below |
 | `rules` | the hosts this swap applies to — a credential is never offered to a host that shouldn't see it |
 
-Two injection kinds:
+Three injection kinds:
 
 * **`{ type: basic, username: "..." }`** — `Authorization: Basic base64("{username}:{secret}")`,
   what `git`, most package registries, and container registry logins use
   ([RFC 7617](https://www.rfc-editor.org/rfc/rfc7617)).
 * **`{ type: bearer }`** — `Authorization: Bearer {secret}`, a plain API token, e.g. an
   `npm` `_authToken` or a GitHub API PAT.
+* **`{ type: header, name: "..." }`** — `{name}: {secret}`, the raw secret value set on an
+  arbitrary header. Covers the common API-key pattern where a service defines its own header
+  (`X-Api-Key`, `Api-Key`, or a vendor-specific name) instead of using `Authorization` at all.
+
+```yaml
+request_transforms:
+  secrets:
+    - name: SERVICE_API_KEY
+      source: { type: env, var: SERVICE_API_KEY }
+      inject: { type: header, name: "X-Api-Key" }
+      rules: [{ host: "api.example.com" }]
+```
 
 Secrets are redacted in every audit path and log line.
 

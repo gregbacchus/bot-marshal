@@ -207,10 +207,17 @@ async fn upstream_service(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_owned();
+            let api_key = req
+                .headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
             let query = req.uri().query().unwrap_or("").to_owned();
             let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
             let doc = serde_json::json!({
                 "authorization": auth,
+                "x-api-key": api_key,
                 "query": query,
                 "body": String::from_utf8_lossy(&body),
             });

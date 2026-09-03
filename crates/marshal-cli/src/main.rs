@@ -1218,6 +1218,15 @@ fn build_injector(
         let injection = match spec.inject {
             InjectSpec::Basic { username } => marshal_secrets::Injection::Basic { username },
             InjectSpec::Bearer => marshal_secrets::Injection::Bearer,
+            InjectSpec::Header { name: header_name } => {
+                let name = http::HeaderName::try_from(header_name.as_str()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "request_transforms.secrets[{i}].inject.name: invalid header name \
+                         {header_name:?}: {e}"
+                    )
+                })?;
+                marshal_secrets::Injection::Header { name }
+            }
         };
 
         swaps.push(SecretSwap { name, source, injection, hosts });
@@ -1241,7 +1250,7 @@ struct SecretSpec {
     #[serde(default)]
     name: Option<String>,
     source: SecretSourceSpec,
-    /// What to set `Authorization` to on every allowed request to `rules` — unconditionally,
+    /// What credential header to set on every allowed request to `rules` — unconditionally,
     /// replacing whatever the client sent, regardless of whether it sent anything.
     inject: InjectSpec,
     #[serde(default)]
@@ -1256,6 +1265,9 @@ enum InjectSpec {
     Basic { username: String },
     /// `Authorization: Bearer {secret}` — a plain API token.
     Bearer,
+    /// `{name}: {secret}` — an arbitrary header set to the raw secret value, for services
+    /// that use their own API-key header instead of `Authorization`.
+    Header { name: String },
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1491,5 +1503,39 @@ request_transforms:
         );
         let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
         assert!(!injector.is_empty());
+    }
+
+    #[test]
+    fn a_header_inject_swap_builds() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: env, var: X }
+      inject: { type: header, name: "X-Api-Key" }
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        assert!(!injector.is_empty());
+    }
+
+    #[test]
+    fn a_header_inject_swap_rejects_an_invalid_header_name() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: env, var: X }
+      inject: { type: header, name: "not a valid header" }
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
+        assert!(err.to_string().contains("invalid header name"), "{err}");
     }
 }

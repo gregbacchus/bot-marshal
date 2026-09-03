@@ -19,7 +19,7 @@ use marshal_core::{
 };
 use marshal_policy::HostMatcher;
 
-/// How the credential is formatted into `Authorization`.
+/// How the credential is formatted and which header it is set on.
 #[derive(Debug)]
 pub enum Injection {
     /// `Authorization: Basic base64("{username}:{secret}")` — what git, most package
@@ -27,6 +27,9 @@ pub enum Injection {
     Basic { username: String },
     /// `Authorization: Bearer {secret}` — a plain API token.
     Bearer,
+    /// `{header}: {secret}` — the common shape for a service's own API-key header
+    /// (`X-Api-Key`, `Api-Key`, and every vendor-specific variant of the same idea).
+    Header { name: http::HeaderName },
 }
 
 /// One credential rule: what to inject ([`Injection`]), resolved from ([`SecretSource`]), and
@@ -96,15 +99,21 @@ impl RequestTransform for SecretInjector {
             }
 
             let real = swap.source.resolve().await?;
-            let value = match &swap.injection {
-                Injection::Basic { username } => format!(
-                    "Basic {}",
-                    base64_encode(format!("{username}:{}", real.expose()).as_bytes())
+            let (header, value) = match &swap.injection {
+                Injection::Basic { username } => (
+                    http::header::AUTHORIZATION,
+                    format!(
+                        "Basic {}",
+                        base64_encode(format!("{username}:{}", real.expose()).as_bytes())
+                    ),
                 ),
-                Injection::Bearer => format!("Bearer {}", real.expose()),
+                Injection::Bearer => {
+                    (http::header::AUTHORIZATION, format!("Bearer {}", real.expose()))
+                }
+                Injection::Header { name } => (name.clone(), real.expose().to_owned()),
             };
             if let Ok(v) = http::HeaderValue::from_str(&value) {
-                cx.headers.insert(http::header::AUTHORIZATION, v);
+                cx.headers.insert(header, v);
                 // The name, never the value.
                 cx.evidence.record(format!("secrets.injected.{}", swap.name), true);
             }

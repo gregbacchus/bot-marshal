@@ -1178,6 +1178,7 @@ dependencies = [
  "clap",
  "hickory-resolver",
  "hickory-server",
+ "http",
  "humantime-serde",
  "marshal-audit",
  "marshal-config",

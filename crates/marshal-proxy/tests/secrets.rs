@@ -230,6 +230,22 @@ async fn bearer_injection_sets_the_header_the_client_never_sent_at_all() {
 }
 
 #[tokio::test]
+async fn header_injection_sets_an_arbitrary_header_the_client_never_sent_at_all() {
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::Header { name: http::header::HeaderName::from_static("x-api-key") })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
+
+    assert_eq!(seen["x-api-key"], REAL_SECRET);
+    // Unrelated to Authorization — this injection kind never touches it.
+    assert_eq!(seen["authorization"], "");
+}
+
+#[tokio::test]
 async fn injection_overwrites_whatever_authorization_the_client_did_send() {
     // If a client sends its own (irrelevant) Authorization header, injection replaces it —
     // the configured credential is authoritative for this host, not a fallback.
