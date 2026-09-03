@@ -70,6 +70,9 @@ request_transforms:
 git clone https://github.com/owner/repo   # no credential anywhere in the command
 ```
 
+See [Secret injection examples](secret-injection-examples.md) for worked configs — OpenAI,
+Anthropic, OpenRouter, Google, Azure, Claude Code, Codex, GitHub, Slack, Stripe, and others.
+
 Every request the policy chain allows to `github.com` gets `Authorization: Basic
 base64("x-access-token:<secret>")` set unconditionally — replacing whatever the client sent,
 including nothing at all.

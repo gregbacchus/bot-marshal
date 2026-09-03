@@ -59,7 +59,7 @@ Full documentation lives in **[docs/](docs/)**.
 | [Getting started](docs/getting-started.md) | build, configure, first request |
 | [Concepts](docs/concepts.md) | capture → identity → policy chain → transforms → audit |
 | [CLI](docs/cli.md) | every subcommand and flag |
-| [Configuration](docs/configuration/) | [profiles](docs/configuration/profiles.md) · [policy layers](docs/configuration/policy-layers.md) · [bundles](docs/configuration/bundles.md) · [transforms](docs/configuration/transforms.md) · [identity](docs/configuration/identity.md) |
+| [Configuration](docs/configuration/) | [profiles](docs/configuration/profiles.md) · [policy layers](docs/configuration/policy-layers.md) · [bundles](docs/configuration/bundles.md) · [transforms](docs/configuration/transforms.md) · [identity](docs/configuration/identity.md) · [secret injection examples](docs/configuration/secret-injection-examples.md) |
 | [Capture](docs/capture.md) | explicit, DNS |
 | [Observability](docs/observability.md) | logs, audit trail, metrics |
 | [Operations](docs/operations.md) | management API, hot reload, warn-mode rollout |

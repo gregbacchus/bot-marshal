@@ -7,6 +7,7 @@ every restart.
 * [Policy layers](policy-layers.md) — `denylist`, `allowlist`, `rules`, `dlp`, `mcp`, `judge`.
 * [Bundles](bundles.md) — named, reusable allow-lists.
 * [Transforms](transforms.md) — header setting/filtering, secret injection, response rewriting.
+* [Secret injection examples](secret-injection-examples.md) — worked configs for OpenAI, Anthropic, OpenRouter, Claude Code, Codex, GitHub, and others.
 * [Identity](identity.md) — which agent is connecting, and `marshal run`.
 
 ## Where the config lives
