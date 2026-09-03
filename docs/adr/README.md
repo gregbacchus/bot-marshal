@@ -40,6 +40,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0027](0027-secret-injection-is-unconditional-only.md) | Secret injection is unconditional injection only | Accepted |
 | [0028](0028-sigv4-buffers-the-body.md) | SigV4 injection buffers the body, capped, as a declared exception | Accepted |
 | [0029](0029-the-redaction-set-is-learned-at-runtime.md) | The redaction set is learned at runtime, not sealed at startup | Accepted |
+| [0030](0030-oauth2-is-a-secret-source.md) | OAuth2 is a secret source, not an injection kind | Accepted |
 
 ## Writing a new one
 

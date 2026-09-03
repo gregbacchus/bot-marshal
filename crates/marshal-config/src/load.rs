@@ -74,10 +74,11 @@ pub fn load(path: impl AsRef<Path>) -> Result<Config, LoadError> {
     Ok(cfg)
 }
 
-/// Resolves `profiles_path`/`bundles_path` against the base file's directory. `~/` expands
-/// against `$HOME` first; an already-absolute result then wins outright, since joining an
-/// absolute path onto `base` is a no-op — `base` only ever contributes for a relative path.
-fn resolve_dir(base: &Path, raw: &str) -> PathBuf {
+/// Resolves a directory named in the config — `profiles_path`, `bundles_path`, `state_dir` —
+/// against the base file's own directory. `~/` expands against `$HOME` first; an
+/// already-absolute result then wins outright, since joining an absolute path onto `base` is a
+/// no-op — `base` only ever contributes for a relative path.
+pub fn resolve_dir(base: &Path, raw: &str) -> PathBuf {
     base.join(expand_tilde(raw, std::env::var_os("HOME")))
 }
 

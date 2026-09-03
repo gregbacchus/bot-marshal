@@ -10,6 +10,6 @@ pub mod load;
 pub mod model;
 pub mod validate;
 
-pub use load::{LoadError, load};
+pub use load::{LoadError, load, resolve_dir};
 pub use model::{BodyTransform, Config, Profile, RequestTransforms, ResponseTransforms};
 pub use validate::{Diagnostic, Severity, validate};

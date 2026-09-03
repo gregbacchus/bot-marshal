@@ -54,6 +54,8 @@ upstream:
   allow_private: false
   max_response_bytes: 0
 
+state_dir: "~/.local/state/bot-marshal"   # optional; only OAuth2 enrolment needs it
+
 profile:                   # the embedded fallback — required, see Profiles
   default_action: deny
   request_transforms:
@@ -114,6 +116,30 @@ Relocating a directory doesn't loosen anything: a file found there is still dese
 nothing but a profile, bundle, or transform bundle, so the same structural guarantees apply
 regardless of where the path points.
 
+### `state_dir`
+
+Everything above is configuration marshal is *given*. `state_dir` is the one directory marshal
+*owns*: where it keeps state it produced itself, which today means OAuth2 refresh tokens
+obtained by enrolment. Same resolution rules as the paths above — relative to this file, `~/`
+expands against `$HOME`.
+
+```yaml
+state_dir: "~/.local/state/bot-marshal"   # a service would use /var/lib/bot-marshal
+```
+
+Leave it unset and marshal persists nothing: every credential it mints lives only as long as
+the process, which is fine for `grant: client_credentials` and `grant: refresh_token` and
+makes the interactive OAuth2 grants unusable — those are refused at startup rather than at the
+first request.
+
+The directory holds live credentials, so marshal creates it `0700` and each file `0600`, and
+**refuses to use a directory anyone else can read** rather than quietly tightening it: a
+refresh token that has already been readable by another local user wants re-enrolling, not
+locking down after the fact.
+
+Changing `state_dir` takes effect on restart, not on reload — moving live credentials to a new
+directory underneath a running process would be worse than making the operator say when.
+
 ## What gets written to disk
 
 | what | where | notes |
@@ -122,8 +148,9 @@ regardless of where the path points.
 | CA private key | `tls.ca_key` | created by `ca init` at mode `0600`; whoever holds it can impersonate every site the agent talks to |
 | Unix socket | `listeners.explicit.unix_socket` | recreated on every start — a leftover socket from a previous run is removed automatically, never left to block a restart |
 | Audit log | `--audit-log <path>`, optional | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
+| OAuth2 refresh tokens | `<state_dir>/oauth/<name>.json`, optional | mode `0600` in a `0700` directory; written by `marshal secrets oauth login` and rewritten whenever a provider rotates the token |
 
-That is the complete list. There is no database, no cache directory, and no other state
-persisted between runs — `/v1/identities` and `/v1/metrics` counters, and the judge's response
-cache, all live in memory and reset on restart. Files a `file`-type secret source or a
-`tls.upstream_ca_certs` entry points at are read, never written.
+That is the complete list. There is no database and no cache directory — `/v1/identities` and
+`/v1/metrics` counters, the judge's response cache, and OAuth2 *access* tokens all live in
+memory and reset on restart. Files a `file`-type secret source or a `tls.upstream_ca_certs`
+entry points at are read, never written.

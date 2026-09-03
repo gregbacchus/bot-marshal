@@ -17,11 +17,17 @@ audited separately.
 | M5 | MCP tool-level policy | done |
 | M6 | Transparent (nftables) and DNS interception | done, later partially reverted¹ |
 | M7 | Management API, hot reload, warn mode, metrics | done² |
+| M8 | OAuth2 credential acquisition | partial³ |
 
 ¹ Transparent (nftables REDIRECT) capture was removed after M6 — see
 [Removed](#removed) below. DNS interception is unaffected.
 
 ² OpenTelemetry export is not implemented — see below.
+
+³ `client_credentials` and `refresh_token` work end to end. The interactive grants
+(`authorization_code`, `device_code`) are configurable and refuse at startup with a message
+saying so, because `marshal secrets oauth login` does not exist yet. `jwt_bearer` and
+`private_key_jwt` are not implemented, and neither is in-band capture — see below.
 
 ## Removed
 
@@ -66,6 +72,22 @@ not start end to end as written.
 **Rego rules via `regorus`.** The `rules` layer is CEL only. Rego is designed for as an opt-in
 for anyone already running OPA policy.
 
+**OAuth2 enrolment (`marshal secrets oauth login`).** `grant: authorization_code` and
+`grant: device_code` are modelled, validated, and refuse a request with a message telling the
+operator to enrol — but the command that would do the enrolling is not written. Both grants
+need a one-time interactive step (a browser redirect capturing `?code=`, or an RFC 8628 device
+poll) that produces the refresh token everything else already knows how to use.
+
+**OAuth2 `jwt_bearer` and `private_key_jwt`.** RFC 7523: sign an assertion with a private key
+and exchange it, which is how Google service accounts, Salesforce and Snowflake authenticate.
+Needs RS256/ES256 signing, which `marshal-secrets` has no dependency for yet.
+
+**In-band OAuth2 capture.** The agent driving an authorization flow *through* the proxy, with
+marshal substituting its own PKCE challenge, intercepting the redirect, completing the exchange
+itself, and handing the agent a flow that completes on nothing usable. The interesting version
+of the feature, and a much larger change: it needs a request-path component that can *answer* a
+request rather than forward it, which today only a denial can do.
+
 ## Architecture
 
 `marshal-core` holds the traits and types and depends on no other crate in the workspace;
@@ -78,7 +100,7 @@ without a network.
 | `marshal-config` | layered YAML load, the `profiles/`/`bundles/`/`transforms/` convention, validation |
 | `marshal-tls` | CA load/generate, leaf minting, cache, rustls configs |
 | `marshal-policy` | chain runner and the denylist, allowlist, rules, dlp, mcp layers |
-| `marshal-secrets` | env/file sources, TTL cache, injection and redaction |
+| `marshal-secrets` | env/file/oauth2 sources, TTL cache, token store, injection and redaction |
 | `marshal-judge` | the LLM judge layer: providers, structured verdicts, cache, breaker |
 | `marshal-launch` | `marshal run`: netns and cgroup isolation, identity registration |
 | `marshal-http` | the upstream guard, and the one-shot client for calls marshal makes as itself |

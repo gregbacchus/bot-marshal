@@ -280,11 +280,18 @@ async fn serve(
     log_detail: LogDetail,
     audit_log: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    // Created before anything that could produce a secret, and never replaced — every audit
+    // sink below holds a clone, and a credential minted at runtime teaches *this* redactor,
+    // which is what makes it reach those clones (ADR-0029). A reload rebuilds the runtime
+    // around the same redactor for the same reason.
+    let redactor = marshal_core::Redactor::default();
+
     // Startup and reload go through the same builder, so a reload cannot succeed on a
     // config the proxy would have refused to start with — or the reverse.
     let build = {
         let config_path = config_path.to_path_buf();
-        move || build_runtime(&config_path, profile_override.clone())
+        let redactor = redactor.clone();
+        move || build_runtime(&config_path, profile_override.clone(), &redactor)
     };
     let build = Arc::new(build);
 
@@ -301,17 +308,15 @@ async fn serve(
     // the records belonging to its own profile. Seeding after the first request would also
     // leave a window in which a secret could reach the audit log.
     let mut secret_names: Vec<String> = Vec::new();
-    let mut secret_values: Vec<String> = Vec::new();
     for injector in &injectors {
         for (name, value) in injector.resolve_all().await {
+            redactor.learn(&name, value.expose());
             secret_names.push(name);
-            secret_values.push(value.expose().to_owned());
         }
     }
     if !secret_names.is_empty() {
         tracing::info!(secrets = ?secret_names, "boundary secret injection active");
     }
-    let redactor = marshal_core::Redactor::new(secret_values);
 
     // Per-request lines go through the log at whatever detail `--log-detail` asks for — see
     // `init_tracing`, which also pins the "access" target's level so the general `--log`
@@ -443,6 +448,7 @@ async fn serve(
 fn build_runtime(
     config_path: &std::path::Path,
     profile_override: Option<String>,
+    redactor: &marshal_core::Redactor,
 ) -> anyhow::Result<(
     marshal_proxy::runtime::Runtime,
     marshal_config::model::Config,
@@ -480,6 +486,8 @@ fn build_runtime(
         HashMap::new();
     let mut injectors: Vec<Arc<SecretInjector>> = Vec::new();
 
+    let deps = secret_deps(config_path, &cfg, redactor)?;
+
     let build_one = |label: &str,
                      profile: &marshal_config::model::Profile|
      -> anyhow::Result<(
@@ -492,7 +500,7 @@ fn build_runtime(
         let response = marshal_policy::build_response_transforms(&cfg, label, profile)?;
         let mut request = marshal_policy::build_request_transforms(&cfg, label, profile)?;
         let resolved = marshal_policy::resolve_profile(&cfg, profile)?;
-        let injector = Arc::new(build_injector(&resolved, &cfg)?);
+        let injector = Arc::new(build_injector(&resolved, &cfg, &deps)?);
         let injector = if injector.is_empty() {
             None
         } else {
@@ -514,8 +522,13 @@ fn build_runtime(
         if !response.is_empty() {
             response_transforms.insert(Arc::from(name.as_str()), response);
         }
-        if let Some(injector) = injector {
+        // Keyed on the transforms, not on the injector: a profile with `set_headers` and no
+        // secrets still has request transforms, and gating the insert on the injector dropped
+        // them silently.
+        if !request.is_empty() {
             request_transforms.insert(Arc::from(name.as_str()), request);
+        }
+        if let Some(injector) = injector {
             injectors.push(injector);
         }
     }
@@ -1102,6 +1115,16 @@ fn config_check(path: &std::path::Path) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // `validate` works on the config model, in which `request_transforms.secrets` is an
+    // untyped `serde_json::Value` — the real schema lives in `SecretSpec` and is only applied
+    // when the injector is built. Build them here too, so a misspelled field is caught by the
+    // command whose whole job is to catch it rather than at the next start.
+    if let Err(e) = check_secret_specs(path, &cfg) {
+        eprintln!("error: {e:#}");
+        eprintln!("\n1 error(s), {warnings} warning(s)");
+        return ExitCode::FAILURE;
+    }
+
     println!(
         // +1 for the embedded `profile:`, always present but not part of `cfg.profiles` —
         // that map is exclusively the *named* ones under `profiles_path`.
@@ -1111,6 +1134,29 @@ fn config_check(path: &std::path::Path) -> ExitCode {
         cfg.bundles.len()
     );
     ExitCode::SUCCESS
+}
+
+/// Deserialise and build every profile's secret swaps, discarding the result.
+///
+/// Nothing here touches the network or the filesystem: constructing a source parses its
+/// configuration, it does not resolve it. So this stays as side-effect-free as the rest of
+/// `config check`, while covering a schema the validator cannot see.
+fn check_secret_specs(
+    path: &std::path::Path,
+    cfg: &marshal_config::model::Config,
+) -> anyhow::Result<()> {
+    let deps = secret_deps(path, cfg, &marshal_core::Redactor::default())?;
+    let check = |label: &str, profile: &marshal_config::model::Profile| -> anyhow::Result<()> {
+        let resolved = marshal_policy::resolve_profile(cfg, profile)?;
+        build_injector(&resolved, cfg, &deps)
+            .map_err(|e| anyhow::anyhow!("profiles.{label}.request_transforms: {e}"))?;
+        Ok(())
+    };
+    check("<fallback>", &cfg.profile)?;
+    for (name, profile) in &cfg.profiles {
+        check(name, profile)?;
+    }
+    Ok(())
 }
 
 /// Resolve the configured CA paths, expanding a leading `~`.
@@ -1193,6 +1239,7 @@ fn ca_command(config_path: &std::path::Path, cmd: CaCommand) -> ExitCode {
 fn build_injector(
     profile: &marshal_config::model::Profile,
     cfg: &marshal_config::model::Config,
+    deps: &SecretDeps,
 ) -> anyhow::Result<SecretInjector> {
     use marshal_core::SecretSource;
 
@@ -1203,6 +1250,12 @@ fn build_injector(
 
         let hosts = build_host_matcher(&spec.rules, cfg)?;
 
+        // An `oauth2` source keys its token store and its redaction label on the swap name,
+        // so it has to know that name at construction — before the `name.unwrap_or(default)`
+        // below, which derives it from the source. A swap using one therefore has to say what
+        // it is called; there is nothing sensible to derive it from.
+        let swap_label = spec.name.clone().unwrap_or_else(|| format!("secrets[{i}]"));
+
         // `source` is required for every kind except `sigv4`, which carries its own two (or
         // three) secrets instead — one `source:` value cannot express an access key pair.
         let require_source = || -> anyhow::Result<Arc<dyn SecretSource>> {
@@ -1211,7 +1264,7 @@ fn build_injector(
                     "request_transforms.secrets[{i}]: `source` is required for this `inject.type`"
                 )
             })?;
-            Ok(build_source(s))
+            build_source(s, deps, &swap_label)
         };
 
         let injection = match &spec.inject {
@@ -1249,9 +1302,12 @@ fn build_injector(
                     );
                 }
                 marshal_secrets::Injection::SigV4 {
-                    access_key_id: build_source(access_key_id),
-                    secret_access_key: build_source(secret_access_key),
-                    session_token: session_token.as_ref().map(build_source),
+                    access_key_id: build_source(access_key_id, deps, &swap_label)?,
+                    secret_access_key: build_source(secret_access_key, deps, &swap_label)?,
+                    session_token: session_token
+                        .as_ref()
+                        .map(|t| build_source(t, deps, &swap_label))
+                        .transpose()?,
                     region: region.clone(),
                     service: service.clone(),
                     body_cap: max_body_bytes.unwrap_or(1_048_576),
@@ -1275,8 +1331,54 @@ fn build_injector(
     Ok(SecretInjector::new(swaps))
 }
 
-fn build_source(spec: &SecretSourceSpec) -> Arc<dyn marshal_core::SecretSource> {
-    match spec {
+/// Everything a secret source might need that is not in its own config: the shared token
+/// store, the TLS config and guard for calls marshal makes as itself, and the redactor a
+/// runtime-minted credential must teach before it can escape.
+struct SecretDeps {
+    store: Arc<marshal_secrets::TokenStore>,
+    tls: Arc<rustls::ClientConfig>,
+    guard: Option<Arc<marshal_http::UpstreamGuard>>,
+    redactor: marshal_core::Redactor,
+}
+
+impl std::fmt::Debug for SecretDeps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretDeps").field("store", &self.store).finish_non_exhaustive()
+    }
+}
+
+fn secret_deps(
+    config_path: &std::path::Path,
+    cfg: &marshal_config::model::Config,
+    redactor: &marshal_core::Redactor,
+) -> anyhow::Result<SecretDeps> {
+    let state_dir = cfg.state_dir.as_ref().map(|raw| {
+        marshal_config::resolve_dir(
+            config_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+            raw,
+        )
+    });
+    Ok(SecretDeps {
+        // `global` so a reload does not discard live tokens: reloading is a configuration
+        // operation, and re-minting every credential in the process is not one.
+        store: marshal_secrets::TokenStore::global(state_dir),
+        tls: marshal_http::default_tls_config(),
+        // The same denylist proxied traffic obeys. A token endpoint URL comes from config and
+        // names a third party; one pointing at link-local is an SSRF, not a configuration.
+        guard: Some(Arc::new(marshal_http::UpstreamGuard::new(
+            &cfg.upstream.deny_cidrs,
+            cfg.upstream.allow_private,
+        )?)),
+        redactor: redactor.clone(),
+    })
+}
+
+fn build_source(
+    spec: &SecretSourceSpec,
+    deps: &SecretDeps,
+    swap_label: &str,
+) -> anyhow::Result<Arc<dyn marshal_core::SecretSource>> {
+    Ok(match spec {
         SecretSourceSpec::Env { var } => Arc::new(marshal_secrets::EnvSource::new(var)),
         SecretSourceSpec::File { path, ttl, json_key } => {
             Arc::new(marshal_secrets::FileSource::new(
@@ -1285,7 +1387,78 @@ fn build_source(spec: &SecretSourceSpec) -> Arc<dyn marshal_core::SecretSource> 
                 json_key.clone(),
             ))
         }
-    }
+        SecretSourceSpec::Oauth2(spec) => Arc::new(build_oauth2_source(spec, deps, swap_label)?),
+    })
+}
+
+fn build_oauth2_source(
+    spec: &Oauth2Spec,
+    deps: &SecretDeps,
+    swap_label: &str,
+) -> anyhow::Result<marshal_secrets::Oauth2Source> {
+    use marshal_secrets::{ClientAuth, Grant, Oauth2Config};
+
+    let client_secret = |what: &str| -> anyhow::Result<Arc<dyn marshal_core::SecretSource>> {
+        let src = spec.client_secret.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("source.client_secret is required for `client_auth: {what}`")
+        })?;
+        build_source(src, deps, swap_label)
+    };
+    let client_auth = match spec.client_auth {
+        ClientAuthSpec::None => ClientAuth::None,
+        ClientAuthSpec::ClientSecretBasic => {
+            ClientAuth::ClientSecretBasic { secret: client_secret("client_secret_basic")? }
+        }
+        ClientAuthSpec::ClientSecretPost => {
+            ClientAuth::ClientSecretPost { secret: client_secret("client_secret_post")? }
+        }
+    };
+
+    let grant = match spec.grant {
+        GrantSpec::ClientCredentials => {
+            anyhow::ensure!(
+                spec.refresh_token.is_none(),
+                "source.refresh_token has no effect with `grant: client_credentials`"
+            );
+            Grant::ClientCredentials
+        }
+        GrantSpec::RefreshToken => {
+            let src = spec.refresh_token.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("source.refresh_token is required for `grant: refresh_token`")
+            })?;
+            Grant::RefreshToken { source: build_source(src, deps, swap_label)? }
+        }
+        GrantSpec::AuthorizationCode | GrantSpec::DeviceCode => {
+            // Both are interactive ways of obtaining a refresh token; once one exists, the
+            // runtime behaviour is identical, so they share a variant.
+            anyhow::ensure!(
+                deps.store.persists(),
+                "`grant: {}` keeps a refresh token obtained by `marshal secrets oauth login`, \
+                 which needs a top-level `state_dir` to keep it in",
+                spec.grant.label()
+            );
+            Grant::Enrolled
+        }
+    };
+
+    marshal_secrets::Oauth2Source::new(
+        swap_label,
+        Oauth2Config {
+            token_endpoint: spec.token_endpoint.clone(),
+            client_id: spec.client_id.clone(),
+            client_auth,
+            grant,
+            scope: spec.scope.clone(),
+            audience: spec.audience.clone(),
+            extra_params: spec.extra_params.clone(),
+            expiry_skew: spec.expiry_skew.unwrap_or(std::time::Duration::from_secs(60)),
+        },
+        Arc::clone(&deps.store),
+        Arc::clone(&deps.tls),
+        deps.guard.clone(),
+        deps.redactor.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn build_host_matcher(
@@ -1361,6 +1534,79 @@ enum SecretSourceSpec {
         #[serde(default)]
         json_key: Option<String>,
     },
+    /// A credential marshal *obtains* from an OAuth2 token endpoint, rather than one it is
+    /// given. Composes with any `inject.type` — `bearer` in practice.
+    Oauth2(Box<Oauth2Spec>),
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Oauth2Spec {
+    /// The full URL, path included — unlike a judge `base_url`, the path is the point.
+    token_endpoint: String,
+    client_id: String,
+    #[serde(default)]
+    grant: GrantSpec,
+    #[serde(default)]
+    client_auth: ClientAuthSpec,
+    /// Where the client secret comes from. Itself a source, so it can be an env var, a file,
+    /// or a JSON field in one — the same choices every other secret has.
+    #[serde(default)]
+    client_secret: Option<SecretSourceSpec>,
+    /// Required by `grant: refresh_token`, and meaningless for every other grant: the
+    /// interactive grants keep their refresh token in marshal's own store instead.
+    #[serde(default)]
+    refresh_token: Option<SecretSourceSpec>,
+    #[serde(default)]
+    scope: Vec<String>,
+    #[serde(default)]
+    audience: Option<String>,
+    /// Anything a provider wants that is not in the RFC — `resource`, a tenant id, a vendor
+    /// flag. Sent verbatim on every token request.
+    #[serde(default)]
+    extra_params: std::collections::BTreeMap<String, String>,
+    /// Subtracted from the provider's stated lifetime so a token cannot expire in flight.
+    /// Defaults to 60s.
+    #[serde(default, with = "humantime_serde")]
+    expiry_skew: Option<std::time::Duration>,
+}
+
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GrantSpec {
+    /// Machine-to-machine. No user, no enrolment: the client credential is the identity.
+    #[default]
+    ClientCredentials,
+    /// A long-lived refresh token something outside marshal manages.
+    RefreshToken,
+    /// Enrolled once by a human at a browser, via `marshal secrets oauth login`.
+    AuthorizationCode,
+    /// Enrolled once on a headless host, via `marshal secrets oauth login`.
+    DeviceCode,
+}
+
+impl GrantSpec {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ClientCredentials => "client_credentials",
+            Self::RefreshToken => "refresh_token",
+            Self::AuthorizationCode => "authorization_code",
+            Self::DeviceCode => "device_code",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClientAuthSpec {
+    /// `Authorization: Basic base64(client_id:client_secret)` — what RFC 6749 says every
+    /// server must support, so the default.
+    #[default]
+    ClientSecretBasic,
+    /// The same credential in the form body. Some providers accept only this.
+    ClientSecretPost,
+    /// A public client, with no client secret at all.
+    None,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1375,6 +1621,17 @@ struct HostRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deps with no state directory and no guard: enough to build any source, and the
+    /// oauth2-specific paths that need more say so themselves.
+    fn test_deps() -> SecretDeps {
+        SecretDeps {
+            store: Arc::new(marshal_secrets::TokenStore::new(None)),
+            tls: marshal_http::default_tls_config(),
+            guard: None,
+            redactor: marshal_core::Redactor::default(),
+        }
+    }
 
     /// Two profiles, each with its own secret swap for the same host. This is the exact
     /// shape that used to break: `build_runtime` resolved only the fallback profile's
@@ -1463,8 +1720,12 @@ profile:
         let _ = std::fs::remove_dir_all(&dir);
         let config = write_two_profile_config(&dir);
 
-        let (runtime, _, injectors) =
-            build_runtime(&config, Some("profile-a".to_string())).expect("config builds");
+        let (runtime, _, injectors) = build_runtime(
+            &config,
+            Some("profile-a".to_string()),
+            &marshal_core::Redactor::default(),
+        )
+        .expect("config builds");
 
         // The mechanical bug: request_transforms used to be a flat Vec built from one
         // profile, so it either lacked profile-b's swap entirely, or (worse, when hosts
@@ -1505,8 +1766,12 @@ profile:
             .join(format!("marshal-build-runtime-header-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let config = write_two_profile_config(&dir);
-        let (runtime, _, _) =
-            build_runtime(&config, Some("profile-a".to_string())).expect("config builds");
+        let (runtime, _, _) = build_runtime(
+            &config,
+            Some("profile-a".to_string()),
+            &marshal_core::Redactor::default(),
+        )
+        .expect("config builds");
         let mut request = marshal_core::RequestContext {
             identity: marshal_core::Identity::new("test"),
             profile: Arc::from("profile-a"),
@@ -1545,8 +1810,141 @@ request_transforms:
       rules: [{ host: "example.com" }]
 "#,
         );
-        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
         assert!(err.to_string().contains("inject"), "{err}");
+    }
+
+    #[test]
+    fn an_oauth2_client_credentials_source_builds() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_secret: { type: env, var: SERVICE_CLIENT_SECRET }
+        scope: ["read:things"]
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        let injector =
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).unwrap();
+        assert!(!injector.is_empty());
+    }
+
+    #[test]
+    fn an_oauth2_refresh_grant_needs_a_refresh_token_source() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        grant: refresh_token
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_secret: { type: env, var: S }
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
+        assert!(err.to_string().contains("refresh_token"), "{err}");
+    }
+
+    #[test]
+    fn an_oauth2_source_with_a_secret_bearing_client_auth_needs_a_client_secret() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
+        assert!(err.to_string().contains("client_secret"), "{err}");
+    }
+
+    #[test]
+    fn a_public_oauth2_client_needs_no_client_secret() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_auth: none
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        assert!(
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).is_ok()
+        );
+    }
+
+    #[test]
+    fn an_interactive_grant_without_a_state_dir_says_what_is_missing() {
+        // The refresh token an enrolment produces cannot live anywhere without one, and
+        // finding that out at the first request instead of at startup would be much worse.
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        grant: authorization_code
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_auth: none
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
+        assert!(err.to_string().contains("state_dir"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_source_type_is_refused_rather_than_ignored() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: vault, path: secret/x }
+      inject: { type: bearer }
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
+        assert!(err.to_string().contains("vault"), "{err}");
     }
 
     #[test]
@@ -1562,7 +1960,8 @@ request_transforms:
       rules: [{ host: "example.com" }]
 "#,
         );
-        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        let injector =
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).unwrap();
         assert!(!injector.is_empty());
     }
 
@@ -1579,7 +1978,8 @@ request_transforms:
       rules: [{ host: "example.com" }]
 "#,
         );
-        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        let injector =
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).unwrap();
         assert!(!injector.is_empty());
     }
 
@@ -1596,7 +1996,8 @@ request_transforms:
       rules: [{ host: "example.com" }]
 "#,
         );
-        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        let injector =
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).unwrap();
         assert!(!injector.is_empty());
     }
 
@@ -1613,7 +2014,8 @@ request_transforms:
       rules: [{ host: "example.com" }]
 "#,
         );
-        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
         assert!(err.to_string().contains("invalid header name"), "{err}");
     }
 
@@ -1630,7 +2032,8 @@ request_transforms:
       rules: [{ host: "example.com" }]
 "#,
         );
-        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        let injector =
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).unwrap();
         assert!(!injector.is_empty());
     }
 
@@ -1651,7 +2054,8 @@ request_transforms:
       rules: [{ host: "*.s3.amazonaws.com" }]
 "#,
         );
-        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        let injector =
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).unwrap();
         assert!(!injector.is_empty());
     }
 
@@ -1673,7 +2077,8 @@ request_transforms:
       rules: [{ host: "*.s3.amazonaws.com" }]
 "#,
         );
-        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
         assert!(err.to_string().contains("no effect"), "{err}");
     }
 }

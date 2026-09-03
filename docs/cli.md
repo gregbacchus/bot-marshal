@@ -22,7 +22,12 @@ the first thing most people hit is the default path they never typed.
 
 ## `marshal config check`
 
-Loads and validates the config, prints every diagnostic, exits non-zero on any error.
+Loads and validates the config, prints every diagnostic, exits non-zero on any error. That
+includes building every profile's `request_transforms.secrets` — whose schema the validator
+cannot see, since the config model carries those entries untyped — so a misspelled field in a
+secret source fails here rather than at the next start. Nothing is resolved or fetched:
+building a source parses its configuration, it does not read the environment variable, open
+the file, or call the token endpoint.
 
 Warnings do not fail the check but are worth reading; `serve` logs them at startup and refuses
 to start on an error the same way.

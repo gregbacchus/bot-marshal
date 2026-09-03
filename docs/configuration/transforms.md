@@ -76,7 +76,7 @@ including nothing at all.
 
 | field | |
 |---|---|
-| `source` | `{ type: env, var: ... }` or `{ type: file, path: ... }` — required for every `inject.type` except `sigv4`, which carries its own sources instead |
+| `source` | where the credential comes from: `{ type: env, ... }`, `{ type: file, ... }`, or `{ type: oauth2, ... }` — required for every `inject.type` except `sigv4`, which carries its own sources instead |
 | `inject` | how, and where, to set the credential — see below |
 | `rules` | the hosts this swap applies to — a credential is never offered to a host that shouldn't see it |
 
@@ -139,6 +139,94 @@ large signed uploads.
 Only `host`, `x-amz-content-sha256`, and `x-amz-date` are signed headers — that is all AWS
 requires. `X-Amz-Security-Token` is set when `session_token` is configured but, per AWS's own
 rule for temporary credentials, is not itself part of the signature.
+
+### OAuth2
+
+Every other source hands back a credential somebody else obtained. `oauth2` *obtains* one:
+marshal calls a token endpoint, caches the access token for its stated lifetime, and mints a
+new one when it expires. The agent holds nothing — and unlike a long-lived API key, there is
+nothing long-lived for it to hold in the first place.
+
+```yaml
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_secret: { type: env, var: SERVICE_CLIENT_SECRET }
+        scope: ["read:things"]
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+```
+
+It is a **source**, not an injection kind, so it composes with all five: `bearer` is what
+almost every API wants, but a service expecting its token on `X-Api-Key` works too, with no
+special case. See [ADR-0030](../adr/0030-oauth2-is-a-secret-source.md).
+
+`name` is required for an `oauth2` source. It keys the token store and the redaction label, so
+marshal needs it before the credential exists — there is nothing to derive it from.
+
+| field | |
+|---|---|
+| `token_endpoint` | the full URL, path included |
+| `client_id` | |
+| `grant` | `client_credentials` (default), `refresh_token`, `authorization_code`, `device_code` |
+| `client_auth` | `client_secret_basic` (default), `client_secret_post`, `none` |
+| `client_secret` | itself a source — `{ type: env, ... }` or `{ type: file, ... }`. Required unless `client_auth: none` |
+| `refresh_token` | a source. Required by `grant: refresh_token`; meaningless for the others |
+| `scope` | a list, joined with spaces per RFC 6749 |
+| `audience` | sent as `audience=` when set |
+| `extra_params` | name/value pairs sent verbatim on every token request — the escape hatch for a provider this does not otherwise model (`resource`, a tenant id, a vendor flag) |
+| `expiry_skew` | subtracted from the stated lifetime so a token cannot expire in flight. Defaults to `60s` |
+
+#### Grants
+
+**`client_credentials`** is machine-to-machine and needs nothing but the client credential. It
+is the only grant that works with no state and no enrolment.
+
+**`refresh_token`** presents a long-lived refresh token that something outside marshal manages:
+
+```yaml
+      source:
+        type: oauth2
+        grant: refresh_token
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_secret: { type: env, var: SERVICE_CLIENT_SECRET }
+        refresh_token: { type: file, path: /etc/bot-marshal/service-refresh-token }
+```
+
+If the provider *rotates* refresh tokens this grant cannot keep up: marshal does not own that
+file or environment variable and will not rewrite it, so it logs a warning and the configured
+value goes stale. Use an interactive grant against a rotating provider.
+
+**`authorization_code`** and **`device_code`** are enrolled once by a human and then run
+unattended. Both require [`state_dir`](README.md#state_dir), because the refresh token they
+produce is the only copy and has to survive a restart. Enrolment itself is not implemented
+yet: a swap configured with either grant builds, and refuses each request with a message
+saying to run `marshal secrets oauth login`, rather than failing obscurely.
+
+#### What this costs
+
+**A request can block on a third party.** Minting happens on the request path, so a slow token
+endpoint makes the first request after an expiry slow. Failure is closed: a request whose
+credential cannot be minted is refused, with the provider's own `error` and
+`error_description` in the 403 body, never forwarded unauthenticated.
+
+**Concurrent requests on an expired token mint once**, not once each — some providers
+invalidate the previous refresh token on every use, which turns a concurrent double refresh
+into a broken credential rather than merely a wasted round trip.
+
+**The token endpoint obeys `upstream.deny_cidrs` and `upstream.allow_private`**, the same
+rules that constrain agent egress. A token endpoint on the public internet is unaffected; an
+*internal* auth server on RFC1918 needs `upstream.allow_private: true`, which also opens agent
+egress to private addresses. A refusal names the exact rule that blocked it.
+
+**A minted token is redacted from the moment it is minted, not from startup** — see
+[ADR-0029](../adr/0029-the-redaction-set-is-learned-at-runtime.md). Nothing is minted at boot,
+so starting the proxy never depends on an auth server being reachable.
 
 Secrets are redacted in every audit path and log line.
 

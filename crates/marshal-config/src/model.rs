@@ -47,6 +47,15 @@ pub struct Config {
     /// from a file, referenced by name.
     #[serde(default = "default_transforms_path")]
     pub transforms_path: String,
+    /// Where marshal keeps state it owns, as opposed to configuration it is given: today,
+    /// OAuth2 refresh tokens obtained by enrolment. Unset means marshal persists nothing and
+    /// every credential it mints lives only for the life of the process.
+    ///
+    /// Absolute, or relative to this file's own directory; `~/` expands against `$HOME`. The
+    /// directory and everything under it holds live credentials, so marshal creates it 0700
+    /// and refuses to use one that is group- or world-readable.
+    #[serde(default)]
+    pub state_dir: Option<String>,
 }
 
 fn default_profiles_path() -> String {

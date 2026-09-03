@@ -90,6 +90,20 @@ impl Endpoint {
     pub fn authority(&self) -> Authority {
         Authority { host: self.host.clone(), port: self.port }
     }
+
+    /// The value for the `Host` header: the port included unless it is the scheme's default.
+    ///
+    /// Dropping the port is not cosmetic. A server behind virtual hosting routes on this
+    /// value, and an auth server on a non-default port that is told `Host: auth.example.com`
+    /// may answer as a different vhost entirely, or reject the request outright.
+    pub fn host_header(&self) -> String {
+        let default = if self.https { 443 } else { 80 };
+        if self.port == default {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
 }
 
 /// Unifies a plain and a TLS-wrapped connection behind one type, so the rest of the client
@@ -190,6 +204,26 @@ mod tests {
     fn uri_builds_the_full_request_url() {
         let e = Endpoint::parse("https://api.openai.com").unwrap();
         assert_eq!(e.uri("/v1/chat/completions"), "https://api.openai.com:443/v1/chat/completions");
+    }
+
+    #[test]
+    fn the_host_header_carries_a_non_default_port_and_omits_a_default_one() {
+        assert_eq!(
+            Endpoint::parse("https://auth.example.com").unwrap().host_header(),
+            "auth.example.com"
+        );
+        assert_eq!(
+            Endpoint::parse("http://auth.example.com").unwrap().host_header(),
+            "auth.example.com"
+        );
+        assert_eq!(
+            Endpoint::parse("http://127.0.0.1:8081").unwrap().host_header(),
+            "127.0.0.1:8081"
+        );
+        assert_eq!(
+            Endpoint::parse("https://auth.example.com:8443").unwrap().host_header(),
+            "auth.example.com:8443"
+        );
     }
 
     #[test]

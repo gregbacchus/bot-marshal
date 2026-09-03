@@ -98,7 +98,7 @@ pub async fn post_form(
     let mut builder = Request::builder()
         .method("POST")
         .uri(endpoint.uri(path))
-        .header("host", &endpoint.host)
+        .header("host", endpoint.host_header())
         .header("content-type", "application/x-www-form-urlencoded")
         .header("accept", "application/json");
     for (name, value) in extra_headers {
@@ -136,7 +136,7 @@ pub fn json_post_request(
     let mut builder = Request::builder()
         .method("POST")
         .uri(endpoint.uri(path))
-        .header("host", &endpoint.host)
+        .header("host", endpoint.host_header())
         .header("content-type", "application/json");
     for (name, value) in extra_headers {
         builder = builder.header(*name, *value);
