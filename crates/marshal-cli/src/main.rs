@@ -1397,13 +1397,15 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
                 swap.name
             );
             let enrolled = match swap.grant {
-                GrantSpec::ClientCredentials | GrantSpec::RefreshToken => anyhow::bail!(
-                    "`{}` uses `grant: {}`, which needs no enrolment — it authenticates from \
+                GrantSpec::ClientCredentials | GrantSpec::RefreshToken | GrantSpec::JwtBearer => {
+                    anyhow::bail!(
+                        "`{}` uses `grant: {}`, which needs no enrolment — it authenticates from \
                      configuration alone. `marshal secrets oauth refresh {}` checks it works.",
-                    swap.name,
-                    swap.grant.label(),
-                    swap.name
-                ),
+                        swap.name,
+                        swap.grant.label(),
+                        swap.name
+                    )
+                }
                 GrantSpec::AuthorizationCode => {
                     login_authorization_code(&swap, open, timeout).await?
                 }
@@ -1931,8 +1933,30 @@ fn build_oauth2_source(
         })?;
         build_source(src, deps, swap_label)
     };
+    // The signing key both RFC 7523 flows use. Resolved once so `grant: jwt_bearer` with
+    // `client_auth: private_key_jwt` — a real combination — does not need two config keys for
+    // the same key.
+    let assertion_key = |what: &str| -> anyhow::Result<marshal_secrets::AssertionKey> {
+        let src = spec
+            .private_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("source.private_key is required for `{what}`"))?;
+        Ok(marshal_secrets::AssertionKey {
+            source: build_source(src, deps, swap_label)?,
+            algorithm: marshal_secrets::Algorithm::parse(
+                spec.algorithm.as_deref().unwrap_or("RS256"),
+            )
+            .map_err(|e| anyhow::anyhow!("source.algorithm: {e}"))?,
+            key_id: spec.key_id.clone(),
+            lifetime: spec.assertion_lifetime.unwrap_or(std::time::Duration::from_secs(300)),
+        })
+    };
+
     let client_auth = match spec.client_auth {
         ClientAuthSpec::None => ClientAuth::None,
+        ClientAuthSpec::PrivateKeyJwt => {
+            ClientAuth::PrivateKeyJwt { key: assertion_key("client_auth: private_key_jwt")? }
+        }
         ClientAuthSpec::ClientSecretBasic => {
             ClientAuth::ClientSecretBasic { secret: client_secret("client_secret_basic")? }
         }
@@ -1954,6 +1978,22 @@ fn build_oauth2_source(
                 anyhow::anyhow!("source.refresh_token is required for `grant: refresh_token`")
             })?;
             Grant::RefreshToken { source: build_source(src, deps, swap_label)? }
+        }
+        GrantSpec::JwtBearer => {
+            // `client_id` is not part of an RFC 7523 §2.1 request at all, so `issuer` is what
+            // identifies the caller. Defaulting it to `client_id` keeps the common case to one
+            // key without inventing a meaning for the other.
+            let issuer = spec.issuer.clone().unwrap_or_else(|| spec.client_id.clone());
+            let subject = spec.subject.clone().unwrap_or_else(|| issuer.clone());
+            Grant::JwtBearer {
+                key: assertion_key("grant: jwt_bearer")?,
+                issuer,
+                subject,
+                audience: spec
+                    .assertion_audience
+                    .clone()
+                    .unwrap_or_else(|| spec.token_endpoint.clone()),
+            }
         }
         GrantSpec::AuthorizationCode => {
             anyhow::ensure!(
@@ -2179,6 +2219,31 @@ struct Oauth2Spec {
     /// RFC 8628 device authorization endpoint. `device_code` only.
     #[serde(default)]
     device_authorization_endpoint: Option<String>,
+    /// The signing key for `grant: jwt_bearer` and `client_auth: private_key_jwt`. Itself a
+    /// source, so a Google service-account JSON file works via
+    /// `{ type: file, path: ..., json_key: private_key }` with no special case.
+    #[serde(default)]
+    private_key: Option<SecretSourceSpec>,
+    /// `RS256` (default) or `ES256`.
+    #[serde(default)]
+    algorithm: Option<String>,
+    /// The assertion's `kid` header, for a provider publishing more than one key.
+    #[serde(default)]
+    key_id: Option<String>,
+    /// The assertion's `iss`. `jwt_bearer` only; defaults to `client_id`.
+    #[serde(default)]
+    issuer: Option<String>,
+    /// The assertion's `sub`. `jwt_bearer` only; defaults to `issuer`. Set it to an
+    /// impersonated user for Google's domain-wide delegation.
+    #[serde(default)]
+    subject: Option<String>,
+    /// The assertion's `aud`. Defaults to `token_endpoint`, which is what the RFC says and
+    /// what almost every provider wants.
+    #[serde(default)]
+    assertion_audience: Option<String>,
+    /// How long an assertion is valid. Defaults to 5m — it is used once, immediately.
+    #[serde(default, with = "humantime_serde")]
+    assertion_lifetime: Option<std::time::Duration>,
     /// Whether marshal takes over an authorization flow the *agent* starts. `off` by default:
     /// this rewrites requests the agent made and answers requests it sent, which is a much
     /// larger claim on its behaviour than injecting a header.
@@ -2208,6 +2273,9 @@ enum GrantSpec {
     AuthorizationCode,
     /// Enrolled once on a headless host, via `marshal secrets oauth login`.
     DeviceCode,
+    /// A signed assertion *is* the grant (RFC 7523 §2.1) — Google service accounts,
+    /// Salesforce, Snowflake. Needs `private_key`; nothing to enrol and nothing to refresh.
+    JwtBearer,
 }
 
 impl GrantSpec {
@@ -2217,6 +2285,7 @@ impl GrantSpec {
             Self::RefreshToken => "refresh_token",
             Self::AuthorizationCode => "authorization_code",
             Self::DeviceCode => "device_code",
+            Self::JwtBearer => "jwt_bearer",
         }
     }
 }
@@ -2232,6 +2301,8 @@ enum ClientAuthSpec {
     ClientSecretPost,
     /// A public client, with no client secret at all.
     None,
+    /// A signed assertion instead of a shared secret (RFC 7523 §2.2). Needs `private_key`.
+    PrivateKeyJwt,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2608,6 +2679,105 @@ request_transforms:
         let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
             .unwrap_err();
         assert!(err.to_string().contains("device_authorization_endpoint"), "{err}");
+    }
+
+    #[test]
+    fn a_jwt_bearer_source_builds_from_a_service_account_key_file() {
+        // The Google shape: the key is a field inside a JSON credentials file, which the
+        // existing `file` source already reads.
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: GCP
+      source:
+        type: oauth2
+        grant: jwt_bearer
+        token_endpoint: https://oauth2.googleapis.com/token
+        client_id: svc@project.iam.gserviceaccount.com
+        client_auth: none
+        private_key: { type: file, path: /etc/bot-marshal/sa.json, json_key: private_key }
+        scope: ["https://www.googleapis.com/auth/cloud-platform"]
+      inject: { type: bearer }
+      rules: [{ host: "*.googleapis.com" }]
+"#,
+        );
+        let injector =
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).unwrap();
+        assert!(!injector.is_empty());
+    }
+
+    #[test]
+    fn jwt_bearer_without_a_private_key_says_which_key_is_missing() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: GCP
+      source:
+        type: oauth2
+        grant: jwt_bearer
+        token_endpoint: https://oauth2.googleapis.com/token
+        client_id: svc@project.iam.gserviceaccount.com
+        client_auth: none
+      inject: { type: bearer }
+      rules: [{ host: "*.googleapis.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
+        assert!(err.to_string().contains("private_key"), "{err}");
+    }
+
+    #[test]
+    fn private_key_jwt_client_auth_composes_with_client_credentials() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_auth: private_key_jwt
+        private_key: { type: file, path: /etc/bot-marshal/client.pem }
+        algorithm: ES256
+        key_id: "2026-09"
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        assert!(
+            build_injector(&p, &marshal_config::model::Config::default(), &test_deps()).is_ok()
+        );
+    }
+
+    #[test]
+    fn an_unsupported_jwt_algorithm_is_named_in_the_error() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_auth: private_key_jwt
+        private_key: { type: env, var: KEY }
+        algorithm: HS256
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
+        assert!(err.to_string().contains("HS256"), "{err}");
     }
 
     #[test]

@@ -20,6 +20,7 @@ use marshal_core::{
 };
 use marshal_http::{Endpoint, UpstreamGuard};
 
+use super::jwt::{Algorithm, Claims, sign};
 use super::pkce::{Pkce, random_urlsafe};
 
 use super::store::{StoredGrant, TokenStore, now_unix};
@@ -157,6 +158,19 @@ impl DeviceAuthorization {
     }
 }
 
+/// A signing key and how to use it. Shared by the two RFC 7523 flows, which differ only in
+/// what the assertion claims and where it is sent.
+#[derive(Debug)]
+pub struct AssertionKey {
+    pub source: Arc<dyn SecretSource>,
+    pub algorithm: Algorithm,
+    /// The `kid` header. Required by providers that publish more than one key.
+    pub key_id: Option<String>,
+    /// How long the assertion is valid. Short by default: an assertion is used once,
+    /// immediately, and a long-lived one is a bearer credential sitting in a log somewhere.
+    pub lifetime: Duration,
+}
+
 /// How marshal proves it is the client it says it is.
 #[derive(Debug)]
 pub enum ClientAuth {
@@ -169,6 +183,10 @@ pub enum ClientAuth {
     ClientSecretBasic { secret: Arc<dyn SecretSource> },
     /// The same credential in the form body instead. Some providers only accept this.
     ClientSecretPost { secret: Arc<dyn SecretSource> },
+    /// A signed assertion instead of a shared secret
+    /// ([RFC 7523 §2.2](https://www.rfc-editor.org/rfc/rfc7523#section-2.2)). Composes with
+    /// any grant, and means there is no client secret to rotate or to leak.
+    PrivateKeyJwt { key: AssertionKey },
 }
 
 /// Which OAuth2 grant mints the access token.
@@ -183,6 +201,21 @@ pub enum Grant {
     /// This is where `authorization_code` and `device_code` end up: both are interactive ways
     /// of getting a refresh token, and once one exists the runtime behaviour is identical.
     Enrolled,
+    /// A signed assertion *is* the grant
+    /// ([RFC 7523 §2.1](https://www.rfc-editor.org/rfc/rfc7523#section-2.1)) — how a Google
+    /// service account, Salesforce, or Snowflake authenticates a workload with a key rather
+    /// than a password. Nothing to enrol and nothing to refresh: every mint signs a fresh
+    /// assertion.
+    JwtBearer {
+        key: AssertionKey,
+        /// `iss`. The service account's own identity.
+        issuer: String,
+        /// `sub`. Equals `issuer` unless the provider supports impersonation — Google's
+        /// domain-wide delegation puts the impersonated user here.
+        subject: String,
+        /// `aud`. The token endpoint, unless the provider names something else.
+        audience: String,
+    },
 }
 
 impl Grant {
@@ -191,6 +224,7 @@ impl Grant {
             Self::ClientCredentials => "client_credentials",
             Self::RefreshToken { .. } => "refresh_token",
             Self::Enrolled => "enrolled",
+            Self::JwtBearer { .. } => "jwt_bearer",
         }
     }
 }
@@ -286,7 +320,7 @@ impl Oauth2Source {
     /// The refresh token this grant will present, and where it came from.
     async fn refresh_token(&self) -> Result<Option<(SecretValue, bool)>> {
         match &self.cfg.grant {
-            Grant::ClientCredentials => Ok(None),
+            Grant::ClientCredentials | Grant::JwtBearer { .. } => Ok(None),
             Grant::RefreshToken { source } => Ok(Some((source.resolve().await?, false))),
             Grant::Enrolled => match self.store.grant(&self.name)? {
                 Some(g) => Ok(Some((g.refresh_token, true))),
@@ -315,6 +349,30 @@ impl Oauth2Source {
                 params.push(("client_id".into(), self.cfg.client_id.clone()));
                 params.push(("client_secret".into(), secret.resolve().await?.expose().to_owned()));
             }
+            ClientAuth::PrivateKeyJwt { key } => {
+                // RFC 7521 §4.2: `client_id` is optional here, but enough providers require it
+                // that omitting it fails more often than including it does.
+                params.push(("client_id".into(), self.cfg.client_id.clone()));
+                params.push((
+                    "client_assertion_type".into(),
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".into(),
+                ));
+                params.push((
+                    "client_assertion".into(),
+                    self.assertion(
+                        key,
+                        &self.cfg.client_id,
+                        &self.cfg.client_id,
+                        &self.cfg.token_endpoint,
+                        // A `jti` is what lets the provider reject a replayed assertion. Only
+                        // meaningful for client authentication, which is why it is set here
+                        // and not in the jwt_bearer grant.
+                        true,
+                        None,
+                    )
+                    .await?,
+                ));
+            }
             ClientAuth::ClientSecretBasic { secret } => {
                 // RFC 6749 §2.3.1: both halves are form-urlencoded *before* being joined and
                 // base64'd. Skipping that step works right up until a client secret contains
@@ -338,6 +396,22 @@ impl Oauth2Source {
     /// The grant-specific half of a routine (non-enrolment) token request.
     async fn grant_params(&self) -> Result<Vec<(String, String)>> {
         let mut params: Vec<(String, String)> = Vec::new();
+        if let Grant::JwtBearer { key, issuer, subject, audience } = &self.cfg.grant {
+            params
+                .push(("grant_type".into(), "urn:ietf:params:oauth:grant-type:jwt-bearer".into()));
+            // Scope goes in the assertion as well as the form. RFC 7523 §2.1 permits it in the
+            // form; Google reads it only from the assertion. Sending both is the union of what
+            // providers accept, and neither spec forbids the other's placement.
+            let scope = (!self.cfg.scope.is_empty()).then(|| self.cfg.scope.join(" "));
+            params.push((
+                "assertion".into(),
+                self.assertion(key, issuer, subject, audience, false, scope).await?,
+            ));
+            if !self.cfg.scope.is_empty() {
+                params.push(("scope".into(), self.cfg.scope.join(" ")));
+            }
+            return Ok(params);
+        }
         match self.refresh_token().await? {
             None => params.push(("grant_type".into(), "client_credentials".into())),
             Some((token, _)) => {
@@ -352,6 +426,39 @@ impl Oauth2Source {
             params.push(("audience".into(), audience.clone()));
         }
         Ok(params)
+    }
+
+    /// Build and sign one assertion.
+    ///
+    /// The private key is resolved through an ordinary [`SecretSource`], so it can come from a
+    /// file, an environment variable, or a JSON field in one — a Google service-account key
+    /// file is JSON with the PEM in `private_key`, which `{ type: file, json_key: private_key }`
+    /// reads without any special case here.
+    async fn assertion(
+        &self,
+        key: &AssertionKey,
+        issuer: &str,
+        subject: &str,
+        audience: &str,
+        with_jti: bool,
+        scope: Option<String>,
+    ) -> Result<String> {
+        let pem = key.source.resolve().await?;
+        let jti = if with_jti { Some(random_urlsafe(16)?) } else { None };
+        sign(
+            &pem,
+            key.algorithm,
+            key.key_id.as_deref(),
+            &Claims {
+                issuer: issuer.to_owned(),
+                subject: subject.to_owned(),
+                audience: audience.to_owned(),
+                scope,
+                jti,
+                lifetime_secs: key.lifetime.as_secs(),
+                extra: Vec::new(),
+            },
+        )
     }
 
     /// Everything a token request looks like on the wire, for one set of grant parameters.
@@ -672,7 +779,7 @@ impl Oauth2Source {
     fn persist_rotation(&self, response: &TokenResponse) -> Result<()> {
         let Some(new_rt) = &response.refresh_token else { return Ok(()) };
         match &self.cfg.grant {
-            Grant::ClientCredentials => Ok(()),
+            Grant::ClientCredentials | Grant::JwtBearer { .. } => Ok(()),
             Grant::Enrolled => self.store.put_grant(
                 &self.name,
                 StoredGrant {
@@ -860,6 +967,164 @@ mod tests {
         let (form, _) = s.token_request().await.unwrap();
         assert!(form.contains("grant_type=refresh_token"), "{form}");
         assert!(form.contains("refresh_token=rt-configured"), "{form}");
+    }
+
+    /// The same throwaway key the jwt module's tests use, reached through a source.
+    #[derive(Debug)]
+    struct KeyFile;
+
+    #[async_trait::async_trait]
+    impl SecretSource for KeyFile {
+        fn name(&self) -> &str {
+            "SERVICE_KEY"
+        }
+        async fn resolve(&self) -> Result<SecretValue> {
+            Ok(SecretValue::new(super::super::jwt::tests_support::TEST_RSA_PKCS8))
+        }
+    }
+
+    fn assertion_key() -> AssertionKey {
+        AssertionKey {
+            source: Arc::new(KeyFile),
+            algorithm: Algorithm::Rs256,
+            key_id: Some("key-1".into()),
+            lifetime: Duration::from_secs(3600),
+        }
+    }
+
+    /// Read a JWT's payload without trusting the encoder that produced it.
+    fn payload_of(jwt: &str) -> serde_json::Value {
+        let part = jwt.split('.').nth(1).expect("a JWT has three parts");
+        let mut bytes = Vec::new();
+        let (mut acc, mut bits) = (0u32, 0u32);
+        for c in part.chars() {
+            let v = match c {
+                'A'..='Z' => c as u32 - 'A' as u32,
+                'a'..='z' => c as u32 - 'a' as u32 + 26,
+                '0'..='9' => c as u32 - '0' as u32 + 52,
+                '-' => 62,
+                '_' => 63,
+                _ => panic!("bad base64url in {part}"),
+            };
+            acc = (acc << 6) | v;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                bytes.push((acc >> bits) as u8);
+            }
+        }
+        serde_json::from_slice(&bytes).expect("the payload is JSON")
+    }
+
+    fn form_value(form: &str, name: &str) -> String {
+        let prefix = format!("{name}=");
+        let raw = form
+            .split('&')
+            .find_map(|p| p.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("no `{name}` in {form}"));
+        // Only the characters an assertion can contain need decoding here.
+        raw.replace("%2E", ".").replace("%2D", "-").replace("%5F", "_")
+    }
+
+    #[tokio::test]
+    async fn jwt_bearer_sends_an_assertion_as_the_grant() {
+        let s = Oauth2Source::new(
+            "SERVICE",
+            Oauth2Config {
+                token_endpoint: "https://oauth2.googleapis.com/token".into(),
+                client_id: "unused".into(),
+                client_auth: ClientAuth::None,
+                grant: Grant::JwtBearer {
+                    key: assertion_key(),
+                    issuer: "svc@project.iam.gserviceaccount.com".into(),
+                    subject: "svc@project.iam.gserviceaccount.com".into(),
+                    audience: "https://oauth2.googleapis.com/token".into(),
+                },
+                scope: vec!["https://www.googleapis.com/auth/cloud-platform".into()],
+                audience: None,
+                extra_params: BTreeMap::new(),
+                expiry_skew: Duration::from_secs(60),
+                authorization_endpoint: None,
+                redirect_uri: None,
+                device_authorization_endpoint: None,
+            },
+            Arc::new(TokenStore::new(None)),
+            marshal_http::default_tls_config(),
+            None,
+            Redactor::default(),
+        )
+        .unwrap();
+
+        let (form, headers) = s.token_request().await.unwrap();
+        assert!(headers.is_empty(), "the assertion is the credential; no header auth");
+        assert!(
+            form.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer"),
+            "{form}"
+        );
+
+        let claims = payload_of(&form_value(&form, "assertion"));
+        assert_eq!(claims["iss"], "svc@project.iam.gserviceaccount.com");
+        assert_eq!(claims["aud"], "https://oauth2.googleapis.com/token");
+        // Google reads scope from the assertion; RFC 7523 permits it in the form. Both.
+        assert_eq!(claims["scope"], "https://www.googleapis.com/auth/cloud-platform");
+        assert!(form.contains("scope=https"), "{form}");
+        // A grant assertion is not replay-scoped the way client authentication is.
+        assert!(claims.get("jti").is_none(), "{claims}");
+    }
+
+    #[tokio::test]
+    async fn jwt_bearer_carries_an_impersonated_subject_when_one_is_configured() {
+        // Google's domain-wide delegation: the key belongs to the service account, the access
+        // is granted as a user.
+        let mut s = source(Grant::ClientCredentials, ClientAuth::None);
+        s.cfg.grant = Grant::JwtBearer {
+            key: assertion_key(),
+            issuer: "svc@project.iam.gserviceaccount.com".into(),
+            subject: "user@example.com".into(),
+            audience: "https://oauth2.googleapis.com/token".into(),
+        };
+        let (form, _) = s.token_request().await.unwrap();
+        let claims = payload_of(&form_value(&form, "assertion"));
+        assert_eq!(claims["iss"], "svc@project.iam.gserviceaccount.com");
+        assert_eq!(claims["sub"], "user@example.com");
+    }
+
+    #[tokio::test]
+    async fn private_key_jwt_authenticates_the_client_and_composes_with_any_grant() {
+        let mut s = source(Grant::ClientCredentials, ClientAuth::None);
+        s.cfg.client_auth = ClientAuth::PrivateKeyJwt { key: assertion_key() };
+        let (form, headers) = s.token_request().await.unwrap();
+
+        assert!(headers.is_empty(), "nothing goes in a header for private_key_jwt");
+        assert!(form.contains("grant_type=client_credentials"), "the grant is unchanged: {form}");
+        assert!(
+            form.contains(
+                "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer"
+            ),
+            "{form}"
+        );
+        assert!(form.contains("client_id=marshal"), "{form}");
+
+        let claims = payload_of(&form_value(&form, "client_assertion"));
+        // RFC 7523 §3: for client authentication, iss and sub are both the client id, and aud
+        // is the token endpoint.
+        assert_eq!(claims["iss"], "marshal");
+        assert_eq!(claims["sub"], "marshal");
+        assert_eq!(claims["aud"], "https://auth.example.com/oauth2/token");
+        // The replay defence. Without it a captured assertion is reusable until it expires.
+        assert!(claims["jti"].is_string(), "{claims}");
+    }
+
+    #[tokio::test]
+    async fn two_client_assertions_do_not_share_a_jti() {
+        let mut s = source(Grant::ClientCredentials, ClientAuth::None);
+        s.cfg.client_auth = ClientAuth::PrivateKeyJwt { key: assertion_key() };
+        let (a, _) = s.token_request().await.unwrap();
+        let (b, _) = s.token_request().await.unwrap();
+        assert_ne!(
+            payload_of(&form_value(&a, "client_assertion"))["jti"],
+            payload_of(&form_value(&b, "client_assertion"))["jti"]
+        );
     }
 
     #[tokio::test]

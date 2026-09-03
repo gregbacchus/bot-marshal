@@ -172,8 +172,8 @@ marshal needs it before the credential exists — there is nothing to derive it 
 |---|---|
 | `token_endpoint` | the full URL, path included |
 | `client_id` | |
-| `grant` | `client_credentials` (default), `refresh_token`, `authorization_code`, `device_code` |
-| `client_auth` | `client_secret_basic` (default), `client_secret_post`, `none` |
+| `grant` | `client_credentials` (default), `refresh_token`, `jwt_bearer`, `authorization_code`, `device_code` |
+| `client_auth` | `client_secret_basic` (default), `client_secret_post`, `private_key_jwt`, `none` |
 | `client_secret` | itself a source — `{ type: env, ... }` or `{ type: file, ... }`. Required unless `client_auth: none` |
 | `refresh_token` | a source. Required by `grant: refresh_token`; meaningless for the others |
 | `scope` | a list, joined with spaces per RFC 6749 |
@@ -201,6 +201,57 @@ is the only grant that works with no state and no enrolment.
 If the provider *rotates* refresh tokens this grant cannot keep up: marshal does not own that
 file or environment variable and will not rewrite it, so it logs a warning and the configured
 value goes stale. Use an interactive grant against a rotating provider.
+
+**`jwt_bearer`** ([RFC 7523 §2.1](https://www.rfc-editor.org/rfc/rfc7523#section-2.1)) signs
+an assertion with a private key and exchanges it — how a Google service account, Salesforce, or
+Snowflake authenticates a workload with a key rather than a password. Nothing to enrol and
+nothing to refresh: every mint signs a fresh assertion.
+
+```yaml
+      source:
+        type: oauth2
+        grant: jwt_bearer
+        token_endpoint: https://oauth2.googleapis.com/token
+        client_id: svc@project.iam.gserviceaccount.com
+        client_auth: none
+        private_key: { type: file, path: /etc/bot-marshal/sa.json, json_key: private_key }
+        scope: ["https://www.googleapis.com/auth/cloud-platform"]
+```
+
+`private_key` is itself a source, so a Google service-account JSON file — which is JSON with
+the PEM inside it — is read by the existing `file` source with `json_key: private_key` and no
+special case. PKCS#8 and the older PKCS#1/SEC1 PEM forms are all accepted.
+
+| field | |
+|---|---|
+| `private_key` | a source yielding a PEM. Required by `jwt_bearer` and `private_key_jwt` |
+| `algorithm` | `RS256` (default) or `ES256`. `HS256` is deliberately absent — it is a shared secret wearing asymmetric clothes, so it offers nothing over `client_secret_basic` |
+| `key_id` | the assertion's `kid` header, for a provider publishing more than one key |
+| `issuer` | the assertion's `iss`. Defaults to `client_id` |
+| `subject` | the assertion's `sub`. Defaults to `issuer`; set it to an impersonated user for Google's domain-wide delegation |
+| `assertion_audience` | the assertion's `aud`. Defaults to `token_endpoint` |
+| `assertion_lifetime` | defaults to `5m` — an assertion is used once, immediately |
+
+`scope` is sent both in the assertion and in the form body. RFC 7523 permits it in the form;
+Google reads it only from the assertion; sending both is the union of what providers accept.
+
+**`client_auth: private_key_jwt`** ([RFC 7523 §2.2](https://www.rfc-editor.org/rfc/rfc7523#section-2.2))
+is the same signing machinery used for *client authentication* instead. It composes with any
+grant, uses the same `private_key`/`algorithm`/`key_id` fields, and means there is no client
+secret to rotate or to leak:
+
+```yaml
+      source:
+        type: oauth2
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_auth: private_key_jwt
+        private_key: { type: file, path: /etc/bot-marshal/client.pem }
+        algorithm: ES256
+        key_id: "2026-09"
+```
+
+Each client assertion carries a fresh `jti`, which is what lets a provider reject a replayed one.
 
 **`authorization_code`** and **`device_code`** are enrolled once by a human and then run
 unattended. Both require [`state_dir`](README.md#state_dir), because the refresh token they

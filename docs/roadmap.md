@@ -17,17 +17,17 @@ audited separately.
 | M5 | MCP tool-level policy | done |
 | M6 | Transparent (nftables) and DNS interception | done, later partially reverted¹ |
 | M7 | Management API, hot reload, warn mode, metrics | done² |
-| M8 | OAuth2 credential acquisition | partial³ |
+| M8 | OAuth2 credential acquisition | done³ |
 
 ¹ Transparent (nftables REDIRECT) capture was removed after M6 — see
 [Removed](#removed) below. DNS interception is unaffected.
 
 ² OpenTelemetry export is not implemented — see below.
 
-³ `client_credentials`, `refresh_token`, `authorization_code` (with PKCE) and `device_code`
-all work end to end, the last two via `marshal secrets oauth login`, and `capture: in_band`
-takes over an authorization flow an agent starts. `jwt_bearer` and `private_key_jwt` are not
-implemented — see below.
+³ Complete: `client_credentials`, `refresh_token`, `jwt_bearer`, `authorization_code` (with
+PKCE) and `device_code`, the last two enrolled via `marshal secrets oauth login`;
+`client_secret_basic`/`_post`, `private_key_jwt` and public clients; and `capture: in_band`,
+which takes over an authorization flow an agent starts.
 
 ## Removed
 
@@ -71,10 +71,6 @@ not start end to end as written.
 
 **Rego rules via `regorus`.** The `rules` layer is CEL only. Rego is designed for as an opt-in
 for anyone already running OPA policy.
-
-**OAuth2 `jwt_bearer` and `private_key_jwt`.** RFC 7523: sign an assertion with a private key
-and exchange it, which is how Google service accounts, Salesforce and Snowflake authenticate.
-Needs RS256/ES256 signing, which `marshal-secrets` has no dependency for yet.
 
 
 
