@@ -505,6 +505,27 @@ impl Server {
             }
         };
 
+        // The absolute-form target's authority is what policy evaluates and what the guard
+        // connects to; a `Host` header naming something else is either a confused client or
+        // an attempt to have policy check one virtual host while a shared-IP upstream serves
+        // another. Refuse rather than silently trusting whichever of the two picks the
+        // connection — the same reasoning `check_sni` applies to CONNECT/SNI disagreement.
+        if !request.is_connect
+            && let Some(host_header) = &request.host_header
+            && !host_matches_authority(host_header, &request.authority)
+        {
+            let _ = httpfront::write_status(
+                &mut client,
+                "400 Bad Request",
+                &format!(
+                    "request target `{}` and Host header `{host_header}` name different hosts",
+                    request.authority.host
+                ),
+            )
+            .await;
+            return Ok(());
+        }
+
         let runtime = self.runtime.load();
         let mut conn = self.conn_info(peer, local);
         conn.proxy_auth = request.proxy_auth.clone();
@@ -547,12 +568,16 @@ impl Server {
             if request.is_connect {
                 marshal_core::Phase::Connect
             } else {
-                // Plaintext absolute-form: method and path are visible, so request-level
-                // layers do apply. The body is not parsed on this path, so a layer that
-                // scans bodies applies its own oversize rule rather than seeing nothing.
+                // Plaintext absolute-form: method, path and headers are visible, so
+                // request-level layers do apply to them. The body is not parsed on this path,
+                // so a layer that scans bodies applies its own oversize rule rather than
+                // seeing nothing.
                 marshal_core::Phase::Request
             },
         );
+        if !request.is_connect {
+            cx.headers = request.headers.clone();
+        }
         let mut outcome = attribution.chain.evaluate(&cx).await;
 
         // A CONNECT is a pre-filter, not the decision.
@@ -608,8 +633,7 @@ impl Server {
             return Ok(());
         }
 
-        if !request.is_connect && !attribution.request_transforms.is_empty() {
-            cx.headers = request.headers.clone();
+        if !request.is_connect {
             for transform in &attribution.request_transforms {
                 if let Err(e) = transform.apply(&mut cx).await {
                     let reason = Reason::new(transform.name(), "transform_failed", e.to_string());
@@ -634,6 +658,9 @@ impl Server {
                     return Ok(());
                 }
             }
+            // Unconditional, not gated on a transform being configured: a proxy credential
+            // must never reach the upstream regardless of whether the matched profile
+            // happens to declare any request_transforms.
             mitm::strip_hop_by_hop(&mut cx.headers, false);
         }
 
@@ -742,13 +769,11 @@ impl Server {
             }
             return Ok(());
         } else {
-            // Preserve the original header bytes when no rewrite was requested. A configured
-            // transform opts into serialising the transformed request representation instead.
-            let head = if attribution.request_transforms.is_empty() {
-                rewrite_to_origin_form(&request)
-            } else {
-                transformed_origin_form(&request, &cx)
-            };
+            // Always rebuilt from `cx.headers`, never replayed from the raw bytes the client
+            // sent: hop-by-hop headers (including `Proxy-Authorization`) were stripped above
+            // regardless of whether a transform is configured, and replaying the original
+            // bytes here would put them back.
+            let head = transformed_origin_form(&request, &cx);
             upstream.write_all(&head).await?;
         }
 
@@ -889,6 +914,17 @@ fn check_sni(opening: &[u8], authority: &Authority) -> Result<(), String> {
     }
 }
 
+/// Whether a `Host` header value names the same host as the authority already resolved from
+/// the request target. The header may carry its own port (`example.com:8080`, `[::1]:8080`);
+/// only the host component is compared, via the same parser the request target itself uses,
+/// since the authority's port is the one the guard actually connects to and is not what a
+/// laundering attempt would try to disagree on. A `Host` header malformed enough that it
+/// cannot even be parsed as an authority is treated as a mismatch rather than ignored.
+fn host_matches_authority(host_header: &str, authority: &Authority) -> bool {
+    httpfront::parse_authority(host_header, authority.port)
+        .is_ok_and(|parsed| parsed.host.eq_ignore_ascii_case(&authority.host))
+}
+
 fn guard_reply(e: &GuardError) -> Reply {
     match e {
         GuardError::Blocked { .. } => Reply::NotAllowed,
@@ -897,26 +933,9 @@ fn guard_reply(e: &GuardError) -> Reply {
     }
 }
 
-/// Turn `GET http://host/path HTTP/1.1` into `GET /path HTTP/1.1`, leaving every other byte
-/// of the head untouched.
-fn rewrite_to_origin_form(request: &ProxyRequest) -> Vec<u8> {
-    let Some(line_end) = request.raw_head.windows(2).position(|w| w == b"\r\n") else {
-        return request.raw_head.clone();
-    };
-    let (line, rest) = request.raw_head.split_at(line_end);
-    let line = String::from_utf8_lossy(line);
-    let mut parts = line.split_whitespace();
-    let (method, _target, version) = (
-        parts.next().unwrap_or("GET"),
-        parts.next().unwrap_or("/"),
-        parts.next().unwrap_or("HTTP/1.1"),
-    );
-
-    let mut out = format!("{method} {} {version}", request.path).into_bytes();
-    out.extend_from_slice(rest);
-    out
-}
-
+/// Turn `GET http://host/path HTTP/1.1` into `GET /path HTTP/1.1` with `cx`'s headers —
+/// possibly rewritten by a transform, always with hop-by-hop headers already stripped —
+/// rather than the client's original bytes.
 fn transformed_origin_form(request: &ProxyRequest, cx: &RequestContext) -> Vec<u8> {
     let version = request
         .raw_head
@@ -965,23 +984,80 @@ async fn accept_unix(
 mod tests {
     use super::*;
 
-    #[test]
-    fn rewrites_absolute_form_to_origin_form_preserving_headers() {
-        let req = ProxyRequest {
+    fn test_request(headers: http::HeaderMap) -> ProxyRequest {
+        ProxyRequest {
             authority: Authority { host: "example.com".into(), port: 80 },
             method: "GET".into(),
             path: "/a?b=1".into(),
-            raw_head:
-                b"GET http://example.com/a?b=1 HTTP/1.1\r\nHost: example.com\r\nX-K: v\r\n\r\n"
-                    .to_vec(),
-            headers: http::HeaderMap::new(),
+            raw_head: b"GET http://example.com/a?b=1 HTTP/1.1\r\n\r\n".to_vec(),
+            headers: headers.clone(),
+            host_header: Some("example.com".into()),
             is_connect: false,
             proxy_auth: None,
-        };
-        let out = String::from_utf8(rewrite_to_origin_form(&req)).unwrap();
+        }
+    }
+
+    fn test_context(headers: http::HeaderMap) -> RequestContext {
+        RequestContext {
+            identity: marshal_core::Identity::new("test"),
+            profile: Arc::from("p"),
+            ingress: IngressMode::Explicit,
+            phase: marshal_core::Phase::Request,
+            client_addr: "127.0.0.1:1".parse().unwrap(),
+            authority: Authority { host: "example.com".into(), port: 80 },
+            method: http::Method::GET,
+            uri: "/a?b=1".parse().unwrap(),
+            headers,
+            body: BodyHandle::Empty,
+            evidence: Evidence::new(),
+        }
+    }
+
+    #[test]
+    fn transformed_origin_form_serialises_from_context_headers_not_raw_bytes() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("host", "example.com".parse().unwrap());
+        headers.insert("x-k", "v".parse().unwrap());
+        let req = test_request(http::HeaderMap::new());
+        let cx = test_context(headers);
+
+        let out = String::from_utf8(transformed_origin_form(&req, &cx)).unwrap();
         assert!(out.starts_with("GET /a?b=1 HTTP/1.1\r\n"));
-        assert!(out.contains("Host: example.com\r\n"), "headers must pass through untouched");
-        assert!(out.contains("X-K: v\r\n"));
+        assert!(out.contains("host: example.com\r\n"));
+        assert!(out.contains("x-k: v\r\n"));
         assert!(out.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn strip_hop_by_hop_then_transformed_origin_form_never_carries_proxy_authorization() {
+        // This is the exact sequence serve_http_generic runs on the plaintext path,
+        // unconditionally, regardless of whether the profile configures a transform: strip
+        // first, then serialise from `cx.headers` rather than the client's raw bytes.
+        let mut headers = http::HeaderMap::new();
+        headers.insert("proxy-authorization", "Basic x".parse().unwrap());
+        mitm::strip_hop_by_hop(&mut headers, false);
+        let req = test_request(http::HeaderMap::new());
+        let cx = test_context(headers);
+
+        let out = String::from_utf8(transformed_origin_form(&req, &cx)).unwrap();
+        assert!(
+            !out.to_ascii_lowercase().contains("proxy-authorization"),
+            "must never reach the upstream: {out:?}"
+        );
+    }
+
+    #[test]
+    fn host_header_matching_the_authority_is_accepted() {
+        let authority = Authority { host: "example.com".into(), port: 80 };
+        assert!(host_matches_authority("example.com", &authority));
+        assert!(host_matches_authority("EXAMPLE.COM", &authority));
+        assert!(host_matches_authority("example.com:80", &authority));
+    }
+
+    #[test]
+    fn host_header_naming_a_different_host_is_rejected() {
+        let authority = Authority { host: "example.com".into(), port: 80 };
+        assert!(!host_matches_authority("evil.example", &authority));
+        assert!(!host_matches_authority("example.com.evil.example", &authority));
     }
 }

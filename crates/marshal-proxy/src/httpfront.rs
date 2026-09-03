@@ -1,10 +1,15 @@
 //! HTTP proxy front-end: `CONNECT` tunnels and absolute-form requests.
 //!
-//! Deliberately a hand-rolled request-head reader rather than a full HTTP server. At M1 the
-//! proxy does not interpret HTTP beyond the request line and `Host` — bodies are copied
-//! verbatim — and using a real HTTP stack here would mean parsing, re-serialising, and
-//! subtly changing traffic we have promised only to observe. That changes in M2 when TLS is
-//! terminated and the pipeline genuinely needs structured requests.
+//! Deliberately a hand-rolled request-head reader rather than a full HTTP server — bodies on
+//! this path are still relayed verbatim, unparsed. Headers are parsed, though, and the
+//! outgoing head is always rebuilt from them (`server::transformed_origin_form`) rather than
+//! replayed from the client's raw bytes. That is a deliberate normalisation, not an oversight:
+//! a hop-by-hop header (`Proxy-Authorization` chief among them) must never reach the upstream
+//! regardless of whether a profile configures a request transform, and the only way to
+//! guarantee that is to never hold onto a path that can forward the original bytes unfiltered.
+//! The cost is that header name casing is not preserved byte-for-byte — `http::HeaderMap`
+//! normalises it — which is immaterial to any HTTP-compliant server since header names are
+//! case-insensitive by specification.
 
 use marshal_core::Authority;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -34,12 +39,17 @@ pub struct ProxyRequest {
     pub method: String,
     /// Path and query, origin-form. Empty for `CONNECT`.
     pub path: String,
-    /// The complete head as received, so an allowed plaintext request can be replayed
-    /// upstream without us having re-serialised (and possibly altered) it.
+    /// The complete head as received. Kept for diagnostics and the HTTP version it carries;
+    /// the outgoing head is always rebuilt from `headers` rather than replayed verbatim, so
+    /// hop-by-hop headers are stripped and a configured transform's changes always apply.
     pub raw_head: Vec<u8>,
     /// Parsed end-to-end headers for request transforms. `raw_head` remains the source of
     /// truth when no transform is configured, preserving the byte-for-byte relay behaviour.
     pub headers: http::HeaderMap,
+    /// The raw `Host` header value, when present — kept separately from `headers` so an
+    /// absolute-form request's authority (which decides policy and the upstream connection)
+    /// can be cross-checked against it before either is trusted.
+    pub host_header: Option<String>,
     pub is_connect: bool,
     /// `Proxy-Authorization`, when present. Selects an identity.
     pub proxy_auth: Option<marshal_core::Credential>,
@@ -124,7 +134,16 @@ where
         (parse_authority(&host, 80)?, target.to_owned())
     };
 
-    Ok(ProxyRequest { authority, method, path, raw_head: head, headers, is_connect, proxy_auth })
+    Ok(ProxyRequest {
+        authority,
+        method,
+        path,
+        raw_head: head,
+        headers,
+        host_header,
+        is_connect,
+        proxy_auth,
+    })
 }
 
 /// Parse `Proxy-Authorization: Basic <base64(user:pass)>`.
@@ -166,7 +185,7 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn parse_authority(s: &str, default_port: u16) -> Result<Authority, HttpError> {
+pub(crate) fn parse_authority(s: &str, default_port: u16) -> Result<Authority, HttpError> {
     let s = s.trim();
     // IPv6 literal: [::1]:443
     if let Some(rest) = s.strip_prefix('[') {

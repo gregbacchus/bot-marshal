@@ -309,7 +309,11 @@ async fn absolute_form_http_is_rewritten_to_origin_form() {
     let seen = String::from_utf8_lossy(&buf[..n]).into_owned();
 
     assert!(seen.starts_with("GET /zen?a=1 HTTP/1.1\r\n"), "got: {seen:?}");
-    assert!(seen.contains("X-Marker: keep"), "headers must pass through untouched: {seen:?}");
+    // Values pass through untouched; names are lowercased because the outgoing head is
+    // always rebuilt from a parsed HeaderMap (never replayed from the client's raw bytes) so
+    // that a hop-by-hop header can always be stripped regardless of transform configuration —
+    // see httpfront.rs's module doc. Case is immaterial: header names are case-insensitive.
+    assert!(seen.contains("x-marker: keep"), "header value must pass through: {seen:?}");
 }
 
 #[tokio::test]
@@ -351,6 +355,124 @@ profile:
     let seen = String::from_utf8_lossy(&buf[..n]);
     assert!(seen.contains("accept: application/json\r\n"), "got: {seen:?}");
     assert!(!seen.contains("text/plain"), "the configured value must replace the client's");
+}
+
+#[tokio::test]
+async fn proxy_authorization_never_reaches_the_upstream_even_with_no_configured_transform() {
+    // The profile below has no request_transforms at all. Hop-by-hop stripping on the
+    // plaintext path must not depend on one being configured — a proxy credential is not the
+    // upstream's business regardless of what the matched profile happens to declare.
+    let upstream = start_upstream(b"").await;
+    let proxy = start_proxy(
+        r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
+"#,
+        "p",
+    )
+    .await;
+    let mut client = TcpStream::connect(proxy).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 Proxy-Authorization: Basic YWdlbnQ6c2VjcmV0\r\n\r\n",
+                upstream.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 512];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
+        .await
+        .expect("upstream should receive the forwarded request")
+        .unwrap();
+    let seen = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+    assert!(!seen.contains("proxy-authorization"), "credential leaked to upstream: {seen:?}");
+}
+
+#[tokio::test]
+async fn a_rules_layer_sees_plaintext_request_headers() {
+    // Headers are populated on `cx` before the chain evaluates, not only when a transform
+    // later reads them — otherwise `rules`/`dlp` see nothing at all on the plaintext path.
+    let upstream = start_upstream(b"").await;
+    let proxy = start_proxy(
+        r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: rules
+      expressions:
+        - when: '"x-from-agent" in req.headers'
+          verdict: allow
+"#,
+        "p",
+    )
+    .await;
+    let mut client = TcpStream::connect(proxy).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: 127.0.0.1\r\nX-From-Agent: yes\r\n\r\n",
+                upstream.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 512];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
+        .await
+        .expect("the rules layer should have seen the header and allowed the request")
+        .unwrap();
+    let seen = String::from_utf8_lossy(&buf[..n]);
+    assert!(seen.contains("x-from-agent"), "got: {seen:?}");
+}
+
+#[tokio::test]
+async fn a_conflicting_host_header_is_rejected() {
+    // The request target names one host; a client- (or attacker-) supplied Host header names
+    // another. Forwarding either while having decided policy on the other is exactly the
+    // laundering `check_sni` already closes for CONNECT/SNI — this is the same shape for
+    // plaintext absolute-form.
+    let upstream = start_upstream(b"").await;
+    let proxy = start_proxy(
+        r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
+"#,
+        "p",
+    )
+    .await;
+    let mut client = TcpStream::connect(proxy).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: evil.example\r\n\r\n",
+                upstream.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut out = String::new();
+    client.read_to_string(&mut out).await.unwrap();
+    assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+    assert!(out.contains("different hosts"), "{out}");
 }
 
 /// Minimal well-formed ClientHello carrying one SNI name.
