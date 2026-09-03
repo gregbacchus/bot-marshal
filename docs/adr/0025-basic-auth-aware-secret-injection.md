@@ -1,6 +1,6 @@
 # ADR 0025: Secret injection understands `Basic` auth, with no new config
 
-* **Status:** Accepted
+* **Status:** Superseded by [ADR-0027](0027-secret-injection-is-unconditional-only.md)
 * **Date:** 2026-09-03
 
 ## Context

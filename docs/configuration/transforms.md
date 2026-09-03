@@ -28,9 +28,9 @@ names and values are rejected by `marshal config check` with the path to the off
 the proxy owns destination routing and wire framing, and `config check` rejects attempts to
 override them.
 
-Header setters run before secret injection, so a configured header may contain a placeholder
-that a later `secrets` transform replaces. Hop-by-hop headers are still removed before the
-request is forwarded.
+Header setters run before secret injection, so a `secrets` transform can still overwrite an
+`Authorization` value a header setter configured. Hop-by-hop headers are still removed before
+the request is forwarded.
 
 The standard content-negotiation header is `Accept` (singular). A header named `Accepts` is
 valid as a custom header, but most HTTP servers will not interpret it as content negotiation.
@@ -52,63 +52,9 @@ An allow-list, not a deny-list: a header not named is dropped. Globs match a fam
 ## Secret injection
 
 The real credential never exists in the agent's process, environment, or filesystem — so
-compromising the agent no longer costs a rotation. Two modes, chosen per swap by whether the
-client is a cooperating participant or not:
-
-* **`proxy_value`** — the agent holds a placeholder and sends it somewhere in the request; the
-  swap finds it and substitutes the real credential.
-* **`inject`** — the proxy constructs the credential itself and adds it to every allowed
-  request, unconditionally. The client sends nothing related to authentication at all — it
-  does not need to know the endpoint is authenticated in the first place.
-
-A swap must set exactly one of the two; setting both, or setting neither, is a config error.
-
-### Placeholder
-
-```yaml
-request_transforms:
-  secrets:
-    - name: GITHUB_TOKEN
-      source: { type: env, var: GITHUB_TOKEN }
-      proxy_value: "marshal-github-placeholder"
-      match_headers: ["authorization"]
-      require: true
-      rules: [{ host: "api.github.com" }]
-```
-
-| field | |
-|---|---|
-| `source` | `{ type: env, var: ... }` or `{ type: file, path: ... }` |
-| `proxy_value` | the placeholder the agent is given and configured with |
-| `match_headers` | which headers to search for the placeholder |
-| `require` | refuse the request if it does not carry the placeholder at all, rather than forwarding it as-is |
-| `rules` | the hosts this swap applies to — a credential is never offered to a host that shouldn't see it |
-
-Secrets are redacted in every audit path and log line. `require: true` is the safe setting:
-without it, a request that simply forgot the placeholder goes upstream unauthenticated, which
-fails in a confusing way (a bare 401 the agent has no way to explain) rather than an obvious
-one. If the secret source itself fails to resolve — the environment variable is unset, the
-file is missing — the request fails regardless of `require`, since there is nothing to inject
-either way.
-
-`git` over HTTPS, most package registries, and container registry logins commonly send
-credentials as `Authorization: Basic base64("user:password")` rather than a plain bearer
-token. This needs no separate configuration: a swap that scans the `authorization` header (the
-default) finds the placeholder whether it appears in plain text or inside a `Basic`
-challenge's decoded credential, and re-encodes correctly when it swaps it in — recognising
-`Basic <base64>` is parsing a fixed wire format
-([RFC 7617](https://www.rfc-editor.org/rfc/rfc7617)), not a flag to set.
-
-```bash
-git clone https://x-access-token:marshal-git-placeholder@github.com/owner/repo
-```
-
-### Blind injection
-
-For a tool that has no notion of the endpoint being authenticated at all — an anonymous `git
-clone`, a `docker pull` with no login step, an install against a registry the agent was never
-given a token for — there is nothing to send a placeholder *in*. `inject` skips the placeholder
-entirely:
+compromising the agent no longer costs a rotation. There is no placeholder for a client to
+hold or present, and no cooperation required from it: the client does not need to know the
+endpoint is authenticated in the first place.
 
 ```yaml
 request_transforms:
@@ -123,21 +69,31 @@ request_transforms:
 git clone https://github.com/owner/repo   # no credential anywhere in the command
 ```
 
-Every request the policy chain allows to `github.com` now gets `Authorization: Basic
-base64("x-access-token:<secret>")`, overwriting whatever the client sent (usually nothing).
-`match_headers`, `match_body`, `match_query`, and `require` have no effect with `inject` and
-are rejected if set alongside it — there is nothing being matched, so a value for any of them
-would silently do nothing.
+Every request the policy chain allows to `github.com` gets `Authorization: Basic
+base64("x-access-token:<secret>")` set unconditionally — replacing whatever the client sent,
+including nothing at all.
 
-**This is a real trade-off, not a strictly-better version of `proxy_value`.** Within an
-`inject` swap's host scope, *every* allowed request is authenticated, not just ones the agent
-specifically constructed to carry a credential — the `rules` host list is now the entire
-boundary on who can use it, not host-allowlist-plus-placeholder. Scope `inject` swaps as
-narrowly as the actual credentialed endpoint. See
-[ADR-0026](../adr/0026-blind-credential-injection.md) for the full reasoning.
+| field | |
+|---|---|
+| `source` | `{ type: env, var: ... }` or `{ type: file, path: ... }` |
+| `inject` | how to construct the `Authorization` header — see below |
+| `rules` | the hosts this swap applies to — a credential is never offered to a host that shouldn't see it |
 
-`type: basic` is the only injection kind today; more (a bearer token, a named custom header)
-follow the same shape if a host needs one.
+Two injection kinds:
+
+* **`{ type: basic, username: "..." }`** — `Authorization: Basic base64("{username}:{secret}")`,
+  what `git`, most package registries, and container registry logins use
+  ([RFC 7617](https://www.rfc-editor.org/rfc/rfc7617)).
+* **`{ type: bearer }`** — `Authorization: Bearer {secret}`, a plain API token, e.g. an
+  `npm` `_authToken` or a GitHub API PAT.
+
+Secrets are redacted in every audit path and log line.
+
+**Within a swap's host scope, *every* allowed request is authenticated** — not just ones the
+agent tried to authenticate. `rules` is therefore the entire trust boundary for that
+credential, not host-allowlist-plus-something-else. Scope a swap as narrowly as the endpoint
+that actually needs it. See
+[ADR-0027](../adr/0027-secret-injection-is-unconditional-only.md) for the full reasoning.
 
 ## Response body transforms
 

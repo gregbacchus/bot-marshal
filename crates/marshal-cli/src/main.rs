@@ -12,7 +12,7 @@ use marshal_config::{Severity, validate};
 use marshal_core::{AuditSink, DenyingDecider};
 use marshal_policy::build_chain;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
-use marshal_secrets::{MatchSites, SecretInjector, SecretSwap};
+use marshal_secrets::{SecretInjector, SecretSwap};
 
 #[derive(Debug, Parser)]
 #[command(name = "marshal", version, about = "Egress firewall for agents and bots")]
@@ -1215,50 +1215,12 @@ fn build_injector(
         let name = spec.name.clone().unwrap_or_else(|| source.name().to_owned());
         let hosts = build_host_matcher(&spec.rules, cfg)?;
 
-        let matchers_set =
-            !spec.match_headers.is_empty() || spec.match_body || spec.match_query || spec.require;
-
-        let kind = match (spec.proxy_value, spec.inject) {
-            (Some(_), Some(_)) => anyhow::bail!(
-                "request_transforms.secrets[{i}]: set either `proxy_value` (the agent \
-                 presents a placeholder) or `inject` (the proxy adds the credential \
-                 unconditionally), not both"
-            ),
-            (None, None) => anyhow::bail!(
-                "request_transforms.secrets[{i}]: needs either `proxy_value` or `inject`"
-            ),
-            (Some(proxy_value), None) => marshal_secrets::SwapKind::Placeholder {
-                proxy_value,
-                sites: MatchSites {
-                    headers: if spec.match_headers.is_empty() {
-                        vec!["authorization".into()]
-                    } else {
-                        spec.match_headers
-                    },
-                    query: spec.match_query,
-                    body: spec.match_body,
-                },
-                require: spec.require,
-            },
-            (None, Some(inject)) => {
-                if matchers_set {
-                    anyhow::bail!(
-                        "request_transforms.secrets[{i}]: `match_headers`/`match_body`/\
-                         `match_query`/`require` have no effect with `inject` — the credential \
-                         is added unconditionally, so there is nothing to match against"
-                    );
-                }
-                match inject {
-                    InjectSpec::Basic { username } => {
-                        marshal_secrets::SwapKind::Inject(marshal_secrets::Injection::Basic {
-                            username,
-                        })
-                    }
-                }
-            }
+        let injection = match spec.inject {
+            InjectSpec::Basic { username } => marshal_secrets::Injection::Basic { username },
+            InjectSpec::Bearer => marshal_secrets::Injection::Bearer,
         };
 
-        swaps.push(SecretSwap { name, source, kind, hosts });
+        swaps.push(SecretSwap { name, source, injection, hosts });
     }
     Ok(SecretInjector::new(swaps))
 }
@@ -1279,24 +1241,9 @@ struct SecretSpec {
     #[serde(default)]
     name: Option<String>,
     source: SecretSourceSpec,
-    /// What the agent sends in place of the credential — set this for a cooperating client
-    /// that presents a placeholder. Mutually exclusive with `inject`.
-    #[serde(default)]
-    proxy_value: Option<String>,
-    #[serde(default)]
-    match_headers: Vec<String>,
-    #[serde(default)]
-    match_body: bool,
-    #[serde(default)]
-    match_query: bool,
-    #[serde(default)]
-    require: bool,
-    /// Construct the credential and add it to every allowed request unconditionally — for a
-    /// client that has no notion of the endpoint being authenticated at all. Mutually
-    /// exclusive with `proxy_value` and the `match_*`/`require` fields, which have nothing to
-    /// apply to when nothing is being matched.
-    #[serde(default)]
-    inject: Option<InjectSpec>,
+    /// What to set `Authorization` to on every allowed request to `rules` — unconditionally,
+    /// replacing whatever the client sent, regardless of whether it sent anything.
+    inject: InjectSpec,
     #[serde(default)]
     rules: Vec<HostRule>,
 }
@@ -1307,6 +1254,8 @@ enum InjectSpec {
     /// `Authorization: Basic base64("{username}:{secret}")` — what git, most package
     /// registries, and container registry logins use.
     Basic { username: String },
+    /// `Authorization: Bearer {secret}` — a plain API token.
+    Bearer,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1374,8 +1323,7 @@ request_transforms:
   secrets:
     - name: SECRET_A
       source: {{ type: file, path: "{secret_a}" }}
-      proxy_value: "placeholder-a"
-      require: false
+      inject: {{ type: bearer }}
       rules: [{{ host: "api.example.com" }}]
 "#,
                 secret_a = secret_a.display(),
@@ -1391,8 +1339,7 @@ request_transforms:
   secrets:
     - name: SECRET_B
       source: {{ type: file, path: "{secret_b}" }}
-      proxy_value: "placeholder-b"
-      require: false
+      inject: {{ type: bearer }}
       rules: [{{ host: "api.example.com" }}]
 "#,
                 secret_b = secret_b.display(),
@@ -1497,7 +1444,7 @@ profile:
     }
 
     #[test]
-    fn a_swap_needs_either_proxy_value_or_inject() {
+    fn a_secret_spec_needs_inject() {
         let p = profile(
             r#"
 default_action: deny
@@ -1509,47 +1456,11 @@ request_transforms:
 "#,
         );
         let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
-        assert!(err.to_string().contains("needs either `proxy_value` or `inject`"), "{err}");
+        assert!(err.to_string().contains("inject"), "{err}");
     }
 
     #[test]
-    fn a_swap_cannot_set_both_proxy_value_and_inject() {
-        let p = profile(
-            r#"
-default_action: deny
-request_transforms:
-  secrets:
-    - name: X
-      source: { type: env, var: X }
-      proxy_value: "placeholder"
-      inject: { type: basic, username: "user" }
-      rules: [{ host: "example.com" }]
-"#,
-        );
-        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
-        assert!(err.to_string().contains("not both"), "{err}");
-    }
-
-    #[test]
-    fn inject_rejects_match_fields_that_have_nothing_to_apply_to() {
-        let p = profile(
-            r#"
-default_action: deny
-request_transforms:
-  secrets:
-    - name: X
-      source: { type: env, var: X }
-      inject: { type: basic, username: "user" }
-      require: true
-      rules: [{ host: "example.com" }]
-"#,
-        );
-        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
-        assert!(err.to_string().contains("have no effect with `inject`"), "{err}");
-    }
-
-    #[test]
-    fn a_well_formed_inject_swap_builds() {
+    fn a_basic_inject_swap_builds() {
         let p = profile(
             r#"
 default_action: deny
@@ -1563,7 +1474,22 @@ request_transforms:
         );
         let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
         assert!(!injector.is_empty());
-        // Inject swaps have no placeholder — nothing the client sends is a stand-in for it.
-        assert!(injector.proxy_values().is_empty());
+    }
+
+    #[test]
+    fn a_bearer_inject_swap_builds() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: env, var: X }
+      inject: { type: bearer }
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        assert!(!injector.is_empty());
     }
 }

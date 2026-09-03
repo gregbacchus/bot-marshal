@@ -35,8 +35,9 @@ later, so a future change is made knowingly rather than by accident.
 | [0022](0022-remove-transparent-capture.md) | Remove transparent (nftables REDIRECT) capture | Accepted |
 | [0023](0023-multi-port-explicit-listeners.md) | Multi-port explicit listeners, to restore `listener_port` identity | Accepted |
 | [0024](0024-netns-binds-an-explicit-allowlist.md) | `netns` isolation binds an explicit allowlist, not the whole host root | Accepted |
-| [0025](0025-basic-auth-aware-secret-injection.md) | Secret injection understands `Basic` auth, with no new config | Accepted |
+| [0025](0025-basic-auth-aware-secret-injection.md) | Secret injection understands `Basic` auth, with no new config | Superseded by [0027](0027-secret-injection-is-unconditional-only.md) |
 | [0026](0026-blind-credential-injection.md) | Blind credential injection, for a client that presents nothing | Accepted |
+| [0027](0027-secret-injection-is-unconditional-only.md) | Secret injection is unconditional injection only | Accepted |
 
 ## Writing a new one
 

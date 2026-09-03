@@ -1,5 +1,5 @@
-//! M3 acceptance: the agent holds a placeholder, the upstream receives the real credential,
-//! and the audit trail contains no trace of it.
+//! M3 acceptance: the real credential is injected at the boundary, unconditionally, and the
+//! audit trail contains no trace of it.
 
 mod support;
 
@@ -12,13 +12,12 @@ use marshal_core::{AuditSink, DenyingDecider, RequestTransform};
 use marshal_policy::{HostMatcher, build_chain};
 use marshal_proxy::mitm::TlsEngine;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
-use marshal_secrets::{Injection, MatchSites, SecretInjector, SecretSwap, SwapKind};
+use marshal_secrets::{Injection, SecretInjector, SecretSwap};
 use support::*;
 
 /// The real credential. Deliberately shaped like a GitHub token so the DLP tests can use the
 /// same value and prove the two layers do not fight each other.
 const REAL_SECRET: &str = "ghp_realsecretvalue0000000000000000000000";
-const PLACEHOLDER: &str = "marshal-github-placeholder";
 
 const ALLOW_LOOPBACK: &str = r#"
 profile:
@@ -154,20 +153,11 @@ impl std::fmt::Debug for SharedWriter {
     }
 }
 
-fn swap(sites: MatchSites, require: bool) -> SecretSwap {
+fn swap(injection: Injection) -> SecretSwap {
     SecretSwap {
         name: "TEST_SECRET".into(),
         source: Arc::new(FixedSecret(REAL_SECRET)),
-        kind: SwapKind::Placeholder { proxy_value: PLACEHOLDER.into(), sites, require },
-        hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
-    }
-}
-
-fn inject_swap(injection: Injection) -> SecretSwap {
-    SecretSwap {
-        name: "TEST_SECRET".into(),
-        source: Arc::new(FixedSecret(REAL_SECRET)),
-        kind: SwapKind::Inject(injection),
+        injection,
         hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
     }
 }
@@ -185,97 +175,6 @@ async fn reflect(
     let resp = sender.send_request(req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
-}
-
-#[tokio::test]
-async fn the_placeholder_is_swapped_for_the_real_credential() {
-    let h = harness(ALLOW_LOOPBACK, vec![swap(MatchSites::default(), true)], &[REAL_SECRET]).await;
-
-    let seen = reflect(&h, |b| {
-        b.header("authorization", format!("Bearer {PLACEHOLDER}")).body(empty()).unwrap()
-    })
-    .await;
-
-    assert_eq!(
-        seen["authorization"],
-        format!("Bearer {REAL_SECRET}"),
-        "the upstream must receive the real credential"
-    );
-}
-
-#[tokio::test]
-async fn the_placeholder_is_swapped_inside_a_basic_auth_challenge() {
-    // git-over-HTTPS, most package registries, and container registry auth all normally send
-    // credentials as `Authorization: Basic base64("user:password")`, not a plain bearer
-    // token. The placeholder must be found inside the *decoded* credential and the header
-    // re-encoded — the exact same config as the bearer-token case, no extra flag.
-    let h = harness(ALLOW_LOOPBACK, vec![swap(MatchSites::default(), true)], &[REAL_SECRET]).await;
-
-    use base64_test_helper::b64;
-    let placeholder_basic = format!("Basic {}", b64(&format!("x-access-token:{PLACEHOLDER}")));
-
-    let seen =
-        reflect(&h, |b| b.header("authorization", placeholder_basic).body(empty()).unwrap()).await;
-
-    let expected = format!("Basic {}", b64(&format!("x-access-token:{REAL_SECRET}")));
-    assert_eq!(
-        seen["authorization"], expected,
-        "the decoded credential must carry the real secret, re-encoded"
-    );
-}
-
-#[tokio::test]
-async fn a_basic_auth_challenge_without_the_placeholder_is_left_alone() {
-    // A Basic header that happens not to carry the placeholder (a different service's
-    // credential, entirely unrelated auth) must not be touched or misread as a match.
-    let h = harness(ALLOW_LOOPBACK, vec![swap(MatchSites::default(), false)], &[REAL_SECRET]).await;
-
-    use base64_test_helper::b64;
-    let unrelated = format!("Basic {}", b64("someone:something-else-entirely"));
-
-    let seen =
-        reflect(&h, |b| b.header("authorization", unrelated.clone()).body(empty()).unwrap()).await;
-
-    assert_eq!(seen["authorization"], unrelated, "an unrelated Basic header must pass through");
-}
-
-#[tokio::test]
-async fn inject_adds_basic_auth_the_client_never_sent_at_all() {
-    // The defining property of Inject mode: the client presents nothing related to
-    // authentication — no placeholder, no header — and the credential appears anyway.
-    let h = harness(
-        ALLOW_LOOPBACK,
-        vec![inject_swap(Injection::Basic { username: "x-access-token".into() })],
-        &[REAL_SECRET],
-    )
-    .await;
-
-    let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
-
-    use base64_test_helper::b64;
-    let expected = format!("Basic {}", b64(&format!("x-access-token:{REAL_SECRET}")));
-    assert_eq!(seen["authorization"], expected);
-}
-
-#[tokio::test]
-async fn inject_overwrites_whatever_authorization_the_client_did_send() {
-    // If a client sends its own (irrelevant) Authorization header, Inject mode replaces it —
-    // the configured credential is authoritative for this host, not a fallback.
-    let h = harness(
-        ALLOW_LOOPBACK,
-        vec![inject_swap(Injection::Basic { username: "x-access-token".into() })],
-        &[REAL_SECRET],
-    )
-    .await;
-
-    let seen = reflect(&h, |b| {
-        b.header("authorization", "Bearer something-unrelated").body(empty()).unwrap()
-    })
-    .await;
-
-    use base64_test_helper::b64;
-    let expected = format!("Basic {}", b64(&format!("x-access-token:{REAL_SECRET}")));
-    assert_eq!(seen["authorization"], expected);
 }
 
 mod base64_test_helper {
@@ -304,21 +203,60 @@ mod base64_test_helper {
 }
 
 #[tokio::test]
+async fn basic_injection_sets_the_header_the_client_never_sent_at_all() {
+    // The defining property: the client presents nothing related to authentication — no
+    // header at all — and the credential appears anyway, because config named the host.
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::Basic { username: "x-access-token".into() })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
+
+    use base64_test_helper::b64;
+    let expected = format!("Basic {}", b64(&format!("x-access-token:{REAL_SECRET}")));
+    assert_eq!(seen["authorization"], expected);
+}
+
+#[tokio::test]
+async fn bearer_injection_sets_the_header_the_client_never_sent_at_all() {
+    let h = harness(ALLOW_LOOPBACK, vec![swap(Injection::Bearer)], &[REAL_SECRET]).await;
+
+    let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
+
+    assert_eq!(seen["authorization"], format!("Bearer {REAL_SECRET}"));
+}
+
+#[tokio::test]
+async fn injection_overwrites_whatever_authorization_the_client_did_send() {
+    // If a client sends its own (irrelevant) Authorization header, injection replaces it —
+    // the configured credential is authoritative for this host, not a fallback.
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::Basic { username: "x-access-token".into() })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    let seen = reflect(&h, |b| {
+        b.header("authorization", "Bearer something-unrelated").body(empty()).unwrap()
+    })
+    .await;
+
+    use base64_test_helper::b64;
+    let expected = format!("Basic {}", b64(&format!("x-access-token:{REAL_SECRET}")));
+    assert_eq!(seen["authorization"], expected);
+}
+
+#[tokio::test]
 async fn the_real_secret_never_appears_in_the_audit_trail() {
     // The plan's acceptance criterion, tested the way an operator would check it: search the
     // entire audit output for the literal value.
-    //
-    // Note what this does and does not prove. As the code stands no field of `AuditRecord`
-    // is populated from a header value, so this would also pass with redaction switched off
-    // — it is a regression guard against a future field that does carry one, not a
-    // demonstration that redaction works. That the redactor actually fires is proved by
-    // `marshal_audit`'s own tests, which feed it a record containing the secret.
-    let h = harness(ALLOW_LOOPBACK, vec![swap(MatchSites::default(), true)], &[REAL_SECRET]).await;
+    let h = harness(ALLOW_LOOPBACK, vec![swap(Injection::Bearer)], &[REAL_SECRET]).await;
 
-    reflect(&h, |b| {
-        b.header("authorization", format!("Bearer {PLACEHOLDER}")).body(empty()).unwrap()
-    })
-    .await;
+    reflect(&h, |b| b.body(empty()).unwrap()).await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let audit = h.audit.contents();
@@ -327,67 +265,20 @@ async fn the_real_secret_never_appears_in_the_audit_trail() {
         !audit.contains(REAL_SECRET),
         "the real credential leaked into the audit trail:\n{audit}"
     );
-    // The placeholder is safe to log and useful for debugging, so it should still be there
-    // if it appears at all — redaction must not be indiscriminate.
     assert!(audit.contains("\"host\""), "records are still structured: {audit}");
 }
 
 #[tokio::test]
-async fn a_required_placeholder_that_is_missing_is_refused() {
-    // Forwarding unauthenticated would surface as a confusing 401 from the upstream, which
-    // an agent cannot act on. Refusing here says exactly what to do instead.
-    let h = harness(ALLOW_LOOPBACK, vec![swap(MatchSites::default(), true)], &[REAL_SECRET]).await;
-
-    let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;
-    let resp = sender.send_request(request(h.upstream, "/reflect")).await.unwrap();
-    assert_eq!(resp.status(), 403);
-
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let message = doc["reason"]["message"].as_str().unwrap();
-    assert!(message.contains(PLACEHOLDER), "the refusal must say what to send: {message}");
-    assert!(!message.contains(REAL_SECRET));
-}
-
-#[tokio::test]
-async fn swaps_reach_the_query_string_and_body_when_configured() {
-    let sites = MatchSites { headers: vec![], query: true, body: true };
-    let h = harness(ALLOW_LOOPBACK, vec![swap(sites, false)], &[REAL_SECRET]).await;
-
-    let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;
-    let req = hyper::Request::builder()
-        .method("POST")
-        .uri(format!("https://{}/reflect?token={PLACEHOLDER}", h.upstream))
-        .header("host", h.upstream.to_string())
-        .header("content-type", "application/json")
-        .body(full(format!(r#"{{"key":"{PLACEHOLDER}"}}"#).into_bytes()))
-        .unwrap();
-
-    let resp = sender.send_request(req).await.unwrap();
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let seen: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-    assert!(seen["query"].as_str().unwrap().contains(REAL_SECRET), "query: {seen}");
-    assert!(seen["body"].as_str().unwrap().contains(REAL_SECRET), "body: {seen}");
-    // A swap changes the byte count; a stale Content-Length would desynchronise the
-    // connection, and the upstream reading a complete JSON document proves it did not.
-    assert!(seen["body"].as_str().unwrap().ends_with("\"}"), "body truncated: {seen}");
-}
-
-#[tokio::test]
 async fn requests_to_other_hosts_are_not_touched() {
-    // The swap is scoped by host. A placeholder sent elsewhere must stay a placeholder,
-    // or the proxy becomes a way to launder the credential to any allowed destination.
-    let mut s = swap(MatchSites::default(), false);
+    // The swap is scoped by host. A request to a host the swap does not name must not be
+    // authenticated with a credential meant for somewhere else.
+    let mut s = swap(Injection::Bearer);
     s.hosts = HostMatcher::new(["only.example.com"], Vec::<&str>::new()).unwrap();
     let h = harness(ALLOW_LOOPBACK, vec![s], &[REAL_SECRET]).await;
 
-    let seen = reflect(&h, |b| {
-        b.header("authorization", format!("Bearer {PLACEHOLDER}")).body(empty()).unwrap()
-    })
-    .await;
+    let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
 
-    assert_eq!(seen["authorization"], format!("Bearer {PLACEHOLDER}"));
+    assert_eq!(seen["authorization"], "", "an unrelated host must not gain a credential");
 }
 
 const WITH_DLP: &str = r#"
@@ -465,7 +356,7 @@ async fn dlp_lets_ordinary_traffic_through() {
         .method("POST")
         .uri(format!("https://{}/reflect", h.upstream))
         .header("host", h.upstream.to_string())
-        .header("authorization", format!("Bearer {PLACEHOLDER}"))
+        .header("authorization", "Bearer some-ordinary-session-token")
         .body(full(br#"{"title":"Fix the AKIA prefix parser","sha":"abc123"}"#.to_vec()))
         .unwrap();
 

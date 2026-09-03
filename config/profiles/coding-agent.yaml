@@ -60,15 +60,13 @@ policy:
 request_transforms:
   headers:
     allow: ["accept*", "content-*", "user-agent", "authorization"]
-  # The agent holds only the placeholder. It can still authenticate to hosts the chain
-  # allows, but the real credential never exists in the agent's process, environment or
-  # filesystem — so compromising the agent no longer costs a rotation.
+  # The agent never holds this credential at all — not even a placeholder. Every allowed
+  # request to api.github.com gets it added here, unconditionally; the agent's own tools
+  # (git, curl, whatever it shells out to) need no auth configuration of their own.
   secrets:
     - name: GITHUB_TOKEN
       source: { type: env, var: GITHUB_TOKEN }
-      proxy_value: "marshal-github-placeholder"
-      match_headers: ["authorization"]
-      require: true
+      inject: { type: bearer }
       rules: [{ host: "api.github.com" }]
 
 # Applied on the way back to the agent. Body transforms need the whole response in
