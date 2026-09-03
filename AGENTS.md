@@ -61,7 +61,9 @@ proposing a change to it.
 * **Resolve once, check every address, connect to the checked address.** ([ADR-0010](docs/adr/0010-resolve-once-connect-to-the-checked-address.md)) Never re-resolve
   between the upstream guard's check and the connect — that is the DNS-rebinding hole.
 * **Secrets never reach a log, an audit record, or the judge.** ([ADR-0011](docs/adr/0011-secrets-are-injected-at-the-boundary.md), [ADR-0012](docs/adr/0012-the-judge-sees-data-never-instructions.md)) The judge sees method, host,
-  path and header *names* only.
+  path and header *names* only. The `Redactor` enforces this at the emission boundary, and its
+  set is **not** sealed at startup ([ADR-0029](docs/adr/0029-the-redaction-set-is-learned-at-runtime.md)): any code that obtains a credential at runtime must
+  call `Redactor::learn` *before* that value can reach a sink. Forgetting to is silent.
 * **The three capture modes converge on one request representation.** ([ADR-0008](docs/adr/0008-interception-is-mandatory.md)) Do not special-case the
   ingress mode downstream of that convergence.
 

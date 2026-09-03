@@ -39,6 +39,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0026](0026-blind-credential-injection.md) | Blind credential injection, for a client that presents nothing | Accepted |
 | [0027](0027-secret-injection-is-unconditional-only.md) | Secret injection is unconditional injection only | Accepted |
 | [0028](0028-sigv4-buffers-the-body.md) | SigV4 injection buffers the body, capped, as a declared exception | Accepted |
+| [0029](0029-the-redaction-set-is-learned-at-runtime.md) | The redaction set is learned at runtime, not sealed at startup | Accepted |
 
 ## Writing a new one
 
