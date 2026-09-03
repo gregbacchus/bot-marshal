@@ -755,11 +755,17 @@ async fn emit(
     cx: &RequestContext,
     reason: &Reason,
     action: Action,
-    evidence: Evidence,
+    mut evidence: Evidence,
     status_code: Option<u16>,
     started: std::time::Instant,
     would_deny: bool,
 ) {
+    // Two halves. The chain accumulates into a clone of the context's evidence, because layers
+    // see it read-only; transforms and responders mutate the context's own afterwards. Folding
+    // them here rather than at each call site means a new emit path cannot silently drop half
+    // the trail — which is exactly how the transform breadcrumbs went missing.
+    evidence.absorb(cx.evidence.clone());
+
     handler.stats.record(&cx.identity, &cx.profile, action == Action::Allow, would_deny);
     handler
         .audit
@@ -780,6 +786,8 @@ async fn emit(
             reason: reason.clone(),
             would_deny,
             trail: evidence.trail,
+            facts: evidence.facts,
+            flags: evidence.flags,
             status_code,
             duration_ms: started.elapsed().as_millis() as u64,
         })

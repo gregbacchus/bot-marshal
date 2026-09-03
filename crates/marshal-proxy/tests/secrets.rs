@@ -344,6 +344,32 @@ async fn injection_overwrites_whatever_authorization_the_client_did_send() {
 }
 
 #[tokio::test]
+async fn an_injected_credential_is_named_in_the_audit_record() {
+    // The injector records `secrets.injected.<name>` as evidence. Until the two halves of the
+    // evidence were merged, that fact was recorded into the request context and then dropped:
+    // the chain accumulates into a clone, and only the clone reached the record. Every
+    // transform breadcrumb, every DLP pattern name and every MCP tool name went the same way.
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::Bearer { source: fixed_source() })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    reflect(&h, |b| b.body(empty()).unwrap()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let audit = h.audit.contents();
+    assert!(!audit.is_empty(), "the audit sink recorded nothing, so this proves nothing");
+    assert!(
+        audit.contains("secrets.injected.TEST_SECRET"),
+        "the audit record does not say a credential was injected: {audit}"
+    );
+    // The name, never the value — the whole point of naming it in the trail.
+    assert!(!audit.contains(REAL_SECRET), "the secret leaked into the audit trail");
+}
+
+#[tokio::test]
 async fn the_real_secret_never_appears_in_the_audit_trail() {
     // The plan's acceptance criterion, tested the way an operator would check it: search the
     // entire audit output for the literal value.

@@ -78,6 +78,23 @@ impl Evidence {
     pub fn push_outcome(&mut self, outcome: LayerOutcome) {
         self.trail.push(outcome);
     }
+
+    /// Fold another `Evidence` into this one, append-only.
+    ///
+    /// The policy chain and the request transforms accumulate into *different* `Evidence`
+    /// values — the chain works from a clone, because layers see evidence read-only, while
+    /// transforms mutate the request context's own. Both halves belong in the audit record,
+    /// so one has to be folded into the other before it is emitted.
+    ///
+    /// Append-only is preserved exactly as [`Evidence::record`] defines it: a key already set
+    /// here keeps its value, so absorbing can never rewrite what an earlier layer observed.
+    pub fn absorb(&mut self, other: Evidence) {
+        for (key, value) in other.facts {
+            self.facts.entry(key).or_insert(value);
+        }
+        self.flags.extend(other.flags);
+        self.trail.extend(other.trail);
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +107,33 @@ mod tests {
         assert!(ev.record("domain.bundle", "github"));
         assert!(!ev.record("domain.bundle", "npm"));
         assert_eq!(ev.fact("domain.bundle").unwrap(), "github");
+    }
+
+    #[test]
+    fn absorbing_merges_without_rewriting_what_was_already_observed() {
+        let mut chain = Evidence::new();
+        chain.record("allowlist.matched", "github");
+        chain.flag("WriteOperation");
+        chain.push_outcome(LayerOutcome {
+            layer: "allowlist".into(),
+            verdict: "allow".into(),
+            duration_us: 1,
+            detail: None,
+            cached: false,
+        });
+
+        let mut transforms = Evidence::new();
+        transforms.record("secrets.injected.GIT_TOKEN", true);
+        // A key the chain already set: append-only means the chain's value survives.
+        transforms.record("allowlist.matched", "npm");
+        transforms.flag("CredentialInjected");
+
+        chain.absorb(transforms);
+
+        assert_eq!(chain.fact("allowlist.matched").unwrap(), "github");
+        assert_eq!(chain.fact("secrets.injected.GIT_TOKEN").unwrap(), &true);
+        assert!(chain.has_flag("WriteOperation") && chain.has_flag("CredentialInjected"));
+        assert_eq!(chain.trail.len(), 1);
     }
 
     #[test]

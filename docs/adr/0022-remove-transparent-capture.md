@@ -8,8 +8,9 @@
 
 ## Context
 
-A security review of the implementation ([`review/2026-09-03-security-review.md`](../../review/2026-09-03-security-review.md))
-found that `Server::serve_transparent` derived the policy hostname from the TLS SNI or the
+A security review of the implementation (`review/2026-09-03-security-review.md`, which is not
+committed to this repository) found that `Server::serve_transparent` derived the policy
+hostname from the TLS SNI or the
 HTTP `Host` header, connected to the independently-recovered `SO_ORIGINAL_DST` destination, and
 never checked that the two agreed. It then evaluated one connect-phase policy check and
 byte-relayed the rest of the connection.

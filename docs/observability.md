@@ -71,6 +71,32 @@ Each record carries the resolved identity, whether it was attributed, which reso
 the profile, the deciding layer, the full evidence trail, status and timing. Injected secrets
 are scrubbed from every audit path and log line.
 
+### `facts` and `flags`
+
+`reason` says which layer *decided*. `facts` and `flags` say what every layer and transform
+*observed* along the way — and those are frequently the interesting part:
+
+```json
+{ "action": "allow", "method": "POST", "path": "/mcp",
+  "reason": { "layer": "allowlist", "code": "host_allowed", "rule": "github.com" },
+  "facts": { "mcp.method": "tools/call", "mcp.tool": "create_issue",
+             "secrets.injected.GIT_TOKEN": true },
+  "flags": ["WriteOperation"] }
+```
+
+Both are omitted when empty, so a record with nothing to say is byte-identical to one from
+before these fields existed. Values are layer-supplied and redacted like everything else.
+
+Two things worth knowing about what does *not* appear:
+
+* **A layer that returns a terminal `allow` or `deny` contributes no facts.** `Verdict::Allow`
+  and `Verdict::Deny` carry a `Reason` and nothing else, by design — evidence is what a layer
+  hands *forward* to the next one, and a terminal verdict has no next one. The detail is not
+  lost: it is in `reason`, including `reason.rule`. Facts come from layers that passed.
+* **`secrets.not_injected.<host><path>`** marks an endpoint deliberately left unauthenticated
+  — an OAuth2 swap's own token or authorization endpoint. Its absence of a credential is
+  intentional, and this is what says so.
+
 ### A request marshal answered itself
 
 `action: allow` no longer implies the request reached the upstream. A

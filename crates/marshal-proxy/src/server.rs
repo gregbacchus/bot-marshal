@@ -855,11 +855,15 @@ impl Server {
         cx: &RequestContext,
         reason: &Reason,
         action: Action,
-        evidence: Evidence,
+        mut evidence: Evidence,
         status_code: Option<u16>,
         started: Instant,
         would_deny: bool,
     ) {
+        // Same two halves as the intercepted path: the chain works from a clone, transforms
+        // mutate the context's own. See `mitm::emit`.
+        evidence.absorb(cx.evidence.clone());
+
         self.stats.record(&cx.identity, &cx.profile, action == Action::Allow, would_deny);
         self.audit
             .emit(AuditRecord {
@@ -879,6 +883,8 @@ impl Server {
                 reason: reason.clone(),
                 would_deny,
                 trail: evidence.trail,
+                facts: evidence.facts,
+                flags: evidence.flags,
                 status_code,
                 duration_ms: started.elapsed().as_millis() as u64,
             })

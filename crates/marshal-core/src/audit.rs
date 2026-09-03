@@ -1,6 +1,8 @@
 //! The audit record: one structured entry per request.
 
-use crate::evidence::LayerOutcome;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::evidence::{Fact, Flag, LayerOutcome};
 use crate::verdict::Reason;
 
 /// What was ultimately done with a request.
@@ -38,6 +40,18 @@ pub struct AuditRecord {
     pub would_deny: bool,
     /// Every layer's verdict, in order.
     pub trail: Vec<LayerOutcome>,
+    /// Typed observations from every layer *and* every transform — which DLP pattern matched,
+    /// which MCP tool was called, which allowlist rule hit, which credential was injected.
+    ///
+    /// Distinct from `reason`, which is only the layer that *decided*. A request allowed by an
+    /// allowlist still has a tool name worth recording, and nothing else in the record carries
+    /// it. Omitted when empty, so a record with nothing to say looks exactly as it did before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub facts: BTreeMap<String, Fact>,
+    /// Named boolean observations, e.g. `PossibleSecretInBody`. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub flags: BTreeSet<Flag>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_code: Option<u16>,
     pub duration_ms: u64,

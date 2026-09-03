@@ -149,6 +149,11 @@ impl AuditSink for RequestTracingSink {
         }
 
         let trail = self.redactor.redact(&serde_json::to_string(&r.trail).unwrap_or_default());
+        // Rendered alongside the trail rather than folded into it: the trail says which layers
+        // ran, `facts` says what they observed, and at `--log-detail audit` an operator wants
+        // both. Redacted the same way — a fact's value is layer-supplied and could carry one.
+        let facts = self.redactor.redact(&serde_json::to_string(&r.facts).unwrap_or_default());
+        let flags = self.redactor.redact(&serde_json::to_string(&r.flags).unwrap_or_default());
         match r.action {
             Action::Allow => tracing::info!(
                 target: "access",
@@ -167,6 +172,8 @@ impl AuditSink for RequestTracingSink {
                 status_code = r.status_code.unwrap_or_default(),
                 duration_ms = r.duration_ms,
                 trail = %trail,
+                facts = %facts,
+                flags = %flags,
                 "allow"
             ),
             Action::Deny => tracing::warn!(
@@ -186,6 +193,8 @@ impl AuditSink for RequestTracingSink {
                 status_code = r.status_code.unwrap_or_default(),
                 duration_ms = r.duration_ms,
                 trail = %trail,
+                facts = %facts,
+                flags = %flags,
                 "deny: {message}",
             ),
         }
@@ -229,6 +238,8 @@ mod tests {
             action: Action::Deny,
             reason: Reason::new("allowlist", "host_not_allowlisted", "nope"),
             would_deny: false,
+            facts: Default::default(),
+            flags: Default::default(),
             trail: vec![LayerOutcome {
                 layer: "denylist".into(),
                 verdict: "pass".into(),
