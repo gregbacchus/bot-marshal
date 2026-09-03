@@ -4,9 +4,10 @@ Transforms decide **how** an allowed request is rewritten. They run only after t
 [policy chain](policy-layers.md) has allowed, and the two directions are independent:
 
 * **`request_transforms`** rewrite a request on its way out — setting and filtering headers,
-  swapping a placeholder for a real credential so the agent never holds it.
+  injecting a credential at the boundary so the agent never holds it.
 * **`response_transforms`** rewrite what comes back — redacting a secret the upstream echoed,
-  compacting a body too large to be useful.
+  limiting a body that would overload the agent's context, compacting a body too large to be
+  useful.
 
 ## Header transforms
 
@@ -97,6 +98,70 @@ that actually needs it. See
 
 ## Response body transforms
 
+### Response size limits
+
+```yaml
+response_transforms:
+  body:
+    - transform: limit
+      max_bytes: 262144
+      on_oversize:
+        action: truncate
+        method: utf8
+        marker: "\n...[response truncated by bot-marshal]"
+```
+
+`limit` bounds the response body presented to the agent. `max_bytes` counts bytes, not tokens.
+The default `on_oversize` action is `fail`.
+
+| action | result |
+|---|---|
+| `fail` | returns a small structured `502 Bad Gateway` response with `error: response_too_large` |
+| `truncate` | preserves the upstream status and content type, retaining a prefix plus `marker` within `max_bytes` |
+| `replace` | preserves the upstream status but replaces the body with the configured short UTF-8 message |
+
+`truncate` supports two boundary methods:
+
+* `utf8` (the default) backs up to a valid UTF-8 boundary before adding the marker. This is
+  normally the right choice for JSON, source code, logs, and prose, although the truncated
+  result is not guaranteed to remain valid JSON or another structured format.
+* `bytes` cuts at the exact byte boundary. Use it only when byte-exact behavior matters; it can
+  split a multi-byte character.
+
+The marker counts toward `max_bytes`; if it consumes the entire budget, none of the upstream
+prefix remains. A `replace` body must itself fit within `max_bytes`, which `marshal config
+check` validates. Every action that changes a response sets `X-Marshal-Response-Limited` to
+`fail`, `truncate`, or `replace`, corrects `Content-Length`, and removes stale
+`Content-Encoding`.
+
+```yaml
+response_transforms:
+  body:
+    # Fail is the default and can be written explicitly.
+    - transform: limit
+      max_bytes: 262144
+      on_oversize: { action: fail }
+
+    # Replace the response with a known bounded message.
+    - transform: limit
+      max_bytes: 262144
+      on_oversize:
+        action: replace
+        body: "Response omitted because it exceeded the agent context budget."
+```
+
+Compressed bodies need special care: their wire size does not bound the decoded content an
+agent receives. `fail` and `truncate` therefore refuse any non-identity encoded response with
+a structured `502`; `replace` can discard an encoded response when its wire bytes exceed the
+limit. To enforce the limit against readable response bytes, pair it with
+`request_transforms.set_headers.Accept-Encoding: "identity"`.
+
+The deployment-wide `upstream.max_response_bytes` setting supplies a default `fail` limiter
+for profiles without an explicit `limit`; `0` means uncapped. An explicit profile limit
+replaces that default rather than combining with it.
+
+### Other body transforms
+
 ```yaml
 response_transforms:
   body:
@@ -109,8 +174,10 @@ agent through a response.
 
 **A body transform stops the response streaming.** Bodies stream by default, and a transform
 that rewrites content cannot run over a stream — so declaring one is a statement that the
-responses it applies to are no longer streamable. `marshal config check` warns, and the
-profile should scope it away from SSE and WebSocket endpoints.
+responses it applies to are no longer streamable. `marshal config check` warns. A buffering
+transform applied to SSE fails loudly with a structured `502` rather than being silently
+skipped; upgraded connections bypass response-body transforms. Keep profiles with body
+transforms away from SSE and WebSocket endpoints.
 
 > `summarize` and `compact` are declared as config shapes but **not implemented** — a profile
 > naming one fails to start. See [Roadmap](../roadmap.md#not-built).

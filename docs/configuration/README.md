@@ -59,6 +59,12 @@ profile:                   # the embedded fallback — required, see Profiles
   request_transforms:
     set_headers:
       Accept: "application/json"
+      Accept-Encoding: "identity"
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 262144
+        on_oversize: { action: fail }
 
 identities:                # see Identity
   resolvers: []
