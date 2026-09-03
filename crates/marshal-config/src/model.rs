@@ -56,6 +56,27 @@ pub struct Config {
     /// and refuses to use one that is group- or world-readable.
     #[serde(default)]
     pub state_dir: Option<String>,
+    /// A `KEY=value` file loaded into *marshal's own* environment at startup, so an
+    /// `{ type: env, var: ... }` secret source can be fed from a file kept next to the config
+    /// instead of from whatever exported the variable.
+    ///
+    /// Unset means `.env` next to this file, loaded only if it exists. A named path is
+    /// resolved the same way `profiles_path` is, and must exist. See
+    /// [`crate::env_file`] for the file's syntax, and note that a variable already present in
+    /// the environment always wins over the file.
+    #[serde(default)]
+    pub env_file: Option<EnvFileSetting>,
+}
+
+/// `env_file:` — a path, or `true`/`false` to take or refuse the `.env` default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EnvFileSetting {
+    /// `env_file: false` disables the default entirely; `true` asks for it explicitly, which
+    /// is what absence already means but is worth being able to say out loud in a config that
+    /// documents itself.
+    Enabled(bool),
+    Path(String),
 }
 
 fn default_profiles_path() -> String {

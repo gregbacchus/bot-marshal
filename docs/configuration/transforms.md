@@ -108,6 +108,15 @@ request_transforms:
       rules: [{ host: "api.example.com" }]
 ```
 
+### Where `env` sources get their value
+
+`{ type: env, var: SERVICE_API_KEY }` reads the variable from marshal's environment, or from the
+[env file](README.md#the-env-file) if the environment does not have it — a `KEY=value` file next
+to the config, `.env` by default. The environment wins where both have a value.
+
+The env file is read by marshal and is never loaded into the environment an agent could inherit,
+so a credential kept there stays as far from the agent as one kept in a `file` source.
+
 ### AWS SigV4
 
 ```yaml

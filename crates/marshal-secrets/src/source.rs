@@ -10,6 +10,9 @@ use marshal_core::{Error, Result, SecretSource, SecretValue};
 ///
 /// Read once at resolve time rather than cached at startup, so a process that has its
 /// environment updated in place picks it up — and so the proxy holds no copy it does not need.
+///
+/// Via [`marshal_core::env::var`], so `env_file:` can supply a variable the process
+/// environment does not have. The real environment still wins where both have one.
 #[derive(Debug)]
 pub struct EnvSource {
     var: String,
@@ -28,9 +31,9 @@ impl SecretSource for EnvSource {
     }
 
     async fn resolve(&self) -> Result<SecretValue> {
-        std::env::var(&self.var)
+        marshal_core::env::var(&self.var)
             .map(SecretValue::new)
-            .map_err(|_| Error::Config(format!("environment variable `{}` is not set", self.var)))
+            .ok_or_else(|| Error::Config(format!("environment variable `{}` is not set", self.var)))
     }
 }
 
@@ -99,6 +102,20 @@ mod tests {
         // and would race with other tests in the same process.
         let s = EnvSource::new("PATH");
         assert!(!s.resolve().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn env_source_falls_back_to_the_env_file_overlay() {
+        // The link that makes `env_file:` work at all: nothing here knows the value came from
+        // a file rather than from an export. The overlay is process-global and one-shot, so
+        // this is the only test in this binary that installs one, and it uses a name no other
+        // test asserts on.
+        marshal_core::env::install_overlay([(
+            "MARSHAL_TEST_FROM_ENV_FILE".to_owned(),
+            "value-from-file".to_owned(),
+        )]);
+        let s = EnvSource::new("MARSHAL_TEST_FROM_ENV_FILE");
+        assert_eq!(s.resolve().await.unwrap().expose(), "value-from-file");
     }
 
     #[tokio::test]

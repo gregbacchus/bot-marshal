@@ -16,7 +16,8 @@ listeners:
 | `GET /v1/identities` | bearer | what each agent has done |
 | `POST /v1/reload` | bearer | re-read config and swap atomically |
 
-Bearer auth reads the key from the environment variable named by `api_key_env`. Bind it to
+Bearer auth reads the key from the environment variable named by `api_key_env` — or from the
+[env file](configuration/README.md#the-env-file), if the environment does not have it. Bind it to
 loopback unless something specifically needs otherwise.
 
 ## Hot reload
@@ -37,6 +38,11 @@ swapping a single pointer. **A reload that fails changes nothing**, and says so:
 
 A connection reads the runtime once and keeps that view, so a reload never changes the rules
 under a request already in flight.
+
+**The [env file](configuration/README.md#the-env-file) is not re-read.** Reload rebuilds the
+configuration, but the variables the env file supplied were read once at startup, so a changed
+`.env` needs a restart. A credential that rotates on its own belongs in a `file` source (which
+has a TTL) or an `oauth2` one, not in the env file.
 
 ## Rolling it out
 

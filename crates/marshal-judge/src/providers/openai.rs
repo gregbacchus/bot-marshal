@@ -59,8 +59,8 @@ impl OpenAiProvider {
         max_tokens: Option<u32>,
         base_url: Option<&str>,
     ) -> Result<Self, ProviderError> {
-        let api_key = std::env::var(api_key_env)
-            .map_err(|_| ProviderError::MissingApiKey(api_key_env.to_owned()))?;
+        let api_key = marshal_core::env::var(api_key_env)
+            .ok_or_else(|| ProviderError::MissingApiKey(api_key_env.to_owned()))?;
         Self::new(model, api_key, max_tokens, base_url)
     }
 }

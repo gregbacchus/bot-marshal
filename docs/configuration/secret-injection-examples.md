@@ -13,6 +13,10 @@ grants — `rules` is the entire trust boundary for a swap (see
 the endpoint that actually needs the credential, not as broadly as "the provider's whole domain"
 out of convenience.
 
+Every `{ type: env, var: X }` below needs `X` set somewhere. The environment is one place; the
+[env file](README.md#the-env-file) — `.env` next to the config — is the other, and is usually
+the easier one for a machine that isn't running marshal under systemd.
+
 ## Picking a shape
 
 Most APIs fall into one of five buckets. If a provider isn't listed below, this is usually

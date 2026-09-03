@@ -56,6 +56,7 @@ upstream:
   max_response_bytes: 0
 
 state_dir: "~/.local/state/bot-marshal"   # optional; only OAuth2 enrolment needs it
+env_file: ".env"         # optional; the default, loaded only if it exists — see below
 
 profile:                   # the embedded fallback — required, see Profiles
   default_action: deny
@@ -116,6 +117,64 @@ bundles_path: "~/.config/bot-marshal/shared-bundles"    # ~/ expands against $HO
 Relocating a directory doesn't loosen anything: a file found there is still deserialised as
 nothing but a profile, bundle, or transform bundle, so the same structural guarantees apply
 regardless of where the path points.
+
+## The env file
+
+Most credentials are named rather than written into the config — `source: { type: env, var:
+SERVICE_API_KEY }` — which leaves the variable itself to be set somehow. `env_file:` is the
+somehow: a `KEY=value` file, resolved against the config file's own directory, read at startup.
+
+```yaml
+env_file: ".env"          # the default: loaded if it exists, ignored if not
+env_file: "secrets.env"   # a named file — must exist, or startup fails
+env_file: false           # load nothing
+```
+
+```bash
+# /etc/bot-marshal/.env — chmod 600, and never committed
+SERVICE_API_KEY=sk-live-abc123
+export GIT_TOKEN=ghp_xyz789
+```
+
+It feeds every variable **named by the config**: `env` secret sources (including each source
+inside a `sigv4` or `oauth2` block), `judge.api_key_env`, `listeners.management.api_key_env`,
+and an OAuth2 `password_env`. `marshal config check` reports how many variables it contributed.
+
+Three properties are worth knowing, and are covered by
+[ADR-0033](../adr/0033-the-env-file-is-an-overlay-not-the-environment.md):
+
+* **The real environment wins.** A variable that is already set is left alone, so
+  `SERVICE_API_KEY=… marshal serve` and systemd's `Environment=` still override the file — which
+  is how you apply a rotated token without editing it. `config check` prints how many of the
+  file's variables were already set, since that is the reason a freshly edited file can appear
+  to have no effect.
+* **An agent never sees it.** The file is *not* loaded into marshal's process environment, so
+  nothing `marshal run` launches inherits it. That is the whole point of injecting credentials
+  at the boundary; a `.env` that leaked into the agent would undo it.
+* **It configures marshal, not the request path.** It cannot set a variable for an upstream, a
+  transform, or anything a dependency reads on its own.
+
+It is read once at startup: [`POST /v1/reload`](../operations.md#hot-reload) rebuilds the
+configuration but does not re-read the env file, so a changed `.env` needs a restart. `chmod 600`
+it — marshal warns at startup if other local users can read it.
+
+### The file's syntax
+
+Deliberately minimal, because these values are credentials and every convenience is a way to
+mangle one silently:
+
+| | |
+|---|---|
+| `KEY=value` | optionally prefixed `export `; names are letters, digits and underscores, not starting with a digit |
+| `# comment` | a whole-line comment only — **there are no inline comments**, so `KEY=hunter2#1` has a `#` in the value |
+| `KEY=  value  ` | surrounding whitespace is trimmed; the value is otherwise verbatim |
+| `KEY='value'` | literal, no escapes at all |
+| `KEY="value"` | understands `\n`, `\r`, `\t`, `\\` and `\"`, and nothing else |
+| `KEY=${OTHER}` | **not** interpolated — that is a value containing a dollar sign |
+
+A later line wins over an earlier one with the same name. Anything else — an unterminated quote,
+a line that is not an assignment, text after a closing quote — is an error naming the file and
+line, rather than a guess about what was meant.
 
 ### Trusting a private CA
 

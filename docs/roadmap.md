@@ -83,7 +83,7 @@ without a network.
 | crate | |
 |---|---|
 | `marshal-core` | types and traits — verdicts, policy layers, transforms, identities. No I/O. |
-| `marshal-config` | layered YAML load, the `profiles/`/`bundles/`/`transforms/` convention, validation |
+| `marshal-config` | layered YAML load, the `profiles/`/`bundles/`/`transforms/` convention, the env file, validation |
 | `marshal-tls` | CA load/generate, leaf minting, cache, rustls configs |
 | `marshal-policy` | chain runner and the denylist, allowlist, rules, dlp, mcp layers |
 | `marshal-secrets` | env/file/oauth2 sources, TTL cache, token store, in-band capture, injection and redaction |

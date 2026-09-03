@@ -265,8 +265,28 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Before any subcommand runs, so every config-named variable resolves the same way no
+    // matter which one needs it. `Sandbox` reaches here with an empty path and simply finds
+    // nothing to load, which is right: it takes no config and injects no secrets.
+    let env_file = match load_env_file(&config_path) {
+        Ok(applied) => applied,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(applied) = &env_file {
+        // Counts, never names or values — this file is where the credentials are.
+        tracing::debug!(
+            path = %applied.path.display(),
+            applied = applied.applied,
+            already_set = applied.shadowed,
+            "loaded env file"
+        );
+    }
+
     match cli.command {
-        Command::Config(ConfigCommand::Check) => config_check(&config_path),
+        Command::Config(ConfigCommand::Check) => config_check(&config_path, env_file.as_ref()),
         Command::Ca(cmd) => ca_command(&config_path, cmd),
         Command::Secrets(SecretsCommand::Oauth(cmd)) => {
             let rt = match tokio::runtime::Runtime::new() {
@@ -442,7 +462,7 @@ async fn serve(
     // The management API rebuilds through the same closure, and only swaps on success.
     let management = match cfg.listeners.management.clone() {
         Some(m) => {
-            let token = std::env::var(&m.api_key_env).ok();
+            let token = marshal_core::env::var(&m.api_key_env);
             if token.is_none() {
                 tracing::warn!(
                     var = %m.api_key_env,
@@ -735,7 +755,7 @@ fn build_identities(
                     // A credential whose environment variable is unset is a configuration
                     // error, not an entry to skip: skipping it would silently downgrade that
                     // agent to the fallback profile.
-                    let password = std::env::var(&c.password_env).map_err(|_| {
+                    let password = marshal_core::env::var(&c.password_env).ok_or_else(|| {
                         anyhow::anyhow!(
                             "identities.resolvers: `{}` is not set, so the credential for `{}` \
                              cannot be built",
@@ -972,6 +992,56 @@ fn run_command(
     }
 }
 
+/// What `load_env_file` actually did, for the one caller that reports it.
+struct AppliedEnv {
+    path: PathBuf,
+    /// How many variables the file contributed — the ones the environment did not already
+    /// have.
+    applied: usize,
+    /// How many the environment already had, and so were left alone.
+    shadowed: usize,
+}
+
+/// Read `env_file:` and install it as the environment overlay.
+///
+/// This does *not* touch the process environment: see [`marshal_core::env`] for why not — in
+/// short, the real environment must keep winning, and an agent launched by `marshal run` must
+/// not inherit credentials the config went to the trouble of injecting at the boundary
+/// instead. Everything that reads a config-named variable reads it through
+/// `marshal_core::env::var`, so the overlay reaches all of them.
+fn load_env_file(config_path: &std::path::Path) -> anyhow::Result<Option<AppliedEnv>> {
+    let requested = marshal_config::env_file::requested_for(config_path);
+    let Some((path, vars)) = marshal_config::env_file::read(&requested)? else {
+        return Ok(None);
+    };
+
+    // A warning, not a refusal, unlike `state_dir` — that directory is one marshal creates and
+    // owns, whereas an env file is often an existing file the operator already manages (and
+    // may deliberately share with something else). Worth saying once, at startup, all the
+    // same: it holds credentials.
+    warn_if_world_readable(&path);
+
+    let shadowed = vars.iter().filter(|(k, _)| std::env::var_os(k).is_some()).count();
+    let applied = AppliedEnv { path, applied: vars.len() - shadowed, shadowed };
+    marshal_core::env::install_overlay(vars);
+    Ok(Some(applied))
+}
+
+fn warn_if_world_readable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        tracing::warn!(
+            path = %path.display(),
+            mode = format!("{mode:o}"),
+            "env file is readable by other local users; chmod 600 it"
+        );
+    }
+}
+
 /// Where the config lives when `--config` / `MARSHAL_CONFIG` was not given.
 ///
 /// The XDG user config directory — `$XDG_CONFIG_HOME/bot-marshal/config.yaml`, or
@@ -1170,7 +1240,7 @@ fn init_tracing(
     Ok(())
 }
 
-fn config_check(path: &std::path::Path) -> ExitCode {
+fn config_check(path: &std::path::Path, env_file: Option<&AppliedEnv>) -> ExitCode {
     let cfg = match marshal_config::load(path) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1210,6 +1280,19 @@ fn config_check(path: &std::path::Path) -> ExitCode {
         cfg.profiles.len() + 1,
         cfg.bundles.len()
     );
+    // The env file was already read and applied before this command ran — its syntax errors
+    // and a missing named file have therefore already failed the check. Report what it
+    // contributed, because "the variable is set" is otherwise invisible from the config alone,
+    // and a variable the environment already had is a real reason a rotated file has no
+    // effect.
+    if let Some(env) = env_file {
+        println!(
+            "{}: {} variable(s) set, {} already in the environment",
+            env.path.display(),
+            env.applied,
+            env.shadowed
+        );
+    }
     ExitCode::SUCCESS
 }
 

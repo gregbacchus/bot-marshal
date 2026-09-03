@@ -74,6 +74,7 @@ use and is the wrong answer for a daemon.
 ```
 /etc/bot-marshal/
 ├── marshal.yaml
+├── .env            # mode 0600 — the credentials `env` sources name (optional)
 ├── profiles/
 ├── bundles/
 └── transforms/
@@ -83,6 +84,11 @@ use and is the wrong answer for a daemon.
 ```
 
 Secret files a `file`-type source points at belong here too, readable only by the service user.
+
+Under systemd, `EnvironmentFile=` and the [env file](configuration/README.md#the-env-file) do
+the same job, and the environment wins where both set a variable. Pick one — two places to look
+is how a rotated token ends up applied in the one that loses. The env file is read once at
+startup, so either way a change needs a restart, not `POST /v1/reload`.
 
 ## The service-account gotcha
 

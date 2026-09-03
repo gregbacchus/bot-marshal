@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod encoding;
+pub mod env;
 pub mod error;
 pub mod evidence;
 pub mod hosts;

@@ -30,6 +30,11 @@ building a source parses its configuration, it does not read the environment var
 the file, or call the token endpoint. The one thing it does read is `tls.upstream_ca_certs`,
 so a config naming a CA file that is not there now fails the check rather than the next start.
 
+The [env file](configuration/README.md#the-env-file) is read by every subcommand, including this
+one, so a syntax error in it — or a named `env_file:` that is missing — fails the check too. On
+success it prints how many variables the file contributed and how many the environment already
+had, which is the usual reason an edited `.env` appears to do nothing.
+
 Warnings do not fail the check but are worth reading; `serve` logs them at startup and refuses
 to start on an error the same way.
 
