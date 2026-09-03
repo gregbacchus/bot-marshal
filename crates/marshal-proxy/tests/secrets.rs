@@ -153,10 +153,14 @@ impl std::fmt::Debug for SharedWriter {
     }
 }
 
+/// A [`FixedSecret`] source yielding [`REAL_SECRET`], for constructing an `Injection` variant.
+fn fixed_source() -> Arc<dyn marshal_core::SecretSource> {
+    Arc::new(FixedSecret(REAL_SECRET))
+}
+
 fn swap(injection: Injection) -> SecretSwap {
     SecretSwap {
         name: "TEST_SECRET".into(),
-        source: Arc::new(FixedSecret(REAL_SECRET)),
         injection,
         hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
     }
@@ -208,7 +212,7 @@ async fn basic_injection_sets_the_header_the_client_never_sent_at_all() {
     // header at all — and the credential appears anyway, because config named the host.
     let h = harness(
         ALLOW_LOOPBACK,
-        vec![swap(Injection::Basic { username: "x-access-token".into() })],
+        vec![swap(Injection::Basic { username: "x-access-token".into(), source: fixed_source() })],
         &[REAL_SECRET],
     )
     .await;
@@ -222,7 +226,12 @@ async fn basic_injection_sets_the_header_the_client_never_sent_at_all() {
 
 #[tokio::test]
 async fn bearer_injection_sets_the_header_the_client_never_sent_at_all() {
-    let h = harness(ALLOW_LOOPBACK, vec![swap(Injection::Bearer)], &[REAL_SECRET]).await;
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::Bearer { source: fixed_source() })],
+        &[REAL_SECRET],
+    )
+    .await;
 
     let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
 
@@ -233,7 +242,10 @@ async fn bearer_injection_sets_the_header_the_client_never_sent_at_all() {
 async fn header_injection_sets_an_arbitrary_header_the_client_never_sent_at_all() {
     let h = harness(
         ALLOW_LOOPBACK,
-        vec![swap(Injection::Header { name: http::header::HeaderName::from_static("x-api-key") })],
+        vec![swap(Injection::Header {
+            name: http::header::HeaderName::from_static("x-api-key"),
+            source: fixed_source(),
+        })],
         &[REAL_SECRET],
     )
     .await;
@@ -246,12 +258,77 @@ async fn header_injection_sets_an_arbitrary_header_the_client_never_sent_at_all(
 }
 
 #[tokio::test]
+async fn query_injection_appends_a_parameter_the_client_never_sent_at_all() {
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::Query { name: "api_key".into(), source: fixed_source() })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
+
+    assert_eq!(seen["query"], format!("api_key={REAL_SECRET}"));
+    assert_eq!(seen["authorization"], "");
+}
+
+#[tokio::test]
+async fn query_injection_preserves_a_query_the_client_already_sent() {
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::Query { name: "api_key".into(), source: fixed_source() })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;
+    let req = hyper::Request::builder()
+        .uri(format!("https://{}/reflect?limit=10", h.upstream))
+        .header("host", h.upstream.to_string())
+        .body(empty())
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let seen: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(seen["query"], format!("limit=10&api_key={REAL_SECRET}"));
+}
+
+#[tokio::test]
+async fn sigv4_injection_signs_the_request_the_client_never_touched_at_all() {
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::SigV4 {
+            access_key_id: Arc::new(FixedSecret("AKIAIOSFODNN7EXAMPLE")),
+            secret_access_key: fixed_source(),
+            session_token: None,
+            region: "us-east-1".into(),
+            service: "s3".into(),
+            body_cap: 65536,
+        })],
+        &[REAL_SECRET],
+    )
+    .await;
+
+    let seen = reflect(&h, |b| b.body(empty()).unwrap()).await;
+
+    let auth = seen["authorization"].as_str().unwrap();
+    assert!(auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"), "{auth}");
+    assert!(auth.contains("/us-east-1/s3/aws4_request, "), "{auth}");
+    assert!(auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date, "), "{auth}");
+    assert!(auth.contains("Signature="), "{auth}");
+    // The secret access key itself never appears anywhere in what the upstream — or the
+    // audit trail — sees, only the derived signature.
+    assert!(!auth.contains(REAL_SECRET));
+}
+
+#[tokio::test]
 async fn injection_overwrites_whatever_authorization_the_client_did_send() {
     // If a client sends its own (irrelevant) Authorization header, injection replaces it —
     // the configured credential is authoritative for this host, not a fallback.
     let h = harness(
         ALLOW_LOOPBACK,
-        vec![swap(Injection::Basic { username: "x-access-token".into() })],
+        vec![swap(Injection::Basic { username: "x-access-token".into(), source: fixed_source() })],
         &[REAL_SECRET],
     )
     .await;
@@ -270,7 +347,12 @@ async fn injection_overwrites_whatever_authorization_the_client_did_send() {
 async fn the_real_secret_never_appears_in_the_audit_trail() {
     // The plan's acceptance criterion, tested the way an operator would check it: search the
     // entire audit output for the literal value.
-    let h = harness(ALLOW_LOOPBACK, vec![swap(Injection::Bearer)], &[REAL_SECRET]).await;
+    let h = harness(
+        ALLOW_LOOPBACK,
+        vec![swap(Injection::Bearer { source: fixed_source() })],
+        &[REAL_SECRET],
+    )
+    .await;
 
     reflect(&h, |b| b.body(empty()).unwrap()).await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -288,7 +370,7 @@ async fn the_real_secret_never_appears_in_the_audit_trail() {
 async fn requests_to_other_hosts_are_not_touched() {
     // The swap is scoped by host. A request to a host the swap does not name must not be
     // authenticated with a credential meant for somewhere else.
-    let mut s = swap(Injection::Bearer);
+    let mut s = swap(Injection::Bearer { source: fixed_source() });
     s.hosts = HostMatcher::new(["only.example.com"], Vec::<&str>::new()).unwrap();
     let h = harness(ALLOW_LOOPBACK, vec![s], &[REAL_SECRET]).await;
 

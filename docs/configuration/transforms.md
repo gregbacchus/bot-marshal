@@ -76,11 +76,11 @@ including nothing at all.
 
 | field | |
 |---|---|
-| `source` | `{ type: env, var: ... }` or `{ type: file, path: ... }` |
-| `inject` | how, and on which header, to set the credential — see below |
+| `source` | `{ type: env, var: ... }` or `{ type: file, path: ... }` — required for every `inject.type` except `sigv4`, which carries its own sources instead |
+| `inject` | how, and where, to set the credential — see below |
 | `rules` | the hosts this swap applies to — a credential is never offered to a host that shouldn't see it |
 
-Three injection kinds:
+Five injection kinds:
 
 * **`{ type: basic, username: "..." }`** — `Authorization: Basic base64("{username}:{secret}")`,
   what `git`, most package registries, and container registry logins use
@@ -90,6 +90,11 @@ Three injection kinds:
 * **`{ type: header, name: "..." }`** — `{name}: {secret}`, the raw secret value set on an
   arbitrary header. Covers the common API-key pattern where a service defines its own header
   (`X-Api-Key`, `Api-Key`, or a vendor-specific name) instead of using `Authorization` at all.
+* **`{ type: query, name: "..." }`** — `?{name}={secret}` appended to the request's query
+  string, percent-encoded, alongside whatever query the client already sent. For APIs that
+  accept (or only accept) the key this way.
+* **`{ type: sigv4, ... }`** — AWS Signature Version 4. See below; this kind needs its own
+  section because it signs the whole request rather than setting one static value.
 
 ```yaml
 request_transforms:
@@ -99,6 +104,41 @@ request_transforms:
       inject: { type: header, name: "X-Api-Key" }
       rules: [{ host: "api.example.com" }]
 ```
+
+### AWS SigV4
+
+```yaml
+request_transforms:
+  secrets:
+    - name: AWS_S3
+      inject:
+        type: sigv4
+        access_key_id: { type: env, var: AWS_ACCESS_KEY_ID }
+        secret_access_key: { type: env, var: AWS_SECRET_ACCESS_KEY }
+        session_token: { type: env, var: AWS_SESSION_TOKEN }  # optional, for temporary creds
+        region: us-east-1
+        service: s3
+        max_body_bytes: 1048576   # optional, defaults to 1 MiB
+      rules: [{ host: "*.s3.amazonaws.com" }]
+```
+
+SigV4 signs the request — method, canonical path and query, `host`, and a hash of the body —
+with an access key pair, rather than setting one static header value. That needs two secrets,
+not one, so a `sigv4` swap does not use the top-level `source` field at all; setting one
+alongside `inject.type: sigv4` is a config error. `access_key_id` and `secret_access_key` are
+each their own `{ type: env, ... }` / `{ type: file, ... }` source, exactly like the top-level
+`source` field on every other kind. `session_token` is optional, for temporary/STS credentials.
+
+**This kind buffers the request body**, capped by `max_body_bytes` (default 1 MiB) — the one
+exception among the injection kinds, all of which otherwise only ever touch headers or the
+query string. A body larger than the cap is refused, never signed unhashed. See
+[ADR-0028](../adr/0028-sigv4-buffers-the-body.md) for why this proxy always hashes the real
+body rather than falling back to AWS's `UNSIGNED-PAYLOAD` mode, and what that means for very
+large signed uploads.
+
+Only `host`, `x-amz-content-sha256`, and `x-amz-date` are signed headers — that is all AWS
+requires. `X-Amz-Security-Token` is set when `session_token` is configured but, per AWS's own
+rule for temporary credentials, is not itself part of the signature.
 
 Secrets are redacted in every audit path and log line.
 

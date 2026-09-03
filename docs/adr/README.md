@@ -38,6 +38,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0025](0025-basic-auth-aware-secret-injection.md) | Secret injection understands `Basic` auth, with no new config | Superseded by [0027](0027-secret-injection-is-unconditional-only.md) |
 | [0026](0026-blind-credential-injection.md) | Blind credential injection, for a client that presents nothing | Accepted |
 | [0027](0027-secret-injection-is-unconditional-only.md) | Secret injection is unconditional injection only | Accepted |
+| [0028](0028-sigv4-buffers-the-body.md) | SigV4 injection buffers the body, capped, as a declared exception | Accepted |
 
 ## Writing a new one
 

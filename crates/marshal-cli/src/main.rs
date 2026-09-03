@@ -1201,37 +1201,91 @@ fn build_injector(
         let spec: SecretSpec = serde_json::from_value(raw.clone())
             .map_err(|e| anyhow::anyhow!("request_transforms.secrets[{i}]: {e}"))?;
 
-        let source: Arc<dyn SecretSource> = match &spec.source {
-            SecretSourceSpec::Env { var } => Arc::new(marshal_secrets::EnvSource::new(var)),
-            SecretSourceSpec::File { path, ttl, json_key } => {
-                Arc::new(marshal_secrets::FileSource::new(
-                    expand_tilde(path),
-                    ttl.unwrap_or(std::time::Duration::from_secs(300)),
-                    json_key.clone(),
-                ))
-            }
-        };
-
-        let name = spec.name.clone().unwrap_or_else(|| source.name().to_owned());
         let hosts = build_host_matcher(&spec.rules, cfg)?;
 
-        let injection = match spec.inject {
-            InjectSpec::Basic { username } => marshal_secrets::Injection::Basic { username },
-            InjectSpec::Bearer => marshal_secrets::Injection::Bearer,
-            InjectSpec::Header { name: header_name } => {
-                let name = http::HeaderName::try_from(header_name.as_str()).map_err(|e| {
+        // `source` is required for every kind except `sigv4`, which carries its own two (or
+        // three) secrets instead — one `source:` value cannot express an access key pair.
+        let require_source = || -> anyhow::Result<Arc<dyn SecretSource>> {
+            let s = spec.source.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "request_transforms.secrets[{i}]: `source` is required for this `inject.type`"
+                )
+            })?;
+            Ok(build_source(s))
+        };
+
+        let injection = match &spec.inject {
+            InjectSpec::Basic { username } => marshal_secrets::Injection::Basic {
+                username: username.clone(),
+                source: require_source()?,
+            },
+            InjectSpec::Bearer => marshal_secrets::Injection::Bearer { source: require_source()? },
+            InjectSpec::Header { name } => {
+                let header_name = http::HeaderName::try_from(name.as_str()).map_err(|e| {
                     anyhow::anyhow!(
                         "request_transforms.secrets[{i}].inject.name: invalid header name \
-                         {header_name:?}: {e}"
+                         {name:?}: {e}"
                     )
                 })?;
-                marshal_secrets::Injection::Header { name }
+                marshal_secrets::Injection::Header { name: header_name, source: require_source()? }
+            }
+            InjectSpec::Query { name } => {
+                marshal_secrets::Injection::Query { name: name.clone(), source: require_source()? }
+            }
+            InjectSpec::Sigv4(sigv4) => {
+                let Sigv4Spec {
+                    access_key_id,
+                    secret_access_key,
+                    session_token,
+                    region,
+                    service,
+                    max_body_bytes,
+                } = sigv4.as_ref();
+                if spec.source.is_some() {
+                    anyhow::bail!(
+                        "request_transforms.secrets[{i}]: `source` has no effect with \
+                         `inject.type: sigv4` — set `access_key_id` and `secret_access_key` \
+                         on the sigv4 spec instead"
+                    );
+                }
+                marshal_secrets::Injection::SigV4 {
+                    access_key_id: build_source(access_key_id),
+                    secret_access_key: build_source(secret_access_key),
+                    session_token: session_token.as_ref().map(build_source),
+                    region: region.clone(),
+                    service: service.clone(),
+                    body_cap: max_body_bytes.unwrap_or(1_048_576),
+                }
             }
         };
 
-        swaps.push(SecretSwap { name, source, injection, hosts });
+        let default_name = match &injection {
+            marshal_secrets::Injection::Basic { source, .. }
+            | marshal_secrets::Injection::Bearer { source }
+            | marshal_secrets::Injection::Header { source, .. }
+            | marshal_secrets::Injection::Query { source, .. } => source.name().to_owned(),
+            marshal_secrets::Injection::SigV4 { access_key_id, .. } => {
+                access_key_id.name().to_owned()
+            }
+        };
+        let name = spec.name.clone().unwrap_or(default_name);
+
+        swaps.push(SecretSwap { name, injection, hosts });
     }
     Ok(SecretInjector::new(swaps))
+}
+
+fn build_source(spec: &SecretSourceSpec) -> Arc<dyn marshal_core::SecretSource> {
+    match spec {
+        SecretSourceSpec::Env { var } => Arc::new(marshal_secrets::EnvSource::new(var)),
+        SecretSourceSpec::File { path, ttl, json_key } => {
+            Arc::new(marshal_secrets::FileSource::new(
+                expand_tilde(path),
+                ttl.unwrap_or(std::time::Duration::from_secs(300)),
+                json_key.clone(),
+            ))
+        }
+    }
 }
 
 fn build_host_matcher(
@@ -1246,11 +1300,14 @@ fn build_host_matcher(
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SecretSpec {
-    /// Label used in the audit trail. Defaults to the source's own name.
+    /// Label used in the audit trail. Defaults to the source's own name (or, for `sigv4`, the
+    /// access key id source's name).
     #[serde(default)]
     name: Option<String>,
-    source: SecretSourceSpec,
-    /// What credential header to set on every allowed request to `rules` — unconditionally,
+    /// Required for every `inject.type` except `sigv4`, which carries its own sources.
+    #[serde(default)]
+    source: Option<SecretSourceSpec>,
+    /// What credential to set on every allowed request to `rules` — unconditionally,
     /// replacing whatever the client sent, regardless of whether it sent anything.
     inject: InjectSpec,
     #[serde(default)]
@@ -1268,6 +1325,27 @@ enum InjectSpec {
     /// `{name}: {secret}` — an arbitrary header set to the raw secret value, for services
     /// that use their own API-key header instead of `Authorization`.
     Header { name: String },
+    /// `?{name}={secret}` appended to the request's query string.
+    Query { name: String },
+    /// AWS Signature Version 4. Needs an access key pair rather than one secret, so it does
+    /// not use the swap's top-level `source` — set `access_key_id` and `secret_access_key`
+    /// here instead. Forces the request body to buffer (see
+    /// [ADR-0028](../docs/adr/0028-sigv4-buffers-the-body.md)); `max_body_bytes` bounds that,
+    /// defaulting to 1 MiB.
+    Sigv4(Box<Sigv4Spec>),
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Sigv4Spec {
+    access_key_id: SecretSourceSpec,
+    secret_access_key: SecretSourceSpec,
+    #[serde(default)]
+    session_token: Option<SecretSourceSpec>,
+    region: String,
+    service: String,
+    #[serde(default)]
+    max_body_bytes: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1537,5 +1615,65 @@ request_transforms:
         );
         let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
         assert!(err.to_string().contains("invalid header name"), "{err}");
+    }
+
+    #[test]
+    fn a_query_inject_swap_builds() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: X
+      source: { type: env, var: X }
+      inject: { type: query, name: "api_key" }
+      rules: [{ host: "example.com" }]
+"#,
+        );
+        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        assert!(!injector.is_empty());
+    }
+
+    #[test]
+    fn a_sigv4_inject_swap_builds_with_its_own_two_sources() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: AWS_S3
+      inject:
+        type: sigv4
+        access_key_id: { type: env, var: AWS_ACCESS_KEY_ID }
+        secret_access_key: { type: env, var: AWS_SECRET_ACCESS_KEY }
+        region: us-east-1
+        service: s3
+      rules: [{ host: "*.s3.amazonaws.com" }]
+"#,
+        );
+        let injector = build_injector(&p, &marshal_config::model::Config::default()).unwrap();
+        assert!(!injector.is_empty());
+    }
+
+    #[test]
+    fn a_sigv4_inject_swap_rejects_a_top_level_source() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: AWS_S3
+      source: { type: env, var: AWS_SECRET_ACCESS_KEY }
+      inject:
+        type: sigv4
+        access_key_id: { type: env, var: AWS_ACCESS_KEY_ID }
+        secret_access_key: { type: env, var: AWS_SECRET_ACCESS_KEY }
+        region: us-east-1
+        service: s3
+      rules: [{ host: "*.s3.amazonaws.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default()).unwrap_err();
+        assert!(err.to_string().contains("no effect"), "{err}");
     }
 }
