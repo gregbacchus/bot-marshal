@@ -10,7 +10,9 @@ use marshal_audit::JsonSink;
 use marshal_config::model::Config;
 use marshal_core::{AuditSink, DenyingDecider, IdentityResolver};
 use marshal_policy::{HostMatcher, build_chain};
-use marshal_proxy::identity::{IdentityRegistry, PeerCredResolver, ProxyAuthResolver};
+use marshal_proxy::identity::{
+    IdentityRegistry, ListenerPortResolver, PeerCredResolver, ProxyAuthResolver,
+};
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
 use support::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -117,7 +119,7 @@ async fn harness(
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(SharedWriter(Arc::clone(&buffer))));
 
     let server = Server::new(
-        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: HashMap::new(),
@@ -396,11 +398,7 @@ async fn the_unix_listener_identifies_by_so_peercred() {
     );
 
     let server = Server::new(
-        ServerConfig {
-            listen: "127.0.0.1:0".into(),
-            unix_socket: Some(sock.clone()),
-            transparent: Vec::new(),
-        },
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: Some(sock.clone()) },
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: HashMap::new(),
@@ -483,6 +481,86 @@ async fn per_identity_counters_track_allowed_and_denied() {
         .filter(|r| r["identity"] == "agent-blocked" && r["action"] == "deny")
         .count();
     assert_eq!(denied, 2);
+}
+
+/// Two explicit ports, one profile mapped by `listener_port`, no firewall involved: the
+/// identity comes purely from which of the proxy's own listeners accepted the connection.
+#[tokio::test]
+async fn two_explicit_ports_resolve_to_different_identities() {
+    let upstream = start_upstream(b"UPSTREAM").await;
+
+    // Reserve a second free port up front, the same way the management-API tests do — bind
+    // to :0 to let the kernel pick one, then drop it so the real server can bind it instead.
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+
+    let cfg = two_profiles();
+    let mut chains = HashMap::new();
+    for (name, profile) in &cfg.profiles {
+        chains.insert(
+            Arc::from(name.as_str()),
+            Arc::new(build_chain(&cfg, name, profile, Arc::new(DenyingDecider)).unwrap()),
+        );
+    }
+
+    // Only the second port is mapped. Anything arriving on the first, unmapped one is
+    // unattributed and gets the restricted fallback — proving the resolver keys on the
+    // *accepting* listener, not just "any explicit connection".
+    let resolver: Arc<dyn IdentityResolver> = Arc::new(ListenerPortResolver::new([(
+        second_addr.port(),
+        "agent-b".to_string(),
+        "permissive".to_string(),
+    )]));
+
+    let server = Server::new(
+        ServerConfig {
+            listen: vec!["127.0.0.1:0".into(), second_addr.to_string()],
+            unix_socket: None,
+        },
+        handle(marshal_proxy::runtime::Runtime {
+            chains,
+            response_transforms: HashMap::new(),
+            request_transforms: std::collections::HashMap::new(),
+            default_chain: Arc::new(marshal_policy::Chain::new(
+                "default",
+                vec![],
+                marshal_core::Decision::Deny,
+                Arc::new(DenyingDecider),
+            )),
+            default_response_transforms: Vec::new(),
+            default_request_transforms: Vec::new(),
+            identities: Arc::new(IdentityRegistry::new(
+                vec![resolver],
+                Some(Arc::from("restricted")),
+                false,
+                false,
+            )),
+            passthrough: HostMatcher::default(),
+            tls: support::test_engine(),
+        }),
+        Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
+        Arc::new(marshal_audit::JsonSink::new(tokio::io::sink())),
+    );
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut tx = Some(tx);
+        let _ = server
+            .run(move |a| {
+                let _ = tx.take().unwrap().send(a);
+            })
+            .await;
+    });
+    let first_addr = rx.await.unwrap();
+    // The second listener binds asynchronously, after `on_bind` fires for the first.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let unmapped = connect_as(first_addr, upstream, None).await;
+    assert!(unmapped.starts_with("HTTP/1.1 403"), "unmapped port: {unmapped}");
+
+    let mapped = connect_as(second_addr, upstream, None).await;
+    assert!(mapped.starts_with("HTTP/1.1 200"), "mapped port: {mapped}");
 }
 
 /// Keeps the unused-import checker happy for the body helper the harness shares.

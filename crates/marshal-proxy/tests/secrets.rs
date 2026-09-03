@@ -102,7 +102,7 @@ async fn harness(yaml: &str, swaps: Vec<SecretSwap>, redact: &[&str]) -> Harness
     }
 
     let server = Server::new(
-        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
         handle(runtime_with(chain, engine, HostMatcher::default(), transforms, Vec::new())),
         Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
         audit_sink,

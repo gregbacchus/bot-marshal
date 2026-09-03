@@ -32,6 +32,8 @@ later, so a future change is made knowingly rather than by accident.
 | [0019](0019-log-detail-sink-and-format-are-independent.md) | Log detail, sink and format are three independent axes | Accepted |
 | [0020](0020-reload-builds-everything-before-swapping.md) | Reload builds everything before swapping; a failure changes nothing | Accepted |
 | [0021](0021-identity-not-session.md) | "Identity", not "session" | Accepted |
+| [0022](0022-remove-transparent-capture.md) | Remove transparent (nftables REDIRECT) capture | Accepted |
+| [0023](0023-multi-port-explicit-listeners.md) | Multi-port explicit listeners, to restore `listener_port` identity | Accepted |
 
 ## Writing a new one
 

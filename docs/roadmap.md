@@ -15,10 +15,32 @@ audited separately.
 | M4 | Identity resolution, profiles, `marshal run` | done |
 | M4.5 | LLM judge layer | done |
 | M5 | MCP tool-level policy | done |
-| M6 | Transparent (nftables) and DNS interception | done |
-| M7 | Management API, hot reload, warn mode, metrics | done¹ |
+| M6 | Transparent (nftables) and DNS interception | done, later partially reverted¹ |
+| M7 | Management API, hot reload, warn mode, metrics | done² |
 
-¹ OpenTelemetry export is not implemented — see below.
+¹ Transparent (nftables REDIRECT) capture was removed after M6 — see
+[Removed](#removed) below. DNS interception is unaffected.
+
+² OpenTelemetry export is not implemented — see below.
+
+## Removed
+
+**Transparent (nftables REDIRECT) capture.** Shipped in M6, removed afterward: it derived the
+policy hostname from TLS SNI or the HTTP `Host` header but never verified the redirected
+destination actually belonged to it, and it byte-relayed the connection rather than
+intercepting, so `rules`/`dlp`/`mcp`/`judge` and every transform never ran on that traffic —
+the same gap [interception being mandatory](concepts.md#why-interception-is-mandatory) exists
+to close for explicit traffic. See [ADR-0022](adr/0022-remove-transparent-capture.md).
+
+Losing it also broke `listener_port` identity, which depended on transparent's multi-listener
+mechanism to bind more than one port. That resolver now works again through a different,
+simpler path: `listeners.explicit.listen` accepts a list of addresses, each running the full
+policy pipeline (not a raw relay) — see [Identity](configuration/identity.md#listener_port) and
+[ADR-0023](adr/0023-multi-port-explicit-listeners.md).
+
+For a workload that cannot be configured to use a proxy at all, [DNS capture](capture.md#dns)
+is the supported option now — weaker, but honest about that weakness rather than silently
+under-enforcing while appearing to intercept.
 
 ## Not built
 
@@ -44,9 +66,6 @@ not start end to end as written.
 **Rego rules via `regorus`.** The `rules` layer is CEL only. Rego is designed for as an opt-in
 for anyone already running OPA policy.
 
-**TPROXY.** Transparent mode uses REDIRECT, which is enough for TCP to the proxy's own host.
-TPROXY would preserve the original destination without conntrack.
-
 ## Architecture
 
 `marshal-core` holds the traits and types and depends on no other crate in the workspace;
@@ -62,7 +81,7 @@ without a network.
 | `marshal-secrets` | env/file sources, TTL cache, injection and redaction |
 | `marshal-judge` | the LLM judge layer: providers, structured verdicts, cache, breaker |
 | `marshal-launch` | `marshal run`: netns and cgroup isolation, identity registration |
-| `marshal-proxy` | listeners, CONNECT, SOCKS5, transparent, MITM, streaming, upstream guard |
+| `marshal-proxy` | listeners, CONNECT, SOCKS5, MITM, streaming, upstream guard |
 | `marshal-dns` | hickory authority: resolve-to-proxy, passthrough, static records |
 | `marshal-audit` | JSON records, tracing layer |
 | `marshal-cli` | the `marshal` binary |

@@ -15,12 +15,6 @@ listeners:
     listen: "127.0.0.1:8080"          # HTTP CONNECT and SOCKS5, protocol sniffed
     unix_socket: "/run/user/1000/marshal.sock"   # unlocks SO_PEERCRED identity
 
-  # Transparent interception: connections redirected here by nftables, from clients that do
-  # not know they are proxied. See deploy/nftables.conf.
-  transparent:
-    enabled: false
-    listen: ["127.0.0.1:8081"]
-
   # DNS interception: resolve every name to the proxy so unconfigured workloads arrive on
   # their own. A convenience for clients that cannot be configured, not a containment
   # boundary — anything with its own resolver never asks us.
@@ -76,8 +70,8 @@ profile:
 
 identities:
   # Tried in order; first match wins. Identity is derived from the connection, never asserted
-  # by the client — transparent and DNS ingress give the client no way to present a
-  # credential. They are listed strongest-first, which is also the order they should be tried:
+  # by the client — DNS ingress gives the client no way to present a credential. They are
+  # listed strongest-first, which is also the order they should be tried:
   #
   #   peer_cred uid  kernel-supplied, unspoofable; only separates agents running as
   #                  different users

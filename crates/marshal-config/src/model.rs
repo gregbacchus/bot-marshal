@@ -80,8 +80,6 @@ pub struct Listeners {
     #[serde(default)]
     pub explicit: Option<ExplicitListener>,
     #[serde(default)]
-    pub transparent: Option<TransparentListener>,
-    #[serde(default)]
     pub dns: Option<DnsListener>,
     #[serde(default)]
     pub management: Option<ManagementListener>,
@@ -90,23 +88,34 @@ pub struct Listeners {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExplicitListener {
-    /// HTTP CONNECT and SOCKS5 share one port; the protocol is sniffed.
-    pub listen: String,
+    /// HTTP CONNECT and SOCKS5 share one port; the protocol is sniffed. A single address
+    /// (`"127.0.0.1:8080"`) is the common case; a list binds more than one, all serving the
+    /// identical protocol — the only difference is which port accepted the connection, which
+    /// is what the `listener_port` identity resolver keys on.
+    #[serde(deserialize_with = "one_or_many")]
+    pub listen: Vec<String>,
     /// Optional Unix-domain listener. Unlocks `SO_PEERCRED`, which is the only unspoofable,
     /// race-free identity available on a single host.
     #[serde(default)]
     pub unix_socket: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TransparentListener {
-    #[serde(default)]
-    pub enabled: bool,
-    /// Addresses to accept redirected connections on. More than one so nftables can steer
-    /// different identities to different ports.
-    #[serde(default)]
-    pub listen: Vec<String>,
+/// Accepts either a bare string or a list of strings, so `listen: "addr"` keeps working
+/// unchanged for the single-address case while `listen: ["addr1", "addr2"]` opts into more.
+fn one_or_many<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(de)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

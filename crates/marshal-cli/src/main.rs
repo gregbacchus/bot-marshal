@@ -343,25 +343,27 @@ async fn serve(
     }
     let audit: Arc<dyn AuditSink> = Arc::new(MultiSink::new(sinks));
 
-    let listen = listen
-        .or_else(|| cfg.listeners.explicit.as_ref().map(|e| e.listen.clone()))
-        .unwrap_or_else(|| "127.0.0.1:8080".to_owned());
+    // `--listen` replaces the configured address list entirely rather than adding to it —
+    // the same override semantics `--profile` uses for the unidentified fallback.
+    let listen = match listen {
+        Some(addr) => vec![addr],
+        None => cfg
+            .listeners
+            .explicit
+            .as_ref()
+            .map(|e| e.listen.clone())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| vec!["127.0.0.1:8080".to_owned()]),
+    };
     let unix_socket = cfg
         .listeners
         .explicit
         .as_ref()
         .and_then(|e| e.unix_socket.as_ref())
         .map(|p| expand_tilde(p));
-    let transparent = cfg
-        .listeners
-        .transparent
-        .as_ref()
-        .filter(|t| t.enabled)
-        .map(|t| t.listen.clone())
-        .unwrap_or_default();
 
     let server = Server::new(
-        ServerConfig { listen, unix_socket, transparent },
+        ServerConfig { listen, unix_socket },
         Arc::clone(&handle),
         Arc::new(guard),
         audit,

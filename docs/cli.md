@@ -53,7 +53,7 @@ Runs the proxy until `Ctrl-C`.
 | flag | effect |
 |---|---|
 | `--profile <name>` | overrides `identities.unidentified.profile` for the unattributed fallback |
-| `--listen <addr>` | overrides `listeners.explicit.listen` |
+| `--listen <addr>` | replaces `listeners.explicit.listen` entirely with this one address |
 | `--audit-log <path>` | additionally write the full structured JSON record to a file |
 
 `--profile` **does not select a single profile to run.** Every profile in the config gets

@@ -1,8 +1,8 @@
 # Identity
 
 Which policy applies depends on *which agent* is connecting. Identity is derived from the
-connection rather than asserted by the client — transparent and DNS
-[capture](../capture.md) give a client no way to present a credential.
+connection rather than asserted by the client — DNS [capture](../capture.md) gives a client no
+way to present a credential.
 
 ## Resolvers are not equal
 
@@ -14,13 +14,14 @@ order they should be tried:
 | `peer_cred` uid/gid | kernel-supplied, unspoofable | only separates agents running as different users/groups |
 | `launched` | cgroup naming from `marshal run`, inherited by child processes | a process can move itself between delegated cgroups |
 | `source_ip` | as trustworthy as the network | collapses when two agents share a namespace |
+| `listener_port` | as trustworthy as whatever stops an agent reaching another agent's port | client-cooperative — nothing in the proxy itself prevents it |
 | `proxy_auth` | client-asserted | an agent that can read another token can pick another profile |
 
 These trust assumptions are load-bearing. `source_ip` holds when each agent owns a
 netns/container and cannot rebind or forge a source address. `listener_port` identity holds
-only if the agent cannot reach the other listeners directly — the nftables ruleset must drop
-direct connections to the proxy ports, otherwise an agent picks its own profile by choosing a
-port.
+only if the agent cannot reach the other listeners directly — nothing in the proxy stops one
+agent dialing another's port, so it needs either `marshal run --isolation netns` (which removes
+the agent's route to anything but the port it was given) or an external firewall rule.
 
 ## Configuration
 
@@ -75,19 +76,35 @@ embedded `profile:`, which has no name to reference. See [Profiles](profiles.md)
 
 ## `listener_port`
 
-For agents sharing a host and uid, nftables can steer them to different proxy ports and the
-accepting listener *is* the identity:
+For agents sharing a host and uid, the proxy can bind more than one explicit port and tell
+agents apart by which one they were pointed at — no firewall or redirect involved, just each
+agent's own `HTTP_PROXY` naming a different port:
 
 ```yaml
-- type: listener_port
-  map:
-    - { port: 8081, identity: "agent-a", profile: coding-agent }
-    - { port: 8082, identity: "agent-b", profile: llm-agent }
+listeners:
+  explicit:
+    listen: ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"]
 ```
 
+```yaml
+identities:
+  resolvers:
+    - type: listener_port
+      map:
+        - { port: 8081, identity: "agent-a", profile: coding-agent }
+        - { port: 8082, identity: "agent-b", profile: llm-agent }
+```
+
+Every listed address serves the identical CONNECT/SOCKS5/HTTP protocol — the only difference
+is which one accepted the connection. `marshal config check` warns if a `listener_port` entry
+names a port that `listeners.explicit.listen` doesn't actually bind, since that entry could
+never match anything.
+
 This is the documented fallback for when uid cannot separate the agents, not the primary path.
-It requires one transparent listener per identity and a ruleset that drops direct connections
-to those ports.
+**It is client-cooperative, not enforced**: nothing stops agent A from also connecting to
+agent B's port directly and picking up its profile. Where that matters, put agents under
+[`marshal run --isolation netns`](#launching-an-agent) instead, which removes an agent's route
+to anything but the address it's given, or add an external firewall rule.
 
 ## What lands in the audit record
 

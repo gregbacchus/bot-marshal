@@ -14,7 +14,7 @@ boundary has to understand HTTP, not just IPs.
 
 ```
                  ┌── explicit: CONNECT / SOCKS5 ──┐
- agent traffic ──┼── transparent: nft REDIRECT ───┼──► identity ──► profile
+ agent traffic ──┤                                ├──► identity ──► profile
                  └── dns: A record → proxy IP ────┘                    │
                                                                        ▼
                     ┌──────────── policy chain (decides WHETHER) ───────────┐
@@ -37,15 +37,15 @@ boundary has to understand HTTP, not just IPs.
                                        audit record
 ```
 
-Three [capture modes](capture.md) converge on one request representation, and everything
+Both [capture modes](capture.md) converge on one request representation, and everything
 downstream is mode-agnostic. That convergence is the most important structural property of the
 design: policy is written once, not once per way traffic arrived.
 
 ## Identity selects the profile
 
 Which policy applies depends on *which agent* is connecting. Identity is **derived from the
-connection, never asserted by the client** — transparent and DNS capture give a client no
-channel to present a credential even if you wanted it to.
+connection, never asserted by the client** — DNS capture gives a client no channel to present a
+credential even if you wanted it to.
 
 [Resolvers](configuration/identity.md) are tried in order and are not equal in strength: a
 kernel-supplied uid cannot be forged, a `Proxy-Authorization` header trivially can. Anything

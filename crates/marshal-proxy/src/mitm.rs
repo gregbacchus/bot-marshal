@@ -630,7 +630,6 @@ async fn emit(
             profile: cx.profile.to_string(),
             ingress: match cx.ingress {
                 IngressMode::Explicit => "explicit",
-                IngressMode::Transparent => "transparent",
                 IngressMode::Dns => "dns",
             }
             .into(),

@@ -39,7 +39,7 @@ async fn start_proxy_with_guard(
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
 
     let server = Server::new(
-        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
         // `tls: None` here means "passthrough everything": interception is mandatory, but
         // these tests are about the plain-relay path a passthrough host still gets (byte
         // relay plus the SNI cross-check), not about MITM itself — that is tests/mitm.rs.

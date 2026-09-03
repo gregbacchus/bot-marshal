@@ -61,13 +61,6 @@ use and is the wrong answer for a daemon.
 
 Secret files a `file`-type source points at belong here too, readable only by the service user.
 
-## Transparent mode
-
-If `listeners.transparent` is enabled, point `deploy/nftables.conf`'s `$MARSHAL_UID` at this
-user's uid (`id -u bot-marshal`) so the ruleset excludes the proxy's own egress from the
-redirect. Without that exclusion the proxy's upstream connections are redirected back into
-itself. See [Capture](capture.md#transparent).
-
 ## The service-account gotcha
 
 **If you also run `marshal run` from automation as this same service user:** `--isolation

@@ -25,7 +25,7 @@ Start here if you are new; each page below stands on its own once you have.
 
 ## Running it
 
-* **[Capture](capture.md)** — explicit proxy, transparent (nftables), and DNS interception.
+* **[Capture](capture.md)** — explicit proxy and DNS interception.
 * **[Observability](observability.md)** — logs, the audit trail, and what to watch.
 * **[Operations](operations.md)** — the management API, hot reload, and rolling default-deny
   out with warn mode.

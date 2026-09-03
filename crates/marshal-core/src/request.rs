@@ -6,14 +6,20 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// How the traffic reached us. Recorded for audit, but **must not** be branched on downstream
-/// of ingress: the whole point of the design is that all three modes produce one context.
+/// of ingress: the whole point of the design is that every mode produces one context.
+///
+/// There is no `Transparent` variant. It existed briefly for nftables/iptables REDIRECT
+/// capture and was removed: that path recovered the hostname from TLS SNI or the HTTP `Host`
+/// header but never verified the redirected destination actually belonged to it, and it
+/// byte-relayed rather than intercepting, so `rules`/`dlp`/`mcp`/`judge` and every transform
+/// never ran on it. The same reasoning that makes interception mandatory for explicit traffic
+/// (see `docs/adr/0008-interception-is-mandatory.md`) ruled this mode out rather than making it
+/// worth rebuilding on top of the same pipeline explicit traffic already gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IngressMode {
     /// Client set `HTTP_PROXY`/`ALL_PROXY`: HTTP `CONNECT` or SOCKS5.
     Explicit,
-    /// nftables/iptables REDIRECT; destination recovered via `SO_ORIGINAL_DST`.
-    Transparent,
     /// Client's DNS resolved the hostname to us.
     Dns,
 }

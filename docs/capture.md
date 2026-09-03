@@ -1,16 +1,14 @@
 # Capture
 
-Three ways traffic reaches the proxy, in decreasing order of how much the client must
-cooperate:
+Two ways traffic reaches the proxy, in decreasing order of how much the client must cooperate:
 
 | mode | client must | strength |
 |---|---|---|
 | explicit | set `HTTP_PROXY` / use SOCKS5 | relies entirely on cooperation |
-| transparent | nothing — nftables redirects it | holds while the firewall rules do |
 | DNS | point its resolver at the proxy | a convenience, not a boundary |
 
-All three converge on one request representation, so policy is written once rather than once
-per mode.
+Both converge on one request representation, so policy is written once rather than once per
+mode.
 
 ## Explicit
 
@@ -26,40 +24,6 @@ listeners:
 The Unix socket is what makes `SO_PEERCRED` reachable — see
 [Identity](configuration/identity.md#so_peercred-and-the-unix-listener). It is also how a
 `--isolation netns` agent reaches the proxy from inside a namespace with no network.
-
-## Transparent
-
-```yaml
-listeners:
-  transparent:
-    enabled: true
-    listen: ["127.0.0.1:8081"]
-```
-
-Transparent interception recovers the pre-redirect destination from conntrack via
-`SO_ORIGINAL_DST`, then recovers the *hostname* separately from the TLS SNI or the HTTP `Host`
-header.
-
-Both are needed: policy is written in terms of names, and an address is only what the client's
-DNS happened to return, so a proxy that could see only `140.82.121.4` would be back to the
-coarse filtering this project exists to improve on.
-
-`deploy/nftables.conf` ships the ruleset, including the `filter` chain that makes the redirect
-**binding rather than advisory** — without it, an agent using a non-standard port or QUIC
-walks straight past. Point its `$MARSHAL_UID` at the uid the proxy runs as, so the ruleset
-excludes the proxy's own egress from the redirect.
-
-### Which chain did the redirect?
-
-This determines what identity is available:
-
-| chain | origin | uid available? | resolver |
-|---|---|---|---|
-| `nat OUTPUT` | same host as the proxy | yes — a local socket exists | `peer_cred` |
-| `nat PREROUTING` | container, other netns, other host | no — and the socket table is per-netns | `source_ip` |
-
-REDIRECT rewrites only the destination, so the client's source address and port survive and
-the tuple lookup finds the client's own socket. The redirect is invisible to it.
 
 ## DNS
 
@@ -84,6 +48,21 @@ DNS-over-HTTPS, or connects to a literal address never asks us. It is for worklo
 be configured. Where bypass actually matters, use
 [`marshal run --isolation netns`](configuration/identity.md#netns-enforces-rather-than-identifies),
 or the firewall rules.
+
+## Transparent capture is not supported
+
+An nftables/iptables-REDIRECT capture mode existed through M6 and was removed. It recovered
+the hostname from TLS SNI or the HTTP `Host` header but never verified the redirected
+destination actually belonged to it, and it byte-relayed the connection rather than
+intercepting — so `rules`, `dlp`, `mcp`, `judge`, and every transform never ran on it. That is
+the same gap [interception being mandatory](concepts.md#why-interception-is-mandatory) exists
+to close for explicit traffic, so rather than rebuild transparent capture on top of the same
+interception pipeline explicit traffic already gets, it was dropped. See
+[ADR-0022](adr/0022-remove-transparent-capture.md).
+
+For a workload that cannot be configured to use a proxy, DNS mode above is the supported
+option — weaker (nothing stops a client with its own resolver from bypassing it), but honest
+about that weakness rather than silently under-enforcing while appearing to intercept.
 
 ## The upstream guard
 

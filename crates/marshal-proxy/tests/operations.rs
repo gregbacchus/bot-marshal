@@ -101,7 +101,7 @@ async fn harness(yaml: &str) -> Harness {
 
     let handle = handle(single_profile_runtime(chain_from(yaml), None));
     let server = Server::new(
-        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
         Arc::clone(&handle),
         Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
         audit,

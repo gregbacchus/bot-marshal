@@ -60,7 +60,7 @@ Full documentation lives in **[docs/](docs/)**.
 | [Concepts](docs/concepts.md) | capture → identity → policy chain → transforms → audit |
 | [CLI](docs/cli.md) | every subcommand and flag |
 | [Configuration](docs/configuration/) | [profiles](docs/configuration/profiles.md) · [policy layers](docs/configuration/policy-layers.md) · [bundles](docs/configuration/bundles.md) · [transforms](docs/configuration/transforms.md) · [identity](docs/configuration/identity.md) |
-| [Capture](docs/capture.md) | explicit, transparent (nftables), DNS |
+| [Capture](docs/capture.md) | explicit, DNS |
 | [Observability](docs/observability.md) | logs, audit trail, metrics |
 | [Operations](docs/operations.md) | management API, hot reload, warn-mode rollout |
 | [Production](docs/production.md) | dedicated service user, systemd |
@@ -71,7 +71,7 @@ Full documentation lives in **[docs/](docs/)**.
 
 ```
                  ┌── explicit: CONNECT / SOCKS5 ──┐
- agent traffic ──┼── transparent: nft REDIRECT ───┼──► identity ──► profile
+ agent traffic ──┤                                ├──► identity ──► profile
                  └── dns: A record → proxy IP ────┘                    │
                                                                        ▼
                     ┌──────────── policy chain (decides WHETHER) ───────────┐
@@ -101,7 +101,6 @@ Full documentation lives in **[docs/](docs/)**.
 ```
 crates/          eleven crates; marshal-core holds the traits and depends on no other
 config/          a fuller example config, with profiles/, bundles/ and transforms/
-deploy/          nftables ruleset for transparent mode
 examples/docker/ compose: two containers captured with no proxy env vars at all
 docs/            documentation, including architecture decision records
 ```

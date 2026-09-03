@@ -14,7 +14,6 @@ pub mod server;
 pub mod sniff;
 pub mod socks5;
 pub mod stats;
-pub mod transparent;
 pub mod tunnel;
 
 pub use guard::{GuardError, UpstreamGuard};

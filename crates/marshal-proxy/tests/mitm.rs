@@ -55,7 +55,7 @@ async fn harness(yaml: &str, passthrough: &[&str]) -> Harness {
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
 
     let server = Server::new(
-        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
         handle(runtime_with(
             chain,
             engine,
@@ -274,7 +274,7 @@ async fn passthrough_hosts_are_tunnelled_not_intercepted() {
     let cfg: Config = serde_yaml_ng::from_str(ALLOW_LOOPBACK).unwrap();
     let chain = build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap();
     let server = Server::new(
-        ServerConfig { listen: "127.0.0.1:0".into(), unix_socket: None, transparent: Vec::new() },
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
         handle(runtime_with(
             chain,
             engine,

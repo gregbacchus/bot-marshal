@@ -47,6 +47,18 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
         check_profile(cfg, &format!("profiles.{name}"), profile, &mut out);
     }
 
+    if let Some(explicit) = &cfg.listeners.explicit
+        && explicit.listen.is_empty()
+    {
+        out.push(Diagnostic {
+            severity: Severity::Error,
+            location: "listeners.explicit.listen".into(),
+            message: "empty — at least one address is needed, or omit `explicit:` entirely \
+                      to use its default"
+                .into(),
+        });
+    }
+
     // Resolvers must name profiles that exist, or a matching connection resolves to nothing
     // and falls through to the fallback — silently, and under the wrong policy.
     for (i, resolver) in cfg.identities.resolvers.iter().enumerate() {
@@ -119,6 +131,29 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
             }
             crate::model::ResolverConfig::Launched => Vec::new(),
             crate::model::ResolverConfig::ListenerPort { map } => {
+                // A port this resolver names but nothing binds can never match — silently,
+                // since the resolver just falls through like any other miss. Worth catching
+                // here rather than as a mysteriously-unattributed connection later.
+                let bound: Vec<u16> = cfg
+                    .listeners
+                    .explicit
+                    .iter()
+                    .flat_map(|e| &e.listen)
+                    .filter_map(|addr| addr.rsplit(':').next()?.parse().ok())
+                    .collect();
+                for (i, e) in map.iter().enumerate() {
+                    if !bound.contains(&e.port) {
+                        out.push(Diagnostic {
+                            severity: Severity::Warning,
+                            location: format!("{at}.map[{i}].port"),
+                            message: format!(
+                                "port {} is not one of listeners.explicit.listen's addresses \
+                                 ({bound:?}); this entry can never match",
+                                e.port
+                            ),
+                        });
+                    }
+                }
                 map.iter().map(|e| &e.profile).collect()
             }
         };

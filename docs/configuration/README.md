@@ -6,7 +6,7 @@ every restart.
 * [Profiles](profiles.md) — the unit of policy; embedded vs named, warn mode.
 * [Policy layers](policy-layers.md) — `denylist`, `allowlist`, `rules`, `dlp`, `mcp`, `judge`.
 * [Bundles](bundles.md) — named, reusable allow-lists.
-* [Transforms](transforms.md) — header filtering, secret injection, response rewriting.
+* [Transforms](transforms.md) — header setting/filtering, secret injection, response rewriting.
 * [Identity](identity.md) — which agent is connecting, and `marshal run`.
 
 ## Where the config lives
@@ -28,10 +28,8 @@ variable substitution inside a path string.
 listeners:
   explicit:
     listen: "127.0.0.1:8080"                   # CONNECT and SOCKS5, protocol sniffed
+    # or a list — ["127.0.0.1:8080", "127.0.0.1:8081"] — for `listener_port` identity
     unix_socket: "/run/user/1000/marshal.sock" # unlocks SO_PEERCRED identity
-  transparent:
-    enabled: false
-    listen: ["127.0.0.1:8081"]
   dns:
     enabled: false
     listen: "127.0.0.1:5353"
@@ -58,6 +56,9 @@ upstream:
 
 profile:                   # the embedded fallback — required, see Profiles
   default_action: deny
+  request_transforms:
+    set_headers:
+      Accept: "application/json"
 
 identities:                # see Identity
   resolvers: []
@@ -65,8 +66,8 @@ identities:                # see Identity
     action: allow_with_profile
 ```
 
-`listeners.transparent` and `listeners.dns` are covered in [Capture](../capture.md);
-`listeners.management` in [Operations](../operations.md).
+`listeners.dns` is covered in [Capture](../capture.md); `listeners.management` in
+[Operations](../operations.md).
 
 ## Splitting across files
 
