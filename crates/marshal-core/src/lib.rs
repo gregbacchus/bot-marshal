@@ -5,6 +5,7 @@
 //! policy chain unit-testable without a network.
 
 pub mod audit;
+pub mod encoding;
 pub mod error;
 pub mod evidence;
 pub mod hosts;
@@ -16,6 +17,7 @@ pub mod secret;
 pub mod verdict;
 
 pub use audit::{Action, AuditRecord, AuditSink};
+pub use encoding::{base64_encode, base64url_encode, form_urlencode, percent_encode};
 pub use error::{Error, Result};
 pub use evidence::{Evidence, Fact, Flag, LayerOutcome};
 pub use hosts::{HostMatcher, MatchKind, PatternError};

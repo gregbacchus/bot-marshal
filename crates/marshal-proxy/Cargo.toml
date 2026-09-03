@@ -17,6 +17,7 @@ marshal-policy.workspace = true
 marshal-tls.workspace = true
 marshal-secrets.workspace = true
 marshal-audit.workspace = true
+marshal-http.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true

@@ -5,7 +5,7 @@ Guidance for AI agents and humans working on the `bot-marshal` codebase.
 ## What this is
 
 An egress firewall for AI agents: a MITM proxy that enforces default-deny per-request policy,
-injects credentials at the boundary, and audits everything. Rust workspace, eleven crates.
+injects credentials at the boundary, and audits everything. Rust workspace, twelve crates.
 See [docs/concepts.md](docs/concepts.md) for the model, and
 [docs/roadmap.md](docs/roadmap.md#architecture) for what each crate does.
 

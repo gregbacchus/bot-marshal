@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use crate::request::JudgeRequest;
 
-use super::endpoint::{Endpoint, json_post_request, post_json};
 use super::{
     JudgeVerdict, Provider, ProviderError, VERDICT_TOOL_NAME, default_tls_config, user_content,
     verdict_parameters_schema,
 };
+use marshal_http::{Endpoint, json_post_request, post_json};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const PATH: &str = "/v1/messages";
@@ -89,7 +89,7 @@ impl Provider for AnthropicProvider {
             body,
         );
 
-        let response = post_json(&self.endpoint, &self.tls_config, req).await?;
+        let response = post_json(&self.endpoint, &self.tls_config, None, req).await?;
         parse_verdict(response)
     }
 }

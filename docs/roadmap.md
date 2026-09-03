@@ -81,7 +81,8 @@ without a network.
 | `marshal-secrets` | env/file sources, TTL cache, injection and redaction |
 | `marshal-judge` | the LLM judge layer: providers, structured verdicts, cache, breaker |
 | `marshal-launch` | `marshal run`: netns and cgroup isolation, identity registration |
-| `marshal-proxy` | listeners, CONNECT, SOCKS5, MITM, streaming, upstream guard |
+| `marshal-http` | the upstream guard, and the one-shot client for calls marshal makes as itself |
+| `marshal-proxy` | listeners, CONNECT, SOCKS5, MITM, streaming |
 | `marshal-dns` | hickory authority: resolve-to-proxy, passthrough, static records |
 | `marshal-audit` | JSON records, tracing layer |
 | `marshal-cli` | the `marshal` binary |

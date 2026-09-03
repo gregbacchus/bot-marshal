@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 
 use marshal_core::{
     BodyHandle, BodyRequirement, Error, RequestContext, RequestTransform, Result, SecretSource,
-    SecretValue,
+    SecretValue, base64_encode, percent_encode,
 };
 use marshal_policy::HostMatcher;
 
@@ -232,7 +232,7 @@ fn append_query(uri: &http::Uri, name: &str, value: &str) -> Option<http::Uri> {
     let existing = parts.path_and_query.take();
     let path = existing.as_ref().map(|pq| pq.path()).unwrap_or("/");
     let query = existing.as_ref().and_then(|pq| pq.query()).unwrap_or("");
-    let encoded_value = percent_encode_bytes(value.as_bytes());
+    let encoded_value = percent_encode(value.as_bytes());
     let new_query = if query.is_empty() {
         format!("{name}={encoded_value}")
     } else {
@@ -376,14 +376,11 @@ fn canonical_path(path: &str) -> String {
     if path.is_empty() {
         return "/".to_string();
     }
-    path.split('/')
-        .map(|segment| percent_encode_bytes(segment.as_bytes()))
-        .collect::<Vec<_>>()
-        .join("/")
+    path.split('/').map(|segment| percent_encode(segment.as_bytes())).collect::<Vec<_>>().join("/")
 }
 
 /// AWS's canonical query string: percent-decode each parameter (undoing whatever encoding the
-/// client's request used), re-encode both name and value with [`percent_encode_bytes`], then
+/// client's request used), re-encode both name and value with [`percent_encode`], then
 /// sort by name. Decoding first and re-encoding with one fixed ruleset is what keeps this
 /// idempotent regardless of how the client (or an earlier `Query` swap in this same profile)
 /// encoded the query it started with.
@@ -396,7 +393,7 @@ fn canonical_query_string(query: &str) -> String {
         .filter(|pair| !pair.is_empty())
         .map(|pair| {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            (percent_encode_bytes(&percent_decode(k)), percent_encode_bytes(&percent_decode(v)))
+            (percent_encode(&percent_decode(k)), percent_encode(&percent_decode(v)))
         })
         .collect();
     pairs.sort();
@@ -431,87 +428,9 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// Percent-encodes everything outside the RFC 3986 unreserved set. More conservative than
-/// strictly required in some contexts (e.g. a query component technically allows `/` and `?`
-/// unencoded), but encoding conservatively here can never produce an invalid or misparsed URI.
-fn percent_encode_bytes(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len());
-    for &byte in input {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-const BASE64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/// Minimal standard-alphabet base64 encoder. Pulling in a dependency for one credential
-/// header would be more surface than the ten lines it replaces.
-fn base64_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        out.push(BASE64_ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(BASE64_ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            BASE64_ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 { BASE64_ALPHABET[(b2 & 0x3f) as usize] as char } else { '=' });
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn base64_encode_matches_known_vectors() {
-        // RFC 4648's own test vectors, so this isn't just internally self-consistent.
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b""), "");
-    }
-
-    #[test]
-    fn base64_encode_handles_every_padding_case() {
-        assert_eq!(base64_encode(b"x-access-token:ghp_realtoken"), {
-            // Cross-check against a second, independent implementation of the same alphabet
-            // rather than against itself.
-            let bytes = b"x-access-token:ghp_realtoken";
-            let mut out = String::new();
-            for chunk in bytes.chunks(3) {
-                let n = chunk.len();
-                let mut buf = [0u8; 3];
-                buf[..n].copy_from_slice(chunk);
-                let val = (buf[0] as u32) << 16 | (buf[1] as u32) << 8 | buf[2] as u32;
-                let chars: Vec<u8> = (0..4)
-                    .map(|i| BASE64_ALPHABET[((val >> (18 - i * 6)) & 0x3f) as usize])
-                    .collect();
-                out.push(chars[0] as char);
-                out.push(chars[1] as char);
-                out.push(if n > 1 { chars[2] as char } else { '=' });
-                out.push(if n > 2 { chars[3] as char } else { '=' });
-            }
-            out
-        });
-    }
-
-    #[test]
-    fn percent_encode_query_escapes_reserved_characters() {
-        assert_eq!(percent_encode_bytes(b"abc123-_.~"), "abc123-_.~");
-        assert_eq!(percent_encode_bytes(b"a b&c=d"), "a%20b%26c%3Dd");
-    }
 
     #[test]
     fn append_query_adds_to_an_empty_query_string() {

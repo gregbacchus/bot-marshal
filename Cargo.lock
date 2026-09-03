@@ -1314,6 +1314,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "marshal-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ipnet",
+ "marshal-core",
+ "rustls",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots",
+]
+
+[[package]]
 name = "marshal-judge"
 version = "0.1.0"
 dependencies = [
@@ -1325,6 +1345,7 @@ dependencies = [
  "hyper-util",
  "marshal-config",
  "marshal-core",
+ "marshal-http",
  "moka",
  "rustls",
  "serde",
@@ -1388,6 +1409,7 @@ dependencies = [
  "marshal-audit",
  "marshal-config",
  "marshal-core",
+ "marshal-http",
  "marshal-policy",
  "marshal-secrets",
  "marshal-tls",

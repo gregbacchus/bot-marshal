@@ -16,7 +16,6 @@ use marshal_policy::Chain;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::guard::{GuardError, UpstreamGuard};
 use crate::httpfront::{self, ProxyRequest};
 use crate::mitm::{self, MitmHandler};
 use crate::rewind::Rewind;
@@ -25,6 +24,7 @@ use crate::sniff::{self, Protocol};
 use crate::socks5::{self, Reply};
 use crate::stats::IdentityStats;
 use crate::tunnel;
+use marshal_http::{GuardError, UpstreamGuard};
 
 #[derive(Clone)]
 pub struct ServerConfig {

@@ -35,11 +35,10 @@
 use serde::Deserialize;
 
 pub mod anthropic;
-pub mod endpoint;
 pub mod openai;
 
 pub use anthropic::AnthropicProvider;
-pub use endpoint::Endpoint;
+pub use marshal_http::Endpoint;
 pub use openai::OpenAiProvider;
 
 use crate::request::JudgeRequest;
@@ -82,6 +81,30 @@ pub enum ProviderError {
     MissingApiKey(String),
     #[error("invalid provider base_url: {0}")]
     InvalidBaseUrl(String),
+    /// The upstream guard refused the provider's address. Only reachable once the judge is
+    /// switched to pass a guard; see the note on [`marshal_http::Endpoint::connect`].
+    #[error("the provider's address was refused: {0}")]
+    Blocked(#[source] marshal_http::GuardError),
+}
+
+/// Restated rather than `#[from]`-derived, so that moving the client into `marshal-http` did
+/// not change a single message an operator reads. The judge's wording names *the provider*;
+/// the shared client cannot know it is talking to one.
+impl From<marshal_http::HttpError> for ProviderError {
+    fn from(e: marshal_http::HttpError) -> Self {
+        use marshal_http::HttpError as H;
+        match e {
+            H::Resolve(e) => Self::Resolve(e),
+            H::Connect(e) => Self::Connect(e),
+            H::Tls(e) => Self::Tls(e),
+            H::Http(e) => Self::Http(e),
+            H::Status { status, body } => Self::Status { status, body },
+            H::ResponseTooLarge { limit } => Self::ResponseTooLarge { limit },
+            H::MalformedJson(e) => Self::MalformedVerdict(e),
+            H::InvalidUrl(u) => Self::InvalidBaseUrl(u),
+            H::Blocked(e) => Self::Blocked(e),
+        }
+    }
 }
 
 /// Something that can turn a request into a verdict. A trait so tests can substitute a fake
@@ -128,17 +151,10 @@ pub(crate) fn user_content(request: &JudgeRequest) -> String {
     )
 }
 
-/// Build the TLS client config every provider uses: public roots, no client auth, HTTP/1.1
-/// only. Shared because there is nothing provider-specific about it. Only consulted when an
+/// The TLS client config every provider uses. Shared with every other outbound call marshal
+/// makes for itself; there is nothing provider-specific about it. Only consulted when an
 /// endpoint is actually `https`.
-pub(crate) fn default_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut cfg =
-        rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
-    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-    std::sync::Arc::new(cfg)
-}
+pub(crate) use marshal_http::default_tls_config;
 
 #[cfg(test)]
 mod tests {

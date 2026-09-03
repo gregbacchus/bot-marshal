@@ -1,6 +1,6 @@
 [package]
-name = "marshal-judge"
-description = "LLM judge policy layer with caching and circuit breaking"
+name = "marshal-http"
+description = "Guarded outbound HTTP: the SSRF guard, and the small client marshal itself uses"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,15 +12,7 @@ workspace = true
 
 [dependencies]
 marshal-core.workspace = true
-marshal-config.workspace = true
-marshal-http.workspace = true
-async-trait.workspace = true
-moka.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 tokio.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 http.workspace = true
@@ -29,7 +21,10 @@ http-body-util.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
+ipnet.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-serde_yaml_ng.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
