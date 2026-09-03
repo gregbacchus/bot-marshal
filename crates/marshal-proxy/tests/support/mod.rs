@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use rustls::pki_types::pem::PemObject;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -47,9 +48,11 @@ pub fn test_pki() -> TestPki {
 
 /// Start an HTTPS upstream exposing the endpoints the streaming tests need.
 pub async fn start_tls_upstream(pki: &TestPki) -> std::net::SocketAddr {
-    let certs: Vec<_> =
-        rustls_pemfile::certs(&mut pki.leaf_pem.as_bytes()).collect::<Result<_, _>>().unwrap();
-    let key = rustls_pemfile::private_key(&mut pki.leaf_key_pem.as_bytes()).unwrap().unwrap();
+    let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(pki.leaf_pem.as_bytes())
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let key =
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(pki.leaf_key_pem.as_bytes()).unwrap();
 
     let mut cfg =
         rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key).unwrap();
@@ -251,7 +254,7 @@ pub fn empty() -> TestBody {
 /// after following the trust instructions.
 pub fn client_config(ca_pem: &str) -> Arc<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
+    for cert in rustls::pki_types::CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
         roots.add(cert.unwrap()).unwrap();
     }
     let mut cfg =

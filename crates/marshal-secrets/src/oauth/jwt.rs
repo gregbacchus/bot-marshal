@@ -201,17 +201,17 @@ impl AsRef<[u8]> for PrivateKeyBytes {
 }
 
 fn private_key_der(pem: &SecretValue) -> Result<PrivateKeyBytes> {
-    let mut reader = pem.expose().as_bytes();
-    let key = rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| Error::Config(format!("reading the private key: {e}")))?
-        .ok_or_else(|| {
-            Error::Config(
-                "no PRIVATE KEY block in the configured `private_key` source — it must be a PEM \
-                 file, not a base64 blob or a JSON document"
-                    .to_owned(),
-            )
-        })?;
     use rustls::pki_types::PrivateKeyDer;
+    use rustls::pki_types::pem::{Error as PemError, PemObject};
+
+    let key = PrivateKeyDer::from_pem_slice(pem.expose().as_bytes()).map_err(|e| match e {
+        PemError::NoItemsFound => Error::Config(
+            "no PRIVATE KEY block in the configured `private_key` source — it must be a PEM \
+             file, not a base64 blob or a JSON document"
+                .to_owned(),
+        ),
+        other => Error::Config(format!("reading the private key: {other}")),
+    })?;
     Ok(match key {
         PrivateKeyDer::Pkcs8(k) => {
             PrivateKeyBytes { bytes: k.secret_pkcs8_der().to_vec(), kind: KeyKind::Pkcs8 }

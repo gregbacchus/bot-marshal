@@ -16,6 +16,7 @@
 //! multiplexing does not survive that translation cleanly. HTTP/2 is a later milestone; until
 //! then the downgrade is explicit and stated rather than an accident of configuration.
 
+use rustls::pki_types::pem::PemObject;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -80,7 +81,7 @@ impl TlsEngine {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
         for pem in extra_root_pems {
-            for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
+            for cert in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
                 let cert = cert.map_err(std::io::Error::other)?;
                 roots.add(cert).map_err(MitmError::Tls)?;
             }

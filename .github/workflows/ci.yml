@@ -31,6 +31,9 @@ jobs:
       - name: Config check
         run: cargo run --bin marshal -- --config config/marshal.yaml config check
 
+      - name: Documentation links
+        run: python3 scripts/check-doc-links.py
+
   deny:
     runs-on: ubuntu-latest
     steps:

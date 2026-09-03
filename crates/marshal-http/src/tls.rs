@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use rustls::pki_types::pem::PemObject;
+
 /// Public roots, no client auth, HTTP/1.1 only.
 ///
 /// Deliberately separate from the TLS config the *proxy* presents and uses on behalf of an
@@ -23,7 +25,7 @@ pub fn with_extra_roots(
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     for pem in extra_root_pems {
-        for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
             let cert = cert.map_err(|e| crate::HttpError::Tls(std::io::Error::other(e)))?;
             roots
                 .add(cert)

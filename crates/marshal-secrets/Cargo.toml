@@ -26,7 +26,6 @@ tracing.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
 ring.workspace = true
-rustls-pemfile.workspace = true
 hmac.workspace = true
 time.workspace = true
 

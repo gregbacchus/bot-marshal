@@ -7,6 +7,7 @@
 
 mod support;
 
+use rustls::pki_types::pem::PemObject;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -561,9 +562,11 @@ const REAL_CODE: &str = "REALCODE_onlymarshalcanredeemthis";
 async fn fake_provider(pki: &TestPki) -> FakeProvider {
     use hyper::{Request as HReq, Response as HResp};
 
-    let certs: Vec<_> =
-        rustls_pemfile::certs(&mut pki.leaf_pem.as_bytes()).collect::<Result<_, _>>().unwrap();
-    let key = rustls_pemfile::private_key(&mut pki.leaf_key_pem.as_bytes()).unwrap().unwrap();
+    let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(pki.leaf_pem.as_bytes())
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let key =
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(pki.leaf_key_pem.as_bytes()).unwrap();
     let mut cfg =
         rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key).unwrap();
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];

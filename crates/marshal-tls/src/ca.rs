@@ -6,6 +6,7 @@
 //! record, and `marshal ca init` refuses to overwrite an existing one.
 
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 #[derive(Debug, thiserror::Error)]
@@ -99,7 +100,7 @@ impl CertificateAuthority {
         let key = KeyPair::from_pem(key_pem)?;
         let issuer = Issuer::from_ca_cert_pem(cert_pem, key)?;
 
-        let cert_der = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        let cert_der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .next()
             .transpose()
             .map_err(|e| CaError::Read {
@@ -182,9 +183,15 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 pub(crate) fn signing_key_from_pem(
     key_pem: &str,
 ) -> Result<std::sync::Arc<dyn rustls::sign::SigningKey>, CaError> {
-    let der = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .map_err(|e| CaError::SigningKey(e.to_string()))?
-        .ok_or(CaError::NoPem { path: "<leaf key>".into(), expected: "PRIVATE KEY" })?;
+    // `NoItemsFound` is the "there was no key in there" case that `rustls-pemfile` expressed
+    // as `Ok(None)`; every other error is a malformed one. Kept distinct because the two say
+    // different things to whoever wrote the file.
+    let der = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|e| match e {
+        rustls::pki_types::pem::Error::NoItemsFound => {
+            CaError::NoPem { path: "<leaf key>".into(), expected: "PRIVATE KEY" }
+        }
+        other => CaError::SigningKey(other.to_string()),
+    })?;
     private_key_to_signing_key(der)
 }
 
