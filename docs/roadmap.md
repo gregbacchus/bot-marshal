@@ -24,9 +24,8 @@ audited separately.
 
 ² OpenTelemetry export is not implemented — see below.
 
-³ `client_credentials` and `refresh_token` work end to end. The interactive grants
-(`authorization_code`, `device_code`) are configurable and refuse at startup with a message
-saying so, because `marshal secrets oauth login` does not exist yet. `jwt_bearer` and
+³ `client_credentials`, `refresh_token`, `authorization_code` (with PKCE) and `device_code`
+all work end to end, the last two via `marshal secrets oauth login`. `jwt_bearer` and
 `private_key_jwt` are not implemented, and neither is in-band capture — see below.
 
 ## Removed
@@ -71,12 +70,6 @@ not start end to end as written.
 
 **Rego rules via `regorus`.** The `rules` layer is CEL only. Rego is designed for as an opt-in
 for anyone already running OPA policy.
-
-**OAuth2 enrolment (`marshal secrets oauth login`).** `grant: authorization_code` and
-`grant: device_code` are modelled, validated, and refuse a request with a message telling the
-operator to enrol — but the command that would do the enrolling is not written. Both grants
-need a one-time interactive step (a browser redirect capturing `?code=`, or an RFC 8628 device
-poll) that produces the refresh token everything else already knows how to use.
 
 **OAuth2 `jwt_bearer` and `private_key_jwt`.** RFC 7523: sign an assertion with a private key
 and exchange it, which is how Google service accounts, Salesforce and Snowflake authenticate.

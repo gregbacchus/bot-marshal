@@ -88,6 +88,10 @@ enum Command {
     #[command(subcommand)]
     Ca(CaCommand),
 
+    /// Credential management.
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
+
     /// Launch an agent so the proxy can identify it.
     Run {
         /// Profile the agent runs under.
@@ -155,6 +159,44 @@ enum Command {
         #[arg(long)]
         audit_log: Option<PathBuf>,
     },
+}
+
+/// Credentials marshal holds or obtains.
+#[derive(Debug, Subcommand)]
+enum SecretsCommand {
+    /// Enrol and inspect OAuth2 credentials.
+    #[command(subcommand)]
+    Oauth(OauthCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum OauthCommand {
+    /// Authorise a credential once, interactively, so the proxy can use it unattended.
+    ///
+    /// Which flow runs is decided by the swap's `grant`: `authorization_code` opens a browser
+    /// and captures the redirect on a loopback listener marshal binds itself; `device_code`
+    /// prints a URL and a code to enter on any other device, and polls. Either way what is
+    /// kept is a refresh token, under `state_dir` — never the access token, which is
+    /// short-lived and re-minted on demand.
+    Login {
+        /// The `name` of the swap whose `source` is `{ type: oauth2, ... }`.
+        name: String,
+        /// Open the authorization URL in a browser instead of only printing it.
+        #[arg(long)]
+        open: bool,
+        /// Give up if the flow is not completed in this long.
+        #[arg(long, default_value = "5m", value_parser = humantime::parse_duration)]
+        timeout: std::time::Duration,
+    },
+    /// Show which OAuth2 credentials are enrolled, and since when.
+    Status {
+        /// Limit to one swap. Defaults to every OAuth2 swap in the config.
+        name: Option<String>,
+    },
+    /// Forget a stored grant. The next request for it is refused until it is enrolled again.
+    Logout { name: String },
+    /// Discard the cached access token and mint a new one now, to check the credential works.
+    Refresh { name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -226,6 +268,22 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Config(ConfigCommand::Check) => config_check(&config_path),
         Command::Ca(cmd) => ca_command(&config_path, cmd),
+        Command::Secrets(SecretsCommand::Oauth(cmd)) => {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("error: cannot start the async runtime: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match rt.block_on(oauth_command(&config_path, cmd)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::Run { profile, isolation, proxy, binds, dry_run, command } => {
             run_command(&config_path, &profile, &isolation, &proxy, &binds, dry_run, &command)
         }
@@ -1184,6 +1242,396 @@ fn expand_tilde(p: &str) -> PathBuf {
     }
 }
 
+/// One OAuth2 swap found in the config, ready to enrol or inspect.
+struct OauthSwap {
+    name: String,
+    profile: String,
+    grant: GrantSpec,
+    source: marshal_secrets::Oauth2Source,
+}
+
+/// Every OAuth2 swap in the config, across every profile including the embedded fallback.
+///
+/// A swap name is scoped to its profile, so two profiles *can* declare the same name. They
+/// then share one entry in the token store, which is deliberate — the same credential enrolled
+/// once and used by both — and is why this collapses duplicates rather than reporting them.
+fn oauth_swaps(
+    config_path: &std::path::Path,
+    cfg: &marshal_config::model::Config,
+    deps: &SecretDeps,
+) -> anyhow::Result<Vec<OauthSwap>> {
+    let _ = config_path;
+    let mut found: Vec<OauthSwap> = Vec::new();
+    let mut collect =
+        |label: &str, profile: &marshal_config::model::Profile| -> anyhow::Result<()> {
+            let resolved = marshal_policy::resolve_profile(cfg, profile)?;
+            for (i, raw) in resolved.request_transforms.secrets.iter().enumerate() {
+                let spec: SecretSpec = serde_json::from_value(raw.clone()).map_err(|e| {
+                    anyhow::anyhow!("profiles.{label}.request_transforms.secrets[{i}]: {e}")
+                })?;
+                let Some(SecretSourceSpec::Oauth2(oauth)) = &spec.source else { continue };
+                let name = spec.name.clone().unwrap_or_else(|| format!("secrets[{i}]"));
+                if found.iter().any(|f| f.name == name) {
+                    continue;
+                }
+                found.push(OauthSwap {
+                    source: build_oauth2_source(oauth, deps, &name)?,
+                    name,
+                    profile: label.to_owned(),
+                    grant: oauth.grant,
+                });
+            }
+            Ok(())
+        };
+    collect("<fallback>", &cfg.profile)?;
+    for (name, profile) in &cfg.profiles {
+        collect(name, profile)?;
+    }
+    Ok(found)
+}
+
+fn find_oauth_swap(swaps: Vec<OauthSwap>, name: &str) -> anyhow::Result<OauthSwap> {
+    let known: Vec<&str> = swaps.iter().map(|s| s.name.as_str()).collect();
+    let known = if known.is_empty() {
+        "this config declares no OAuth2 credentials".to_owned()
+    } else {
+        format!("known: {}", known.join(", "))
+    };
+    swaps
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow::anyhow!("no OAuth2 credential named `{name}` — {known}"))
+}
+
+async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyhow::Result<()> {
+    let cfg = marshal_config::load(config_path)?;
+    // A throwaway redactor: nothing here writes an audit record, and the values are printed
+    // for a human on a terminal or not at all.
+    let deps = secret_deps(config_path, &cfg, &marshal_core::Redactor::default())?;
+    let swaps = oauth_swaps(config_path, &cfg, &deps)?;
+
+    match cmd {
+        OauthCommand::Status { name } => {
+            let swaps: Vec<OauthSwap> = match name {
+                Some(n) => vec![find_oauth_swap(swaps, &n)?],
+                None => swaps,
+            };
+            if swaps.is_empty() {
+                println!("no OAuth2 credentials are configured");
+                return Ok(());
+            }
+            for swap in &swaps {
+                let state = match swap.grant {
+                    GrantSpec::ClientCredentials | GrantSpec::RefreshToken => {
+                        "n/a — needs no enrolment".to_owned()
+                    }
+                    _ => match deps.store.grant(&swap.name) {
+                        Ok(Some(g)) => format!("enrolled{}", describe_age(g.obtained_at)),
+                        Ok(None) => format!(
+                            "NOT enrolled — run `marshal secrets oauth login {}`",
+                            swap.name
+                        ),
+                        Err(e) => format!("unreadable: {e}"),
+                    },
+                };
+                println!(
+                    "{:<24} profile={:<16} grant={:<20} {state}",
+                    swap.name,
+                    swap.profile,
+                    swap.grant.label()
+                );
+            }
+            Ok(())
+        }
+
+        OauthCommand::Logout { name } => {
+            let swap = find_oauth_swap(swaps, &name)?;
+            if deps.store.remove_grant(&swap.name)? {
+                println!("forgot the stored grant for `{}`", swap.name);
+                println!(
+                    "note: this does not revoke anything at the provider — do that there too \
+                     if the credential may have leaked"
+                );
+            } else {
+                println!("`{}` had no stored grant", swap.name);
+            }
+            Ok(())
+        }
+
+        OauthCommand::Refresh { name } => {
+            use marshal_core::SecretSource;
+            let swap = find_oauth_swap(swaps, &name)?;
+            deps.store.forget_access(&swap.name);
+            // The value is deliberately not printed: the point is that it works, and putting
+            // a live token on a terminal (and into a shell history, and a scrollback buffer)
+            // undoes what this whole feature is for.
+            swap.source.resolve().await?;
+            println!("`{}`: minted a fresh access token successfully", swap.name);
+            Ok(())
+        }
+
+        OauthCommand::Login { name, open, timeout } => {
+            let swap = find_oauth_swap(swaps, &name)?;
+            anyhow::ensure!(
+                deps.store.persists(),
+                "enrolling `{}` needs a top-level `state_dir` to keep the refresh token in",
+                swap.name
+            );
+            let enrolled = match swap.grant {
+                GrantSpec::ClientCredentials | GrantSpec::RefreshToken => anyhow::bail!(
+                    "`{}` uses `grant: {}`, which needs no enrolment — it authenticates from \
+                     configuration alone. `marshal secrets oauth refresh {}` checks it works.",
+                    swap.name,
+                    swap.grant.label(),
+                    swap.name
+                ),
+                GrantSpec::AuthorizationCode => {
+                    login_authorization_code(&swap, open, timeout).await?
+                }
+                GrantSpec::DeviceCode => login_device_code(&swap, open, timeout).await?,
+            };
+            println!("\n`{}` is enrolled.", swap.name);
+            if let Some(scope) = &enrolled.scope {
+                println!("  granted scope: {scope}");
+            }
+            println!(
+                "  the refresh token is stored under `state_dir`; the proxy mints access \
+                 tokens from it as needed"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn describe_age(obtained_at: i64) -> String {
+    if obtained_at == 0 {
+        return String::new();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = (now - obtained_at) / 86_400;
+    match days {
+        d if d < 0 => String::new(),
+        0 => " (today)".to_owned(),
+        1 => " (1 day ago)".to_owned(),
+        d => format!(" ({d} days ago)"),
+    }
+}
+
+/// Try to open a URL in the operator's browser. Best effort: printing it is the contract.
+fn try_open(url: &str) {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    match std::process::Command::new(opener)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => println!("(opening it in your browser)"),
+        Err(e) => println!("(could not run `{opener}`: {e} — open the URL above by hand)"),
+    }
+}
+
+async fn login_authorization_code(
+    swap: &OauthSwap,
+    open: bool,
+    timeout: std::time::Duration,
+) -> anyhow::Result<marshal_secrets::Enrolled> {
+    let flow = swap.source.begin_authorization_code()?;
+    let listener = bind_redirect(&flow.redirect_uri).await?;
+
+    println!("Authorise `{}` by opening:\n\n  {}\n", swap.name, flow.url);
+    if open {
+        try_open(&flow.url);
+    }
+    println!("Waiting for the redirect on {} ...", flow.redirect_uri);
+
+    let (code, state) =
+        tokio::time::timeout(timeout, await_callback(listener)).await.map_err(|_| {
+            anyhow::anyhow!(
+                "timed out after {} waiting for the redirect",
+                humantime::format_duration(timeout)
+            )
+        })??;
+
+    anyhow::ensure!(
+        flow.state_matches(&state),
+        "the redirect carried a `state` marshal did not issue, so it belongs to a different \
+         authorization attempt. Nothing was exchanged. Run the command again."
+    );
+
+    println!("Got the authorization code; exchanging it ...");
+    Ok(swap.source.complete_authorization_code(&code, &flow).await?)
+}
+
+/// Bind the loopback address named by `redirect_uri`.
+///
+/// Done before the URL is printed, so a port already in use fails immediately rather than
+/// after the operator has authorised in a browser and the code is already spent.
+async fn bind_redirect(redirect_uri: &str) -> anyhow::Result<tokio::net::TcpListener> {
+    let authority = redirect_uri
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+        .ok_or_else(|| anyhow::anyhow!("redirect_uri must be an http:// URL"))?;
+    let addr = if authority.contains(':') {
+        authority.replace("localhost", "127.0.0.1")
+    } else {
+        format!("{}:80", authority.replace("localhost", "127.0.0.1"))
+    };
+    tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+        anyhow::anyhow!(
+            "cannot bind {addr} to receive the redirect: {e}. The `redirect_uri` port must be \
+             free, and must match what the provider has registered for this client."
+        )
+    })
+}
+
+/// Accept one redirect and read `code` and `state` out of its query string.
+async fn await_callback(listener: tokio::net::TcpListener) -> anyhow::Result<(String, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let mut buf = vec![0u8; 8192];
+        let n = stream.read(&mut buf).await?;
+        let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+
+        // "GET /callback?code=...&state=... HTTP/1.1"
+        let Some(target) = request.split_whitespace().nth(1) else { continue };
+        let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let mut code = None;
+        let mut state = None;
+        let mut error = None;
+        for pair in query.split('&') {
+            let Some((k, v)) = pair.split_once('=') else { continue };
+            let v = percent_decode(v);
+            match k {
+                "code" => code = Some(v),
+                "state" => state = Some(v),
+                "error" => error = Some(v),
+                "error_description" => {
+                    error = Some(error.map_or(v.clone(), |e| format!("{e}: {v}")))
+                }
+                _ => {}
+            }
+        }
+
+        // A browser fetching /favicon.ico on the same listener is normal; ignore anything
+        // that is not the redirect and keep waiting.
+        if code.is_none() && error.is_none() {
+            let _ = stream.write_all(reply(404, "Not the redirect.").as_bytes()).await;
+            continue;
+        }
+
+        let body = match (&code, &error) {
+            (_, Some(e)) => format!("Authorisation failed: {e}. You can close this tab."),
+            _ => "Authorised. marshal has the credential; you can close this tab.".to_owned(),
+        };
+        let _ = stream.write_all(reply(200, &body).as_bytes()).await;
+        let _ = stream.flush().await;
+
+        if let Some(e) = error {
+            anyhow::bail!("the provider refused the authorization request: {e}");
+        }
+        return Ok((code.expect("checked above"), state.unwrap_or_default()));
+    }
+}
+
+fn reply(status: u16, message: &str) -> String {
+    // Plain text on purpose: this page is shown once, to one person, on loopback.
+    format!(
+        "HTTP/1.1 {status} X\r\nContent-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{message}",
+        message.len()
+    )
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+async fn login_device_code(
+    swap: &OauthSwap,
+    open: bool,
+    timeout: std::time::Duration,
+) -> anyhow::Result<marshal_secrets::Enrolled> {
+    let device = swap.source.begin_device_authorization().await?;
+
+    println!("Authorise `{}` on any device:\n", swap.name);
+    match &device.verification_uri_complete {
+        Some(complete) => {
+            println!("  {complete}\n");
+            println!(
+                "  (or go to {} and enter the code {})",
+                device.verification_uri, device.user_code
+            );
+            if open {
+                try_open(complete);
+            }
+        }
+        None => {
+            println!("  {}", device.verification_uri);
+            println!("  code: {}\n", device.user_code);
+            if open {
+                try_open(&device.verification_uri);
+            }
+        }
+    }
+
+    // The provider's own expiry bounds the flow; --timeout only shortens it.
+    let deadline = std::time::Instant::now() + device.expires_in.min(timeout);
+    let mut interval = device.interval;
+    println!("\nWaiting for authorisation ...");
+
+    loop {
+        tokio::time::sleep(interval).await;
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "the device code expired before it was authorised — run the command again"
+            );
+        }
+        match swap.source.poll_device_token(&device.device_code).await? {
+            marshal_secrets::DevicePoll::Done(enrolled) => return Ok(enrolled),
+            marshal_secrets::DevicePoll::Pending => continue,
+            marshal_secrets::DevicePoll::SlowDown => {
+                // RFC 8628 §3.5: back off by 5 seconds and keep going, rather than failing.
+                interval += std::time::Duration::from_secs(5);
+                tracing::debug!(interval_secs = interval.as_secs(), "polling more slowly");
+            }
+        }
+    }
+}
+
 fn ca_command(config_path: &std::path::Path, cmd: CaCommand) -> ExitCode {
     let (cert_path, key_path) = match ca_paths(config_path) {
         Ok(v) => v,
@@ -1428,18 +1876,44 @@ fn build_oauth2_source(
             })?;
             Grant::RefreshToken { source: build_source(src, deps, swap_label)? }
         }
-        GrantSpec::AuthorizationCode | GrantSpec::DeviceCode => {
-            // Both are interactive ways of obtaining a refresh token; once one exists, the
-            // runtime behaviour is identical, so they share a variant.
+        GrantSpec::AuthorizationCode => {
             anyhow::ensure!(
-                deps.store.persists(),
-                "`grant: {}` keeps a refresh token obtained by `marshal secrets oauth login`, \
-                 which needs a top-level `state_dir` to keep it in",
-                spec.grant.label()
+                spec.authorization_endpoint.is_some(),
+                "source.authorization_endpoint is required for `grant: authorization_code`"
             );
-            Grant::Enrolled
+            anyhow::ensure!(
+                spec.redirect_uri.is_some(),
+                "source.redirect_uri is required for `grant: authorization_code`"
+            );
+            enrolled_grant(spec, deps)?
+        }
+        GrantSpec::DeviceCode => {
+            anyhow::ensure!(
+                spec.device_authorization_endpoint.is_some(),
+                "source.device_authorization_endpoint is required for `grant: device_code`"
+            );
+            enrolled_grant(spec, deps)?
         }
     };
+
+    #[allow(clippy::items_after_statements)]
+    fn enrolled_grant(spec: &Oauth2Spec, deps: &SecretDeps) -> anyhow::Result<Grant> {
+        // Both are interactive ways of obtaining a refresh token; once one exists, the
+        // runtime behaviour is identical, so they share a variant.
+        anyhow::ensure!(
+            deps.store.persists(),
+            "`grant: {}` keeps a refresh token obtained by `marshal secrets oauth login`, \
+             which needs a top-level `state_dir` to keep it in",
+            spec.grant.label()
+        );
+        anyhow::ensure!(
+            spec.refresh_token.is_none(),
+            "source.refresh_token has no effect with `grant: {}` — the refresh token comes \
+             from `marshal secrets oauth login`, which keeps it under `state_dir`",
+            spec.grant.label()
+        );
+        Ok(Grant::Enrolled)
+    }
 
     marshal_secrets::Oauth2Source::new(
         swap_label,
@@ -1452,6 +1926,9 @@ fn build_oauth2_source(
             audience: spec.audience.clone(),
             extra_params: spec.extra_params.clone(),
             expiry_skew: spec.expiry_skew.unwrap_or(std::time::Duration::from_secs(60)),
+            authorization_endpoint: spec.authorization_endpoint.clone(),
+            redirect_uri: spec.redirect_uri.clone(),
+            device_authorization_endpoint: spec.device_authorization_endpoint.clone(),
         },
         Arc::clone(&deps.store),
         Arc::clone(&deps.tls),
@@ -1569,6 +2046,16 @@ struct Oauth2Spec {
     /// Defaults to 60s.
     #[serde(default, with = "humantime_serde")]
     expiry_skew: Option<std::time::Duration>,
+    /// Where `marshal secrets oauth login` sends the browser. `authorization_code` only.
+    #[serde(default)]
+    authorization_endpoint: Option<String>,
+    /// Where the provider sends the browser back. Must be loopback — marshal binds it itself.
+    /// `authorization_code` only.
+    #[serde(default)]
+    redirect_uri: Option<String>,
+    /// RFC 8628 device authorization endpoint. `device_code` only.
+    #[serde(default)]
+    device_authorization_endpoint: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
@@ -1918,6 +2405,8 @@ request_transforms:
         type: oauth2
         grant: authorization_code
         token_endpoint: https://auth.example.com/oauth2/token
+        authorization_endpoint: https://auth.example.com/oauth2/authorize
+        redirect_uri: http://127.0.0.1:7777/callback
         client_id: marshal
         client_auth: none
       inject: { type: bearer }
@@ -1927,6 +2416,60 @@ request_transforms:
         let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
             .unwrap_err();
         assert!(err.to_string().contains("state_dir"), "{err}");
+    }
+
+    #[test]
+    fn an_authorization_code_grant_missing_its_endpoints_names_the_missing_key() {
+        for (extra, expected) in [
+            ("", "authorization_endpoint"),
+            (
+                "        authorization_endpoint: https://auth.example.com/authorize\n",
+                "redirect_uri",
+            ),
+        ] {
+            let p = profile(&format!(
+                r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        grant: authorization_code
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_auth: none
+{extra}      inject: {{ type: bearer }}
+      rules: [{{ host: "api.example.com" }}]
+"#
+            ));
+            let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+                .unwrap_err();
+            assert!(err.to_string().contains(expected), "expected {expected}, got: {err}");
+        }
+    }
+
+    #[test]
+    fn a_device_code_grant_needs_its_device_authorization_endpoint() {
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        grant: device_code
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_auth: none
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
+            .unwrap_err();
+        assert!(err.to_string().contains("device_authorization_endpoint"), "{err}");
     }
 
     #[test]

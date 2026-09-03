@@ -20,8 +20,126 @@ use marshal_core::{
 };
 use marshal_http::{Endpoint, UpstreamGuard};
 
+use super::pkce::{Pkce, random_urlsafe};
+
 use super::store::{StoredGrant, TokenStore, now_unix};
 use super::token::{CachedToken, TokenResponse, describe_error};
+
+/// Split `scheme://host[:port][/path]` into its scheme and bare host.
+///
+/// Bracketed IPv6 is unwrapped, so `http://[::1]:7777/cb` yields `("http", "::1")` and the
+/// loopback check does not have to know about brackets.
+fn split_redirect(uri: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = uri.split_once("://")?;
+    let authority = rest.split('/').next()?;
+    let host = match authority.strip_prefix('[') {
+        Some(after) => after.split_once(']')?.0,
+        None => authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority),
+    };
+    if host.is_empty() { None } else { Some((scheme, host)) }
+}
+
+/// The three things one poll of a device-code flow can mean.
+///
+/// A type rather than an error, because two of the three are not failures: RFC 8628 §3.5 sends
+/// "still waiting" and "slow down" as *error* responses, and a caller that treated every error
+/// as fatal would abandon the flow on its very first poll.
+#[derive(Debug)]
+pub enum DevicePoll {
+    /// The operator has not finished authorising. Poll again after the interval.
+    Pending,
+    /// Polling too fast. Lengthen the interval by 5 seconds and poll again.
+    SlowDown,
+    Done(Enrolled),
+}
+
+/// An authorization-code flow in progress: what to open, and what must survive until the
+/// browser comes back.
+pub struct AuthCodeFlow {
+    /// The URL to open in a browser.
+    pub url: String,
+    /// CSRF binding. The callback must echo this exactly.
+    pub state: String,
+    /// Never sent in the authorization request — only in the exchange. Debug-redacted, since
+    /// holding it is equivalent to being able to redeem the code.
+    verifier: String,
+    pub redirect_uri: String,
+}
+
+impl std::fmt::Debug for AuthCodeFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The verifier is as good as the credential during the flow's lifetime.
+        f.debug_struct("AuthCodeFlow")
+            .field("url", &self.url)
+            .field("redirect_uri", &self.redirect_uri)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthCodeFlow {
+    /// Check a callback's `state` against the one issued, in constant time.
+    ///
+    /// Not because a timing attack on a CSRF token is likely against a loopback listener that
+    /// lives for one exchange — but a comparison that short-circuits is a habit worth not
+    /// having in credential code.
+    pub fn state_matches(&self, candidate: &str) -> bool {
+        let (a, b) = (self.state.as_bytes(), candidate.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    }
+}
+
+/// What an enrolment produced, for reporting. Deliberately carries no token.
+#[derive(Debug)]
+pub struct Enrolled {
+    pub scope: Option<String>,
+    pub expires_in: Option<Duration>,
+}
+
+/// RFC 8628 §3.2: what the operator has to be shown, and how to poll.
+#[derive(Debug)]
+pub struct DeviceAuthorization {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    /// The same URI with the code already in it, when the provider offers one — worth using,
+    /// because it saves the operator typing the code by hand.
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: Duration,
+    pub interval: Duration,
+}
+
+impl DeviceAuthorization {
+    fn parse(body: &serde_json::Value) -> Result<Self> {
+        let field = |name: &str| -> Result<String> {
+            body.get(name).and_then(|v| v.as_str()).map(str::to_owned).ok_or_else(|| {
+                Error::Config(format!("the device authorization response has no `{name}`"))
+            })
+        };
+        Ok(Self {
+            device_code: field("device_code")?,
+            user_code: field("user_code")?,
+            verification_uri: field("verification_uri")
+                // Google spells it `verification_url`. Accepting both costs one line and
+                // saves an operator an inexplicable failure.
+                .or_else(|_| field("verification_url"))?,
+            verification_uri_complete: body
+                .get("verification_uri_complete")
+                .or_else(|| body.get("verification_url_complete"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            // RFC 8628 §3.2 makes both optional with these defaults.
+            expires_in: Duration::from_secs(
+                body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(1800),
+            ),
+            interval: Duration::from_secs(
+                body.get("interval").and_then(|v| v.as_u64()).unwrap_or(5),
+            ),
+        })
+    }
+}
 
 /// How marshal proves it is the client it says it is.
 #[derive(Debug)]
@@ -75,6 +193,14 @@ pub struct Oauth2Config {
     pub extra_params: BTreeMap<String, String>,
     /// Subtracted from the provider's stated lifetime, so a token cannot expire in flight.
     pub expiry_skew: Duration,
+    /// Where the browser is sent to authorise. `authorization_code` only.
+    pub authorization_endpoint: Option<String>,
+    /// Where the provider sends the browser back with the code. Must be loopback:
+    /// `marshal secrets oauth login` binds it, and a redirect anywhere else would deliver the
+    /// code to something other than marshal. `authorization_code` only.
+    pub redirect_uri: Option<String>,
+    /// RFC 8628 device authorization endpoint. `device_code` only.
+    pub device_authorization_endpoint: Option<String>,
 }
 
 pub struct Oauth2Source {
@@ -157,26 +283,13 @@ impl Oauth2Source {
         }
     }
 
-    /// Build the form body and the client-authentication header for one token request.
-    async fn token_request(&self) -> Result<(String, Vec<(String, String)>)> {
+    /// Client authentication, as `(extra form params, extra headers)`.
+    ///
+    /// Split from the grant parameters because every flow needs it identically — minting,
+    /// exchanging an authorization code, polling a device code — and getting it subtly wrong
+    /// in one of those places is exactly the bug that only shows up on one provider.
+    async fn client_auth(&self) -> Result<(Vec<(String, String)>, Vec<(String, String)>)> {
         let mut params: Vec<(String, String)> = Vec::new();
-        let refresh = self.refresh_token().await?;
-
-        match &refresh {
-            None => params.push(("grant_type".into(), "client_credentials".into())),
-            Some((token, _)) => {
-                params.push(("grant_type".into(), "refresh_token".into()));
-                params.push(("refresh_token".into(), token.expose().to_owned()));
-            }
-        }
-
-        if !self.cfg.scope.is_empty() {
-            params.push(("scope".into(), self.cfg.scope.join(" ")));
-        }
-        if let Some(audience) = &self.cfg.audience {
-            params.push(("audience".into(), audience.clone()));
-        }
-
         let mut headers: Vec<(String, String)> = Vec::new();
         match &self.cfg.client_auth {
             ClientAuth::None => {
@@ -203,19 +316,59 @@ impl Oauth2Source {
                 ));
             }
         }
+        Ok((params, headers))
+    }
 
+    /// The grant-specific half of a routine (non-enrolment) token request.
+    async fn grant_params(&self) -> Result<Vec<(String, String)>> {
+        let mut params: Vec<(String, String)> = Vec::new();
+        match self.refresh_token().await? {
+            None => params.push(("grant_type".into(), "client_credentials".into())),
+            Some((token, _)) => {
+                params.push(("grant_type".into(), "refresh_token".into()));
+                params.push(("refresh_token".into(), token.expose().to_owned()));
+            }
+        }
+        if !self.cfg.scope.is_empty() {
+            params.push(("scope".into(), self.cfg.scope.join(" ")));
+        }
+        if let Some(audience) = &self.cfg.audience {
+            params.push(("audience".into(), audience.clone()));
+        }
+        Ok(params)
+    }
+
+    /// Everything a token request looks like on the wire, for one set of grant parameters.
+    #[cfg(test)]
+    async fn token_request(&self) -> Result<(String, Vec<(String, String)>)> {
+        let grant = self.grant_params().await?;
+        let (auth_params, headers) = self.client_auth().await?;
+        Ok((self.form_body(grant, auth_params), headers))
+    }
+
+    fn form_body(
+        &self,
+        mut params: Vec<(String, String)>,
+        auth_params: Vec<(String, String)>,
+    ) -> String {
+        params.extend(auth_params);
         for (k, v) in &self.cfg.extra_params {
             params.push((k.clone(), v.clone()));
         }
-
-        let form = form_urlencode(params.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        Ok((form, headers))
+        form_urlencode(params.iter().map(|(k, v)| (k.as_str(), v.as_str())))
     }
 
-    /// One round trip to the token endpoint, and everything that must happen before the
-    /// resulting access token is allowed to escape this function.
-    async fn mint(&self) -> Result<SecretValue> {
-        let (form, headers) = self.token_request().await?;
+    /// POST the token endpoint with `params` plus client authentication, and parse the reply.
+    ///
+    /// Every token this credential ever holds comes through here, which is what makes this the
+    /// one place that has to teach the redactor. A second path to the token endpoint that
+    /// forgot to would be silently unredacted (ADR-0029).
+    ///
+    /// `what` names the operation for the error message: "minting", "exchanging the
+    /// authorization code". An operator reading a failure needs to know which step failed.
+    async fn post_token(&self, what: &str, params: Vec<(String, String)>) -> Result<TokenResponse> {
+        let (auth_params, headers) = self.client_auth().await?;
+        let form = self.form_body(params, auth_params);
         let header_refs: Vec<(&str, &str)> =
             headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
@@ -230,14 +383,14 @@ impl Oauth2Source {
         .await
         .map_err(|e| {
             Error::Config(format!(
-                "minting the `{}` credential from {}: {e}",
+                "{what} the `{}` credential at {}: {e}",
                 self.name, self.cfg.token_endpoint
             ))
         })?;
 
         if !status.is_success() {
             return Err(Error::Config(format!(
-                "minting the `{}` credential from {}: {}",
+                "{what} the `{}` credential at {}: {}",
                 self.name,
                 self.cfg.token_endpoint,
                 describe_error(status, &body)
@@ -247,32 +400,251 @@ impl Oauth2Source {
         let response = TokenResponse::parse(&body)?;
 
         // Learn before anything else can see the value. The redactor is the only thing
-        // standing between a minted token and the audit log, and every path out of this
-        // function leads somewhere that writes.
+        // standing between a token and the audit log, and every path out of here leads
+        // somewhere that writes.
         self.redactor.learn(&self.name, response.access_token.expose());
         if let Some(rt) = &response.refresh_token {
             self.redactor.learn(&self.name, rt.expose());
         }
+        Ok(response)
+    }
+
+    /// One round trip to the token endpoint for an ordinary request-path mint.
+    async fn mint(&self) -> Result<SecretValue> {
+        let params = self.grant_params().await?;
+        let response = self.post_token("minting", params).await?;
 
         self.persist_rotation(&response)?;
-
-        let token = CachedToken::new(
-            response.access_token.clone(),
-            response.expires_in,
-            self.cfg.expiry_skew,
-        );
-        let cacheable = token.is_live();
-        self.store.put_access(&self.name, token);
+        self.cache(&response);
 
         tracing::info!(
             secret = %self.name,
             grant = self.cfg.grant.label(),
             expires_in_secs = response.expires_in.map(|d| d.as_secs()),
-            cached = cacheable,
             "minted an oauth2 access token"
         );
-
         Ok(response.access_token)
+    }
+
+    fn cache(&self, response: &TokenResponse) {
+        self.store.put_access(
+            &self.name,
+            CachedToken::new(
+                response.access_token.clone(),
+                response.expires_in,
+                self.cfg.expiry_skew,
+            ),
+        );
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Enrolment. Never reached from the request path: these are driven by
+    // `marshal secrets oauth login`, once, by a human.
+    // ---------------------------------------------------------------------------------
+
+    /// Begin an authorization-code flow: the URL to open, and the secrets that must survive
+    /// until the browser comes back.
+    ///
+    /// `state` and the PKCE verifier are both generated here and never leave marshal. The
+    /// verifier is what makes an intercepted code useless to anyone else; `state` is what makes
+    /// a callback marshal did not initiate recognisable as somebody else's.
+    pub fn begin_authorization_code(&self) -> Result<AuthCodeFlow> {
+        let authorize = self.cfg.authorization_endpoint.as_deref().ok_or_else(|| {
+            Error::Config(format!(
+                "`{}` uses `grant: authorization_code` but sets no `authorization_endpoint`",
+                self.name
+            ))
+        })?;
+        let redirect_uri = self.redirect_uri()?.to_owned();
+
+        let pkce = Pkce::generate()?;
+        let state = random_urlsafe(24)?;
+
+        let mut params = vec![
+            ("response_type", "code"),
+            ("client_id", self.cfg.client_id.as_str()),
+            ("redirect_uri", redirect_uri.as_str()),
+            ("state", state.as_str()),
+            ("code_challenge", pkce.challenge.as_str()),
+            ("code_challenge_method", "S256"),
+        ];
+        let scope = self.cfg.scope.join(" ");
+        if !scope.is_empty() {
+            params.push(("scope", scope.as_str()));
+        }
+        if let Some(audience) = &self.cfg.audience {
+            params.push(("audience", audience.as_str()));
+        }
+        let extras: Vec<(&str, &str)> =
+            self.cfg.extra_params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        params.extend(extras);
+
+        // The endpoint may already carry a query of its own — a tenant id, an API version.
+        let separator = if authorize.contains('?') { '&' } else { '?' };
+        Ok(AuthCodeFlow {
+            url: format!("{authorize}{separator}{}", form_urlencode(params)),
+            state,
+            verifier: pkce.verifier,
+            redirect_uri,
+        })
+    }
+
+    /// Redeem an authorization code and store the grant it yields.
+    pub async fn complete_authorization_code(
+        &self,
+        code: &str,
+        flow: &AuthCodeFlow,
+    ) -> Result<Enrolled> {
+        let params = vec![
+            ("grant_type".to_owned(), "authorization_code".to_owned()),
+            ("code".to_owned(), code.to_owned()),
+            ("redirect_uri".to_owned(), flow.redirect_uri.clone()),
+            ("code_verifier".to_owned(), flow.verifier.clone()),
+        ];
+        let response = self.post_token("exchanging the authorization code for", params).await?;
+        self.store_enrolment(response)
+    }
+
+    /// Ask the provider for a device code, and the instructions to show the operator.
+    pub async fn begin_device_authorization(&self) -> Result<DeviceAuthorization> {
+        let url = self.cfg.device_authorization_endpoint.as_deref().ok_or_else(|| {
+            Error::Config(format!(
+                "`{}` uses `grant: device_code` but sets no `device_authorization_endpoint`",
+                self.name
+            ))
+        })?;
+        let (endpoint, path) = Endpoint::parse_with_path(url)
+            .map_err(|e| Error::Config(format!("device_authorization_endpoint: {e}")))?;
+
+        let (auth_params, headers) = self.client_auth().await?;
+        let mut params = auth_params;
+        if !self.cfg.scope.is_empty() {
+            params.push(("scope".into(), self.cfg.scope.join(" ")));
+        }
+        // RFC 8628 §3.1 requires `client_id` here even for a client that authenticates
+        // another way, so add it when `client_auth` did not.
+        if !params.iter().any(|(k, _)| k == "client_id") {
+            params.push(("client_id".into(), self.cfg.client_id.clone()));
+        }
+        let form = form_urlencode(params.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let header_refs: Vec<(&str, &str)> =
+            headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+        let (status, body) = marshal_http::post_form(
+            &endpoint,
+            &self.tls,
+            self.guard.as_deref(),
+            &path,
+            &header_refs,
+            &form,
+        )
+        .await
+        .map_err(|e| Error::Config(format!("requesting a device code from {url}: {e}")))?;
+
+        if !status.is_success() {
+            return Err(Error::Config(format!(
+                "requesting a device code from {url}: {}",
+                describe_error(status, &body)
+            )));
+        }
+        DeviceAuthorization::parse(&body)
+    }
+
+    /// One poll of the token endpoint for a device-code grant.
+    pub async fn poll_device_token(&self, device_code: &str) -> Result<DevicePoll> {
+        let (auth_params, headers) = self.client_auth().await?;
+        let mut params = auth_params;
+        params.push(("grant_type".into(), "urn:ietf:params:oauth:grant-type:device_code".into()));
+        params.push(("device_code".into(), device_code.to_owned()));
+        if !params.iter().any(|(k, _)| k == "client_id") {
+            params.push(("client_id".into(), self.cfg.client_id.clone()));
+        }
+        let form = form_urlencode(params.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let header_refs: Vec<(&str, &str)> =
+            headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+        let (status, body) = marshal_http::post_form(
+            &self.endpoint,
+            &self.tls,
+            self.guard.as_deref(),
+            &self.path,
+            &header_refs,
+            &form,
+        )
+        .await
+        .map_err(|e| Error::Config(format!("polling for the device token: {e}")))?;
+
+        if status.is_success() {
+            let response = TokenResponse::parse(&body)?;
+            self.redactor.learn(&self.name, response.access_token.expose());
+            if let Some(rt) = &response.refresh_token {
+                self.redactor.learn(&self.name, rt.expose());
+            }
+            return self.store_enrolment(response).map(DevicePoll::Done);
+        }
+
+        match body.get("error").and_then(|v| v.as_str()) {
+            Some("authorization_pending") => Ok(DevicePoll::Pending),
+            Some("slow_down") => Ok(DevicePoll::SlowDown),
+            // `access_denied` and `expired_token` are the two that really are terminal, along
+            // with anything that means the request itself is wrong.
+            _ => Err(Error::Config(format!(
+                "polling for the device token: {}",
+                describe_error(status, &body)
+            ))),
+        }
+    }
+
+    /// Persist what an enrolment produced, and cache the access token that came with it.
+    fn store_enrolment(&self, response: TokenResponse) -> Result<Enrolled> {
+        let refresh_token = response.refresh_token.clone().ok_or_else(|| {
+            Error::Config(format!(
+                "the provider completed the flow for `{}` but issued no refresh token, so \
+                 nothing can be kept and every restart would need authorising again. Ask for \
+                 offline access — most providers want `scope: [offline_access]`, or Google's \
+                 `access_type=offline` in `extra_params`.",
+                self.name
+            ))
+        })?;
+
+        self.store.put_grant(
+            &self.name,
+            StoredGrant { refresh_token, obtained_at: now_unix(), scope: response.scope.clone() },
+        )?;
+        self.cache(&response);
+        Ok(Enrolled { scope: response.scope, expires_in: response.expires_in })
+    }
+
+    fn redirect_uri(&self) -> Result<&str> {
+        let uri = self.cfg.redirect_uri.as_deref().ok_or_else(|| {
+            Error::Config(format!(
+                "`{}` uses `grant: authorization_code` but sets no `redirect_uri`",
+                self.name
+            ))
+        })?;
+        let (scheme, host) = split_redirect(uri).ok_or_else(|| {
+            Error::Config(format!("`{}`: redirect_uri `{uri}` is not a URL", self.name))
+        })?;
+
+        // Loopback first, because it is the more useful thing to be told: an operator who
+        // wrote a real hostname has a different problem from one who wrote `https`.
+        if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+            return Err(Error::Config(format!(
+                "`{}`: redirect_uri must point at loopback (127.0.0.1 or localhost), not \
+                 `{host}` — marshal binds it itself to receive the authorization code, and a \
+                 redirect anywhere else would hand the code to something that is not marshal",
+                self.name
+            )));
+        }
+        if scheme != "http" {
+            return Err(Error::Config(format!(
+                "`{}`: redirect_uri must be `http://` on loopback, not `{scheme}://` — the \
+                 listener marshal binds for the redirect is plain HTTP, which is what every \
+                 provider expects for a loopback redirect",
+                self.name
+            )));
+        }
+        Ok(uri)
     }
 
     /// Persist a rotated refresh token, before the access token it arrived with is used.
@@ -339,6 +711,7 @@ impl SecretSource for Oauth2Source {
 mod tests {
     use super::*;
     use crate::source::EnvSource;
+    use std::path::PathBuf;
 
     /// A source returning a fixed value, for shaping token requests without any environment.
     #[derive(Debug)]
@@ -354,6 +727,30 @@ mod tests {
         }
     }
 
+    fn interactive(grant: Grant, dir: Option<PathBuf>) -> Oauth2Source {
+        Oauth2Source::new(
+            "SERVICE",
+            Oauth2Config {
+                token_endpoint: "https://auth.example.com/oauth2/token".into(),
+                client_id: "marshal".into(),
+                client_auth: ClientAuth::None,
+                grant,
+                scope: vec!["offline_access".into(), "read:things".into()],
+                audience: None,
+                extra_params: BTreeMap::new(),
+                expiry_skew: Duration::from_secs(60),
+                authorization_endpoint: Some("https://auth.example.com/oauth2/authorize".into()),
+                redirect_uri: Some("http://127.0.0.1:7777/callback".into()),
+                device_authorization_endpoint: Some("https://auth.example.com/device".into()),
+            },
+            Arc::new(TokenStore::new(dir)),
+            marshal_http::default_tls_config(),
+            None,
+            Redactor::default(),
+        )
+        .unwrap()
+    }
+
     fn source(grant: Grant, client_auth: ClientAuth) -> Oauth2Source {
         Oauth2Source::new(
             "SERVICE",
@@ -366,6 +763,9 @@ mod tests {
                 audience: None,
                 extra_params: BTreeMap::new(),
                 expiry_skew: Duration::from_secs(60),
+                authorization_endpoint: None,
+                redirect_uri: None,
+                device_authorization_endpoint: None,
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),
@@ -471,6 +871,9 @@ mod tests {
                 audience: Some("https://api.example.com".into()),
                 extra_params: cfg_extra,
                 expiry_skew: Duration::from_secs(60),
+                authorization_endpoint: None,
+                redirect_uri: None,
+                device_authorization_endpoint: None,
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),
@@ -481,6 +884,210 @@ mod tests {
         let (form, _) = s.token_request().await.unwrap();
         assert!(form.contains("audience=https%3A%2F%2Fapi.example.com"), "{form}");
         assert!(form.contains("resource=https%3A%2F%2Fapi.example.com"), "{form}");
+    }
+
+    #[test]
+    fn the_authorization_url_carries_pkce_state_and_everything_configured() {
+        let s = interactive(Grant::Enrolled, None);
+        let flow = s.begin_authorization_code().unwrap();
+
+        assert!(flow.url.starts_with("https://auth.example.com/oauth2/authorize?"), "{}", flow.url);
+        assert!(flow.url.contains("response_type=code"), "{}", flow.url);
+        assert!(flow.url.contains("client_id=marshal"), "{}", flow.url);
+        assert!(flow.url.contains("code_challenge_method=S256"), "{}", flow.url);
+        assert!(
+            flow.url.contains(&format!("code_challenge={}", flow_challenge(&flow))),
+            "{}",
+            flow.url
+        );
+        assert!(flow.url.contains(&format!("state={}", flow.state)), "{}", flow.url);
+        assert!(flow.url.contains("scope=offline_access%20read%3Athings"), "{}", flow.url);
+        assert!(
+            flow.url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A7777%2Fcallback"),
+            "{}",
+            flow.url
+        );
+    }
+
+    /// The challenge that must appear in the URL, derived independently of what built it.
+    fn flow_challenge(flow: &AuthCodeFlow) -> String {
+        super::super::pkce::challenge_s256(&flow.verifier)
+    }
+
+    #[test]
+    fn the_verifier_never_appears_in_the_authorization_url() {
+        // If it did, PKCE would protect nothing: whoever saw the request could redeem the code.
+        let s = interactive(Grant::Enrolled, None);
+        let flow = s.begin_authorization_code().unwrap();
+        assert!(!flow.url.contains(&flow.verifier), "{}", flow.url);
+        assert!(!format!("{flow:?}").contains(&flow.verifier), "Debug must not print it");
+    }
+
+    #[test]
+    fn two_flows_do_not_share_a_verifier_or_a_state() {
+        let s = interactive(Grant::Enrolled, None);
+        let (a, b) = (s.begin_authorization_code().unwrap(), s.begin_authorization_code().unwrap());
+        assert_ne!(a.verifier, b.verifier);
+        assert_ne!(a.state, b.state);
+    }
+
+    #[test]
+    fn a_callback_carrying_someone_elses_state_is_rejected() {
+        let s = interactive(Grant::Enrolled, None);
+        let flow = s.begin_authorization_code().unwrap();
+        assert!(flow.state_matches(&flow.state));
+        assert!(!flow.state_matches("not-the-state"));
+        assert!(!flow.state_matches(""));
+        // A prefix must not pass — the comparison is length-checked first.
+        assert!(!flow.state_matches(&flow.state[..flow.state.len() - 1]));
+    }
+
+    #[test]
+    fn a_redirect_uri_that_is_not_loopback_is_refused_with_the_reason() {
+        let mut s = interactive(Grant::Enrolled, None);
+        s.cfg.redirect_uri = Some("https://example.com/callback".into());
+        let err = s.begin_authorization_code().unwrap_err();
+        assert!(format!("{err}").contains("loopback"), "{err}");
+    }
+
+    #[test]
+    fn localhost_and_ipv6_loopback_are_both_accepted() {
+        for uri in
+            ["http://localhost:7777/callback", "http://[::1]:7777/cb", "http://127.0.0.1:9/x"]
+        {
+            let mut s = interactive(Grant::Enrolled, None);
+            s.cfg.redirect_uri = Some(uri.into());
+            assert!(s.begin_authorization_code().is_ok(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn an_authorization_code_grant_with_no_authorization_endpoint_says_which_key_is_missing() {
+        let mut s = interactive(Grant::Enrolled, None);
+        s.cfg.authorization_endpoint = None;
+        let err = s.begin_authorization_code().unwrap_err();
+        assert!(format!("{err}").contains("authorization_endpoint"), "{err}");
+    }
+
+    #[test]
+    fn an_authorization_endpoint_with_its_own_query_gets_the_right_separator() {
+        let mut s = interactive(Grant::Enrolled, None);
+        s.cfg.authorization_endpoint =
+            Some("https://auth.example.com/authorize?tenant=acme".into());
+        let flow = s.begin_authorization_code().unwrap();
+        assert!(
+            flow.url.starts_with("https://auth.example.com/authorize?tenant=acme&"),
+            "{}",
+            flow.url
+        );
+    }
+
+    #[test]
+    fn an_https_loopback_redirect_says_the_scheme_is_the_problem() {
+        // Distinct from the non-loopback message: this operator has the right host and the
+        // wrong scheme, and being told "must be loopback" would send them the wrong way.
+        let mut s = interactive(Grant::Enrolled, None);
+        s.cfg.redirect_uri = Some("https://127.0.0.1:7777/callback".into());
+        let err = s.begin_authorization_code().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("http://"), "{msg}");
+        assert!(!msg.contains("must point at loopback"), "{msg}");
+    }
+
+    #[test]
+    fn split_redirect_unwraps_bracketed_ipv6_and_optional_ports() {
+        assert_eq!(split_redirect("http://127.0.0.1:7777/cb"), Some(("http", "127.0.0.1")));
+        assert_eq!(split_redirect("http://localhost/cb"), Some(("http", "localhost")));
+        assert_eq!(split_redirect("http://[::1]:7777/cb"), Some(("http", "::1")));
+        assert_eq!(split_redirect("http://[::1]"), Some(("http", "::1")));
+        assert_eq!(split_redirect("https://example.com"), Some(("https", "example.com")));
+        assert_eq!(split_redirect("not a url"), None);
+    }
+
+    #[test]
+    fn a_device_authorization_response_is_parsed_with_the_rfc_defaults() {
+        let body = serde_json::json!({
+            "device_code": "dc-1",
+            "user_code": "WDJB-MJHT",
+            "verification_uri": "https://example.com/device",
+        });
+        let d = DeviceAuthorization::parse(&body).unwrap();
+        assert_eq!(d.device_code, "dc-1");
+        assert_eq!(d.user_code, "WDJB-MJHT");
+        // RFC 8628 §3.2 defaults when the provider omits them.
+        assert_eq!(d.interval, Duration::from_secs(5));
+        assert_eq!(d.expires_in, Duration::from_secs(1800));
+        assert!(d.verification_uri_complete.is_none());
+    }
+
+    #[test]
+    fn googles_verification_url_spelling_is_accepted() {
+        // Google sends `verification_url`, not the RFC's `verification_uri`. Rejecting it
+        // would fail with "no verification_uri" against a very common provider.
+        let body = serde_json::json!({
+            "device_code": "dc-1",
+            "user_code": "ABCD",
+            "verification_url": "https://www.google.com/device",
+            "verification_url_complete": "https://www.google.com/device?user_code=ABCD",
+            "interval": 10,
+            "expires_in": 600,
+        });
+        let d = DeviceAuthorization::parse(&body).unwrap();
+        assert_eq!(d.verification_uri, "https://www.google.com/device");
+        assert_eq!(
+            d.verification_uri_complete.as_deref(),
+            Some("https://www.google.com/device?user_code=ABCD")
+        );
+        assert_eq!(d.interval, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_device_response_missing_the_user_code_is_an_error() {
+        let body = serde_json::json!({"device_code": "dc", "verification_uri": "https://x"});
+        assert!(DeviceAuthorization::parse(&body).is_err());
+    }
+
+    #[test]
+    fn an_enrolment_that_yields_no_refresh_token_says_to_ask_for_offline_access() {
+        // The most common first-attempt failure: the provider completes the flow but issues
+        // only an access token, so nothing survives a restart. "no refresh_token" alone would
+        // leave an operator with nowhere to go.
+        let dir = std::env::temp_dir().join(format!("marshal-enrol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = interactive(Grant::Enrolled, Some(dir));
+        let response = TokenResponse::parse(&serde_json::json!({
+            "access_token": "at-1", "expires_in": 3600
+        }))
+        .unwrap();
+        let err = s.store_enrolment(response).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("offline"), "{msg}");
+    }
+
+    #[test]
+    fn a_completed_enrolment_stores_the_refresh_token_and_caches_the_access_token() {
+        let dir = std::env::temp_dir().join(format!(
+            "marshal-enrol-ok-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = interactive(Grant::Enrolled, Some(dir.clone()));
+        let response = TokenResponse::parse(&serde_json::json!({
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "expires_in": 3600,
+            "scope": "offline_access read:things",
+        }))
+        .unwrap();
+        let enrolled = s.store_enrolment(response).unwrap();
+        assert_eq!(enrolled.scope.as_deref(), Some("offline_access read:things"));
+
+        // Survives a restart, which is the whole reason it went to disk.
+        let restarted = TokenStore::new(Some(dir));
+        assert_eq!(restarted.grant("SERVICE").unwrap().unwrap().refresh_token.expose(), "rt-1");
+        // And the access token that came with it is usable immediately, no second round trip.
+        assert_eq!(s.cached().unwrap().expose(), "at-1");
     }
 
     #[test]
@@ -496,6 +1103,9 @@ mod tests {
                 audience: None,
                 extra_params: BTreeMap::new(),
                 expiry_skew: Duration::from_secs(60),
+                authorization_endpoint: None,
+                redirect_uri: None,
+                device_authorization_endpoint: None,
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),

@@ -36,6 +36,67 @@ to start on an error the same way.
 marshal config check
 ```
 
+## `marshal secrets oauth <subcommand>`
+
+Enrolment and inspection for `{ type: oauth2 }` secret sources. Only the two interactive
+grants need any of this: `client_credentials` and `refresh_token` authenticate from
+configuration alone.
+
+### `marshal secrets oauth login <name> [--open] [--timeout <duration>]`
+
+Authorises a credential once, so the proxy can use it unattended from then on. `<name>` is the
+swap's `name`.
+
+Which flow runs is decided by the swap's `grant`:
+
+* **`authorization_code`** — marshal generates a PKCE verifier, binds the loopback port named
+  by `redirect_uri`, and prints the authorization URL. Open it (or pass `--open`), authorise in
+  the browser, and the provider redirects back to marshal's own listener with the code. The
+  port is bound *before* the URL is printed, so a port already in use fails immediately rather
+  than after the code has been issued and spent.
+* **`device_code`** — marshal prints a URL and a short code to enter on any other device, then
+  polls. Nothing is bound and no browser is needed on the host, which is what makes this the
+  one that works over SSH.
+
+Either way, what is kept is the **refresh token**, written under
+[`state_dir`](configuration/README.md#state_dir) at mode `0600`. The access token is
+short-lived and re-minted on demand; it is never written down.
+
+`--timeout` (default `5m`) bounds the wait. For `device_code` the provider's own expiry also
+applies, whichever is shorter.
+
+```bash
+marshal secrets oauth login GITHUB_APP --open
+```
+
+Two things that commonly go wrong the first time, and what they look like:
+
+* **The provider issues no refresh token.** The flow completes and marshal refuses to record
+  it, because nothing would survive a restart. Most providers need `offline_access` in `scope`;
+  Google wants `access_type: offline` in `extra_params`.
+* **`redirect_uri` is not loopback.** Refused before anything is opened. Marshal binds that
+  address itself; a redirect anywhere else hands the authorization code to something that is
+  not marshal, which is the one thing the flow exists to prevent.
+
+### `marshal secrets oauth status [<name>]`
+
+One line per OAuth2 swap: its name, the profile it belongs to, its grant, and whether it is
+enrolled and how long ago. Names are collapsed across profiles — two profiles declaring the
+same swap name share one stored grant, deliberately.
+
+### `marshal secrets oauth refresh <name>`
+
+Discards the cached access token and mints a new one immediately. The way to check a
+credential works without waiting for an agent to need it. The token itself is **not** printed:
+putting a live credential into a terminal, a scrollback buffer and a shell history undoes what
+boundary injection is for.
+
+### `marshal secrets oauth logout <name>`
+
+Forgets the stored grant. The next request needing that credential is refused until it is
+enrolled again. This does **not** revoke anything at the provider — do that there too if the
+credential may have leaked.
+
 ## `marshal ca init [--common-name <name>] [--days <n>]`
 
 Generates a CA at the paths named by `tls.ca_cert` / `tls.ca_key`, and prints per-platform

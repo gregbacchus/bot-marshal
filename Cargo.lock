@@ -1248,6 +1248,7 @@ dependencies = [
  "hickory-resolver",
  "hickory-server",
  "http",
+ "humantime",
  "humantime-serde",
  "marshal-audit",
  "marshal-config",
@@ -1436,6 +1437,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "getrandom 0.4.3",
  "hmac",
  "http",
  "marshal-config",

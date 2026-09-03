@@ -204,9 +204,46 @@ value goes stale. Use an interactive grant against a rotating provider.
 
 **`authorization_code`** and **`device_code`** are enrolled once by a human and then run
 unattended. Both require [`state_dir`](README.md#state_dir), because the refresh token they
-produce is the only copy and has to survive a restart. Enrolment itself is not implemented
-yet: a swap configured with either grant builds, and refuses each request with a message
-saying to run `marshal secrets oauth login`, rather than failing obscurely.
+produce is the only copy and has to survive a restart. Until a swap is enrolled its requests
+are refused with a message saying to run
+[`marshal secrets oauth login`](../cli.md#marshal-secrets-oauth-login-name---open---timeout-duration),
+rather than failing obscurely.
+
+```yaml
+      source:
+        type: oauth2
+        grant: authorization_code
+        token_endpoint: https://auth.example.com/oauth2/token
+        authorization_endpoint: https://auth.example.com/oauth2/authorize
+        redirect_uri: http://127.0.0.1:7777/callback   # loopback only — marshal binds it
+        client_id: marshal
+        client_secret: { type: env, var: SERVICE_CLIENT_SECRET }
+        scope: ["offline_access", "read:things"]
+```
+
+```yaml
+      source:
+        type: oauth2
+        grant: device_code
+        token_endpoint: https://auth.example.com/oauth2/token
+        device_authorization_endpoint: https://auth.example.com/oauth2/device
+        client_id: marshal
+        client_auth: none
+        scope: ["offline_access"]
+```
+
+| field | |
+|---|---|
+| `authorization_endpoint` | required by `authorization_code` |
+| `redirect_uri` | required by `authorization_code`. **Loopback only** — `marshal secrets oauth login` binds it to receive the code, and a redirect anywhere else would deliver the code to something that is not marshal |
+| `device_authorization_endpoint` | required by `device_code` |
+
+`scope` almost certainly needs `offline_access` (or Google's `access_type: offline` in
+`extra_params`): without it most providers complete the flow and issue no refresh token, and
+marshal refuses to record an enrolment that would not survive a restart.
+
+`device_code` is the one that works over SSH — it binds nothing and needs no browser on the
+host.
 
 #### What this costs
 
