@@ -102,7 +102,7 @@ impl PolicyLayer for Dlp {
                         hit = Some((p, "body".to_string()));
                     }
                 }
-                BodyHandle::Streaming => {
+                BodyHandle::Streaming | BodyHandle::OverLimit { .. } => {
                     // The runner could not materialise the body within the cap. Whether that
                     // is fatal is a configured choice, never a silent pass.
                     ev.flag("BodyNotScanned");

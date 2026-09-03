@@ -14,6 +14,8 @@ pub mod mcp;
 pub mod patterns;
 pub mod transforms;
 
-pub use build::{BuildError, build_chain, build_response_transforms, resolve_profile};
+pub use build::{
+    BuildError, build_chain, build_request_transforms, build_response_transforms, resolve_profile,
+};
 pub use chain::{Chain, Outcome};
 pub use hosts::{HostMatcher, MatchKind, PatternError};

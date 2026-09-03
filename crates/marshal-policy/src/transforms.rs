@@ -1,13 +1,187 @@
-//! Response transforms owned by the policy crate.
+//! Request and response transforms owned by the policy crate.
 
 use std::sync::Arc;
 
 use marshal_core::{
-    BodyHandle, BodyRequirement, RequestContext, ResponseParts, ResponseTransform, Result,
+    BodyHandle, BodyRequirement, RequestContext, RequestTransform, ResponseParts,
+    ResponseTransform, Result,
 };
 
 use crate::jsonrpc;
 use crate::mcp::McpPolicy;
+use marshal_config::model::{ResponseOversizeAction, TruncationMethod};
+
+/// Adds configured request headers, replacing any value the client supplied for the same
+/// name. Values are parsed when the runtime is built, so an allowed request cannot discover
+/// malformed configuration only after it is already in flight.
+#[derive(Debug)]
+pub struct RequestHeaderSetter {
+    headers: Vec<(http::HeaderName, http::HeaderValue)>,
+}
+
+impl RequestHeaderSetter {
+    pub fn new(headers: Vec<(http::HeaderName, http::HeaderValue)>) -> Self {
+        Self { headers }
+    }
+}
+
+#[async_trait::async_trait]
+impl RequestTransform for RequestHeaderSetter {
+    fn name(&self) -> &str {
+        "set_request_headers"
+    }
+
+    async fn apply(&self, cx: &mut RequestContext) -> Result<()> {
+        for (name, value) in &self.headers {
+            cx.headers.insert(name, value.clone());
+        }
+        Ok(())
+    }
+}
+
+/// Bounds a response body before it reaches the agent.
+#[derive(Debug)]
+pub struct ResponseLimiter {
+    max_bytes: usize,
+    on_oversize: ResponseOversizeAction,
+}
+
+impl ResponseLimiter {
+    pub fn new(max_bytes: usize, on_oversize: ResponseOversizeAction) -> Self {
+        Self { max_bytes, on_oversize }
+    }
+
+    fn replace_body(&self, resp: &mut ResponseParts, body: bytes::Bytes, action: &'static str) {
+        resp.headers.remove(http::header::CONTENT_ENCODING);
+        resp.headers.insert(http::header::CONTENT_LENGTH, http::HeaderValue::from(body.len()));
+        resp.headers.insert("x-marshal-response-limited", http::HeaderValue::from_static(action));
+        resp.body = BodyHandle::Buffered(body);
+    }
+
+    fn truncate(&self, source: &[u8], method: TruncationMethod, marker: &str) -> bytes::Bytes {
+        let marker_end = match method {
+            TruncationMethod::Bytes => marker.len().min(self.max_bytes),
+            TruncationMethod::Utf8 => utf8_prefix_len(marker.as_bytes(), self.max_bytes),
+        };
+        let marker = &marker.as_bytes()[..marker_end];
+        let prefix_budget = self.max_bytes - marker.len();
+        let prefix_end = match method {
+            TruncationMethod::Bytes => source.len().min(prefix_budget),
+            TruncationMethod::Utf8 => utf8_prefix_len(source, prefix_budget),
+        };
+        let mut out = Vec::with_capacity(prefix_end + marker.len());
+        out.extend_from_slice(&source[..prefix_end]);
+        out.extend_from_slice(marker);
+        bytes::Bytes::from(out)
+    }
+}
+
+fn utf8_prefix_len(bytes: &[u8], limit: usize) -> usize {
+    let end = bytes.len().min(limit);
+    match std::str::from_utf8(&bytes[..end]) {
+        Ok(_) => end,
+        Err(error) => error.valid_up_to(),
+    }
+}
+
+#[async_trait::async_trait]
+impl ResponseTransform for ResponseLimiter {
+    fn name(&self) -> &str {
+        "response_limit"
+    }
+
+    fn body_requirement(&self) -> BodyRequirement {
+        BodyRequirement::Buffered { cap: self.max_bytes }
+    }
+
+    async fn apply(&self, _cx: &RequestContext, resp: &mut ResponseParts) -> Result<()> {
+        let raw_oversized = match &resp.body {
+            BodyHandle::Buffered(source) if source.len() > self.max_bytes => {
+                Some((source.clone(), source.len()))
+            }
+            BodyHandle::OverLimit { prefix, observed, .. } => Some((prefix.clone(), *observed)),
+            _ => None,
+        };
+
+        // Encoded bytes carry no relationship to the decoded size the operator meant to cap —
+        // a small compressed payload can decompress into an arbitrarily large one — so an
+        // encoded response is treated as *always* potentially oversized, regardless of how
+        // small the bytes on the wire look. `Fail` and `Truncate` both reason about how much
+        // content there *actually is* and cannot proceed safely on that unknown, so they
+        // refuse. `Replace` needs none of that: it discards the body outright regardless of
+        // what it contained, so it is exactly as safe on encoded content as on plain content,
+        // and only needs to run at all when the encoded bytes are themselves over the limit.
+        let encoded = resp
+            .headers
+            .get(http::header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| !value.eq_ignore_ascii_case("identity"));
+
+        if !encoded && raw_oversized.is_none() {
+            return Ok(());
+        }
+
+        if encoded && !matches!(self.on_oversize, ResponseOversizeAction::Replace { .. }) {
+            let body = bytes::Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "error": "encoded_response_size_unknown",
+                    "proxy": "bot-marshal",
+                    "max_bytes": self.max_bytes,
+                    "message": "cannot enforce a decoded response limit on encoded bytes; request identity encoding",
+                }))
+                .unwrap_or_default(),
+            );
+            resp.status = http::StatusCode::BAD_GATEWAY;
+            resp.headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+            self.replace_body(resp, body, "fail");
+            return Ok(());
+        }
+
+        if encoded && raw_oversized.is_none() {
+            // Encoded, under the raw-byte limit, and the action is `Replace`: nothing to do —
+            // `Replace` only fires when there is actually something over the limit to replace.
+            return Ok(());
+        }
+        // Reachable only with `raw_oversized` populated: either not encoded (checked above),
+        // or encoded with `Replace` and already over the raw-byte limit (checked just above).
+        let (source, observed) = raw_oversized.expect("oversize checked above");
+
+        match &self.on_oversize {
+            ResponseOversizeAction::Fail => {
+                let body = bytes::Bytes::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "error": "response_too_large",
+                        "proxy": "bot-marshal",
+                        "max_bytes": self.max_bytes,
+                        "received_at_least_bytes": observed,
+                    }))
+                    .unwrap_or_default(),
+                );
+                resp.status = http::StatusCode::BAD_GATEWAY;
+                resp.headers.insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("application/json"),
+                );
+                self.replace_body(resp, body, "fail");
+            }
+            ResponseOversizeAction::Truncate { method, marker } => {
+                let body = self.truncate(&source, *method, marker);
+                self.replace_body(resp, body, "truncate");
+            }
+            ResponseOversizeAction::Replace { body } => {
+                resp.headers.insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("text/plain; charset=utf-8"),
+                );
+                self.replace_body(resp, bytes::Bytes::copy_from_slice(body.as_bytes()), "replace");
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Removes denied tools from a `tools/list` response.
 ///
@@ -78,6 +252,10 @@ impl ResponseTransform for McpToolFilter {
 
     fn body_requirement(&self) -> BodyRequirement {
         BodyRequirement::Buffered { cap: self.body_cap }
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
     }
 
     fn rewrite_chunk(&self, host: &str, chunk: &str) -> Option<String> {

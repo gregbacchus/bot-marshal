@@ -109,6 +109,11 @@ async fn upstream_service(
             Ok(Response::builder().status(StatusCode::OK).body(body).unwrap())
         }
 
+        "/large" => Ok(Response::builder()
+            .status(StatusCode::OK)
+            .body(full(b"abcdefghijklmnopqrstuvwxyz".to_vec()))
+            .unwrap()),
+
         // Serves bytes that are already compressed. The proxy must not decode, re-encode, or
         // strip the header, or the client sees garbage.
         "/encoded" => Ok(Response::builder()

@@ -262,9 +262,32 @@ pub enum Mode {
 pub struct RequestTransforms {
     #[serde(default)]
     pub headers: Option<HeaderAllowlist>,
+    /// Header values to add or replace after policy allows the request.
+    #[serde(default)]
+    pub set_headers: std::collections::BTreeMap<String, String>,
     /// Placeholder-to-real credential swaps, so the agent never holds the real secret.
     #[serde(default)]
     pub secrets: Vec<serde_json::Value>,
+}
+
+/// Headers whose meaning belongs to connection routing or HTTP framing rather than the
+/// end-to-end request. A transform that set one would either be removed later or could make
+/// the bytes on the wire disagree with the request the proxy checked.
+pub fn request_header_is_managed(name: &http::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "host"
+            | "content-length"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 /// Rewrites applied to a response before the agent sees it.
@@ -281,12 +304,18 @@ pub struct ResponseTransforms {
 
 /// A rewrite of the response body.
 ///
-/// None of these are implemented yet; a profile naming one fails to build rather than
-/// quietly serving untransformed responses. The shapes are declared because they determine
-/// whether a response can stream, which is a decision the rest of the design has to respect.
+/// A profile naming an unimplemented transform fails to build rather than quietly serving an
+/// untransformed response. The shapes are declared here because they determine whether a
+/// response can stream, which is a decision the rest of the design has to respect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "transform", rename_all = "snake_case")]
 pub enum BodyTransform {
+    /// Bound the response bytes delivered to an agent.
+    Limit {
+        max_bytes: usize,
+        #[serde(default)]
+        on_oversize: ResponseOversizeAction,
+    },
     /// Replace a body with an LLM-generated summary once it exceeds `over_bytes`.
     Summarize {
         over_bytes: usize,
@@ -317,9 +346,47 @@ fn default_body_cap() -> usize {
     1024 * 1024
 }
 
+fn default_truncation_marker() -> String {
+    "\n...[response truncated by bot-marshal]".into()
+}
+
+fn default_replacement_body() -> String {
+    "response omitted by bot-marshal because it exceeded the configured limit".into()
+}
+
+/// What a response limit does after the upstream body exceeds `max_bytes`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResponseOversizeAction {
+    /// Replace the upstream response with a small structured proxy error.
+    #[default]
+    Fail,
+    /// Keep a prefix and an explicit marker, within the same byte budget.
+    Truncate {
+        #[serde(default)]
+        method: TruncationMethod,
+        #[serde(default = "default_truncation_marker")]
+        marker: String,
+    },
+    /// Discard the upstream body and substitute a bounded operator-provided message.
+    Replace {
+        #[serde(default = "default_replacement_body")]
+        body: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncationMethod {
+    Bytes,
+    #[default]
+    Utf8,
+}
+
 impl BodyTransform {
     pub fn name(&self) -> &'static str {
         match self {
+            BodyTransform::Limit { .. } => "limit",
             BodyTransform::Summarize { .. } => "summarize",
             BodyTransform::Compact { .. } => "compact",
             BodyTransform::Redact { .. } => "redact",
@@ -329,7 +396,8 @@ impl BodyTransform {
     /// Every body transform needs the body materialised; this is the cap it declares.
     pub fn max_bytes(&self) -> usize {
         match self {
-            BodyTransform::Summarize { max_bytes, .. }
+            BodyTransform::Limit { max_bytes, .. }
+            | BodyTransform::Summarize { max_bytes, .. }
             | BodyTransform::Compact { max_bytes, .. }
             | BodyTransform::Redact { max_bytes, .. } => *max_bytes,
         }

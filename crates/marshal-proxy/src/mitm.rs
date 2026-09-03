@@ -370,6 +370,15 @@ async fn handle_request(
     // would undo the streaming the rest of the proxy guarantees. Anything else is
     // materialised up to the declared cap.
     if is_event_stream(&parts.headers) {
+        if let Some(transform) =
+            handler.response_transforms.iter().find(|transform| !transform.supports_streaming())
+        {
+            return Ok(response_transform_failure(
+                transform.name(),
+                "cannot apply a buffering response transform to a streaming response; scope \
+                 the transform away from SSE endpoints",
+            ));
+        }
         // Rewriting changes the length, and a stale Content-Length makes hyper tear the
         // connection down mid-body. Dropping it moves the response to chunked encoding,
         // which is what a stream of unknown length needs anyway.
@@ -387,8 +396,7 @@ async fn handle_request(
             // A response transform that cannot run must not be skipped: a `tools/list` that
             // slipped past the filter advertises tools the agent is not allowed to call.
             tracing::error!(transform = transform.name(), error = %e, "response transform failed");
-            let reason = Reason::new(transform.name(), "response_transform_failed", e.to_string());
-            return Ok(denial_response(&reason, &cx, jsonrpc_id));
+            return Ok(response_transform_failure(transform.name(), &e.to_string()));
         }
     }
 
@@ -401,6 +409,24 @@ async fn handle_request(
         _ => forward,
     };
     Ok(Response::from_parts(parts, out))
+}
+
+fn response_transform_failure(transform: &str, message: &str) -> Response<ProxyBody> {
+    let body = bytes::Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "error": "response_transform_failed",
+            "proxy": "bot-marshal",
+            "transform": transform,
+            "message": message,
+        }))
+        .unwrap_or_default(),
+    );
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("proxy-agent", "bot-marshal")
+        .body(Full::new(body).map_err(|e: std::convert::Infallible| match e {}).boxed())
+        .expect("a static transform failure response is always valid")
 }
 
 fn is_event_stream(headers: &hyper::HeaderMap) -> bool {
@@ -516,9 +542,22 @@ async fn materialise(
     }
 
     if overflowed {
+        let mut bounded = bytes::BytesMut::with_capacity(cap);
+        for frame in &collected {
+            if let Some(data) = frame.data_ref() {
+                let take = (cap - bounded.len()).min(data.len());
+                bounded.extend_from_slice(&data[..take]);
+                if bounded.len() == cap {
+                    break;
+                }
+            }
+        }
         let prefix = futures::stream::iter(collected.into_iter().map(Ok));
         let rejoined = http_body_util::StreamBody::new(prefix.chain(stream));
-        return Ok((BodyHandle::Streaming, BodyExt::boxed(rejoined)));
+        return Ok((
+            BodyHandle::OverLimit { prefix: bounded.freeze(), limit: cap, observed: total },
+            BodyExt::boxed(rejoined),
+        ));
     }
 
     let mut bytes = bytes::BytesMut::with_capacity(total);
@@ -544,7 +583,7 @@ fn origin_form(uri: &hyper::Uri) -> hyper::Uri {
 /// `Connection` and `Upgrade` are kept for an upgrade request: stripping them turns a
 /// WebSocket handshake into an ordinary GET that the upstream answers with 200, and the
 /// client then waits forever for a 101 that will never come.
-fn strip_hop_by_hop(headers: &mut hyper::HeaderMap, keep_upgrade: bool) {
+pub(crate) fn strip_hop_by_hop(headers: &mut hyper::HeaderMap, keep_upgrade: bool) {
     const HOP_BY_HOP: &[&str] = &[
         "keep-alive",
         "proxy-authenticate",

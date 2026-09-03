@@ -537,7 +537,7 @@ impl Server {
             return Ok(());
         }
 
-        let cx = self.context(
+        let mut cx = self.context(
             &attribution,
             IngressMode::Explicit,
             peer,
@@ -606,6 +606,35 @@ impl Server {
             )
             .await;
             return Ok(());
+        }
+
+        if !request.is_connect && !attribution.request_transforms.is_empty() {
+            cx.headers = request.headers.clone();
+            for transform in &attribution.request_transforms {
+                if let Err(e) = transform.apply(&mut cx).await {
+                    let reason = Reason::new(transform.name(), "transform_failed", e.to_string());
+                    let _ = httpfront::write_denial(
+                        &mut client,
+                        &reason,
+                        &cx.identity.to_string(),
+                        &attribution.resolved.profile,
+                    )
+                    .await;
+                    self.emit_audit(
+                        &attribution,
+                        &cx,
+                        &reason,
+                        Action::Deny,
+                        outcome.evidence,
+                        None,
+                        started,
+                        false,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+            mitm::strip_hop_by_hop(&mut cx.headers, false);
         }
 
         let mut upstream = match self.guard.connect(&request.authority).await {
@@ -713,9 +742,13 @@ impl Server {
             }
             return Ok(());
         } else {
-            // Replay the head verbatim, rewritten to origin-form. The proxy has promised only
-            // to observe plaintext at M1, so it must not normalise headers on the way past.
-            let head = rewrite_to_origin_form(&request);
+            // Preserve the original header bytes when no rewrite was requested. A configured
+            // transform opts into serialising the transformed request representation instead.
+            let head = if attribution.request_transforms.is_empty() {
+                rewrite_to_origin_form(&request)
+            } else {
+                transformed_origin_form(&request, &cx)
+            };
             upstream.write_all(&head).await?;
         }
 
@@ -884,6 +917,25 @@ fn rewrite_to_origin_form(request: &ProxyRequest) -> Vec<u8> {
     out
 }
 
+fn transformed_origin_form(request: &ProxyRequest, cx: &RequestContext) -> Vec<u8> {
+    let version = request
+        .raw_head
+        .split(|b| *b == b'\n')
+        .next()
+        .and_then(|line| std::str::from_utf8(line).ok())
+        .and_then(|line| line.split_whitespace().nth(2))
+        .unwrap_or("HTTP/1.1");
+    let mut out = format!("{} {} {version}\r\n", cx.method, cx.uri).into_bytes();
+    for (name, value) in &cx.headers {
+        out.extend_from_slice(name.as_str().as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
 /// Bind a Unix listener, clearing a stale socket file first.
 fn bind_unix(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
     if path.exists() {
@@ -922,6 +974,7 @@ mod tests {
             raw_head:
                 b"GET http://example.com/a?b=1 HTTP/1.1\r\nHost: example.com\r\nX-K: v\r\n\r\n"
                     .to_vec(),
+            headers: http::HeaderMap::new(),
             is_connect: false,
             proxy_auth: None,
         };

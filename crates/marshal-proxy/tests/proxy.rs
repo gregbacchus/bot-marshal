@@ -12,9 +12,9 @@ use std::sync::Arc;
 use marshal_audit::JsonSink;
 use marshal_config::model::Config;
 use marshal_core::{AuditSink, DenyingDecider};
-use marshal_policy::build_chain;
+use marshal_policy::{build_chain, build_request_transforms};
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
-use support::{handle, single_profile_runtime, start_upstream};
+use support::{handle, runtime_with, start_upstream, test_engine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -36,14 +36,18 @@ async fn start_proxy_with_guard(
     let cfg: Config = serde_yaml_ng::from_str(yaml).expect("config parses");
     let chain =
         build_chain(&cfg, profile, &cfg.profile, Arc::new(DenyingDecider)).expect("chain builds");
+    let request_transforms =
+        build_request_transforms(&cfg, profile, &cfg.profile).expect("request transforms build");
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
+    let passthrough =
+        marshal_policy::HostMatcher::new(Vec::<&str>::new(), ["0.0.0.0/0", "::/0"]).unwrap();
 
     let server = Server::new(
         ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
         // `tls: None` here means "passthrough everything": interception is mandatory, but
         // these tests are about the plain-relay path a passthrough host still gets (byte
         // relay plus the SNI cross-check), not about MITM itself — that is tests/mitm.rs.
-        handle(single_profile_runtime(chain, None)),
+        handle(runtime_with(chain, test_engine(), passthrough, request_transforms, Vec::new())),
         Arc::new(guard),
         audit,
     );
@@ -306,6 +310,47 @@ async fn absolute_form_http_is_rewritten_to_origin_form() {
 
     assert!(seen.starts_with("GET /zen?a=1 HTTP/1.1\r\n"), "got: {seen:?}");
     assert!(seen.contains("X-Marker: keep"), "headers must pass through untouched: {seen:?}");
+}
+
+#[tokio::test]
+async fn configured_request_header_reaches_the_upstream() {
+    let upstream = start_upstream(b"").await;
+    let proxy = start_proxy(
+        r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
+  request_transforms:
+    set_headers:
+      Accept: application/json
+"#,
+        "p",
+    )
+    .await;
+    let mut client = TcpStream::connect(proxy).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/plain\r\n\r\n",
+                upstream.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 512];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
+        .await
+        .expect("upstream should echo the transformed request")
+        .unwrap();
+    let seen = String::from_utf8_lossy(&buf[..n]);
+    assert!(seen.contains("accept: application/json\r\n"), "got: {seen:?}");
+    assert!(!seen.contains("text/plain"), "the configured value must replace the client's");
 }
 
 /// Minimal well-formed ClientHello carrying one SNI name.

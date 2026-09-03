@@ -46,6 +46,9 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
     for (name, profile) in &cfg.profiles {
         check_profile(cfg, &format!("profiles.{name}"), profile, &mut out);
     }
+    for (name, bundle) in &cfg.transforms {
+        check_request_headers(&format!("transforms.{name}"), &bundle.request_transforms, &mut out);
+    }
 
     if let Some(explicit) = &cfg.listeners.explicit
         && explicit.listen.is_empty()
@@ -190,6 +193,8 @@ fn check_profile(
     profile: &crate::model::Profile,
     out: &mut Vec<Diagnostic>,
 ) {
+    check_request_headers(at, &profile.request_transforms, out);
+
     if profile.default_action == Decision::Allow && !profile.i_understand_this_is_allow_by_default {
         out.push(Diagnostic {
             severity: Severity::Error,
@@ -281,6 +286,22 @@ fn check_profile(
     // change, not a detail: an SSE or WebSocket response cannot survive it, so the
     // operator should be told rather than discovering it when an agent's stream stalls.
     for (i, t) in profile.response_transforms.body.iter().enumerate() {
+        if let crate::model::BodyTransform::Limit {
+            max_bytes,
+            on_oversize: crate::model::ResponseOversizeAction::Replace { body },
+        } = t
+            && body.len() > *max_bytes
+        {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{at}.response_transforms.body[{i}].on_oversize.body"),
+                message: format!(
+                    "replacement is {} bytes but max_bytes is {max_bytes}; the replacement \
+                     must fit the limit it enforces",
+                    body.len()
+                ),
+            });
+        }
         out.push(Diagnostic {
             severity: Severity::Warning,
             location: format!("{at}.response_transforms.body[{i}]"),
@@ -314,6 +335,7 @@ fn check_profile(
 
     if let Some(name) = &profile.transforms {
         let has_inline_request = profile.request_transforms.headers.is_some()
+            || !profile.request_transforms.set_headers.is_empty()
             || !profile.request_transforms.secrets.is_empty();
         let has_inline_response = profile.response_transforms.headers.is_some()
             || !profile.response_transforms.body.is_empty();
@@ -331,6 +353,37 @@ fn check_profile(
                 severity: Severity::Error,
                 location: format!("{at}.transforms"),
                 message: format!("references unknown transform bundle `{name}`"),
+            });
+        }
+    }
+}
+
+fn check_request_headers(
+    at: &str,
+    transforms: &crate::model::RequestTransforms,
+    out: &mut Vec<Diagnostic>,
+) {
+    for (name, value) in &transforms.set_headers {
+        let location = format!("{at}.request_transforms.set_headers.{name}");
+        let Ok(parsed_name) = http::HeaderName::from_bytes(name.as_bytes()) else {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location,
+                message: "invalid header name".into(),
+            });
+            continue;
+        };
+        if crate::model::request_header_is_managed(&parsed_name) {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location,
+                message: format!("`{name}` is managed by the proxy and cannot be set"),
+            });
+        } else if http::HeaderValue::from_str(value).is_err() {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location,
+                message: "invalid header value".into(),
             });
         }
     }
@@ -505,6 +558,56 @@ mod tests {
                 .iter()
                 .any(|d| d.severity == Severity::Error && d.location == "profiles.p.transforms")
         );
+    }
+
+    #[test]
+    fn invalid_request_header_names_and_values_report_their_config_paths() {
+        let mut profile = Profile::default();
+        profile.request_transforms.set_headers.insert("bad header".into(), "value".into());
+        profile.request_transforms.set_headers.insert("x-good-name".into(), "line\nbreak".into());
+        profile.request_transforms.set_headers.insert("Content-Length".into(), "99".into());
+
+        let diagnostics = validate(&cfg_with(profile));
+        assert!(diagnostics.iter().any(|d| {
+            d.severity == Severity::Error
+                && d.location == "profiles.p.request_transforms.set_headers.bad header"
+                && d.message.contains("invalid header name")
+        }));
+        assert!(diagnostics.iter().any(|d| {
+            d.severity == Severity::Error
+                && d.location == "profiles.p.request_transforms.set_headers.x-good-name"
+                && d.message.contains("invalid header value")
+        }));
+        assert!(diagnostics.iter().any(|d| {
+            d.severity == Severity::Error
+                && d.location == "profiles.p.request_transforms.set_headers.Content-Length"
+                && d.message.contains("managed by the proxy")
+        }));
+    }
+
+    #[test]
+    fn response_limit_replacement_must_fit_its_declared_budget() {
+        let profile: Profile = serde_yaml_ng::from_str(
+            r#"
+default_action: deny
+response_transforms:
+  body:
+    - transform: limit
+      max_bytes: 4
+      on_oversize:
+        action: replace
+        body: "too long"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = validate(&cfg_with(profile));
+        assert!(diagnostics.iter().any(|d| {
+            d.severity == Severity::Error
+                && d.location == "profiles.p.response_transforms.body[0].on_oversize.body"
+                && d.message.contains("8 bytes")
+                && d.message.contains("max_bytes is 4")
+        }));
     }
 
     #[test]

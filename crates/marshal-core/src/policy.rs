@@ -160,6 +160,11 @@ pub trait ResponseTransform: Send + Sync + std::fmt::Debug {
         BodyRequirement::Streaming
     }
 
+    /// Whether this transform can enforce its behavior one streaming chunk at a time.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
     /// The request is available because a response is rarely interpretable without it — what
     /// to redact, or how aggressively to compact, usually depends on what was asked.
     async fn apply(&self, cx: &RequestContext, resp: &mut ResponseParts) -> Result<()>;

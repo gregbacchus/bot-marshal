@@ -62,6 +62,10 @@ pub enum BodyHandle {
     Empty,
     /// Fully buffered because some layer asked for it.
     Buffered(bytes::Bytes),
+    /// Buffering crossed its declared limit. The bounded prefix is available to transforms
+    /// that intentionally truncate or replace; `observed` is only a lower bound because the
+    /// unread remainder stays streaming.
+    OverLimit { prefix: bytes::Bytes, limit: usize, observed: usize },
     /// Streaming; bytes have not been (and may never be) materialised.
     Streaming,
 }

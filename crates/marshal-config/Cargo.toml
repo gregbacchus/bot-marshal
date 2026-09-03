@@ -18,5 +18,6 @@ serde_yaml_ng.workspace = true
 humantime-serde.workspace = true
 globset.workspace = true
 ipnet.workspace = true
+http.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

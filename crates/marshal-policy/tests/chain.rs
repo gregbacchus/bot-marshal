@@ -10,7 +10,7 @@ use marshal_core::{
     Action, BodyHandle, CostClass, DenyingDecider, Evidence, Identity, IngressMode, PolicyLayer,
     Reason, RequestContext, Result, Verdict,
 };
-use marshal_policy::build_chain;
+use marshal_policy::{build_chain, build_request_transforms, build_response_transforms};
 
 fn cfg(yaml: &str) -> Config {
     serde_yaml_ng::from_str(yaml).expect("test config parses")
@@ -209,6 +209,7 @@ profile:
         TransformBundle {
             request_transforms: RequestTransforms {
                 headers: Some(HeaderAllowlist { allow: vec!["accept".into()] }),
+                set_headers: Default::default(),
                 secrets: vec![],
             },
             response_transforms: ResponseTransforms {
@@ -221,4 +222,153 @@ profile:
     let p = marshal_policy::resolve_profile(&c, &c.profile).unwrap();
     assert_eq!(p.request_transforms.headers.unwrap().allow, ["accept"]);
     assert_eq!(p.response_transforms.headers.unwrap().allow, ["content-type"]);
+}
+
+#[tokio::test]
+async fn configured_request_headers_are_added_or_replaced() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+  request_transforms:
+    set_headers:
+      Accept: application/json
+      X-Marshal-Mode: enforced
+"#);
+    let transforms = build_request_transforms(&c, "p", &c.profile).unwrap();
+    let mut req = request("api.example.com");
+    req.headers.insert("x-marshal-mode", "old-value".parse().unwrap());
+
+    for transform in transforms {
+        transform.apply(&mut req).await.unwrap();
+    }
+
+    assert_eq!(req.headers["accept"], "application/json");
+    assert_eq!(req.headers["x-marshal-mode"], "enforced");
+}
+
+#[tokio::test]
+async fn response_limit_truncates_at_a_utf8_boundary_within_the_budget() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 10
+        on_oversize:
+          action: truncate
+          method: utf8
+          marker: "[cut]"
+"#);
+    build_chain(&c, "p", &c.profile, Arc::new(DenyingDecider)).unwrap();
+    let transforms = build_response_transforms(&c, "p", &c.profile).unwrap();
+    let mut response = marshal_core::ResponseParts {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+        body: BodyHandle::Buffered(bytes::Bytes::from_static("éééééé".as_bytes())),
+    };
+
+    for transform in transforms {
+        transform.apply(&request("api.example.com"), &mut response).await.unwrap();
+    }
+
+    let BodyHandle::Buffered(body) = response.body else { panic!("response was not buffered") };
+    assert_eq!(body, "éé[cut]");
+    assert!(body.len() <= 10);
+    assert_eq!(response.headers["x-marshal-response-limited"], "truncate");
+    assert_eq!(response.headers[http::header::CONTENT_LENGTH], body.len().to_string());
+}
+
+#[tokio::test]
+async fn response_limit_can_fail_with_a_small_structured_response() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 4
+        on_oversize: { action: fail }
+"#);
+    let transforms = build_response_transforms(&c, "p", &c.profile).unwrap();
+    let mut response = marshal_core::ResponseParts {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+        body: BodyHandle::Buffered(bytes::Bytes::from_static(b"too long")),
+    };
+
+    transforms[0].apply(&request("api.example.com"), &mut response).await.unwrap();
+
+    assert_eq!(response.status, http::StatusCode::BAD_GATEWAY);
+    assert_eq!(response.headers["x-marshal-response-limited"], "fail");
+    let BodyHandle::Buffered(body) = response.body else { panic!("response was not buffered") };
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"], "response_too_large");
+    assert_eq!(error["max_bytes"], 4);
+}
+
+#[tokio::test]
+async fn response_limit_can_replace_an_oversized_body_and_preserve_its_status() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 32
+        on_oversize:
+          action: replace
+          body: "omitted"
+"#);
+    let transforms = build_response_transforms(&c, "p", &c.profile).unwrap();
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
+    let mut response = marshal_core::ResponseParts {
+        status: http::StatusCode::CREATED,
+        headers,
+        body: BodyHandle::Buffered(bytes::Bytes::from(vec![b'x'; 33])),
+    };
+
+    transforms[0].apply(&request("api.example.com"), &mut response).await.unwrap();
+
+    assert_eq!(response.status, http::StatusCode::CREATED);
+    assert_eq!(response.headers["x-marshal-response-limited"], "replace");
+    assert!(!response.headers.contains_key(http::header::CONTENT_ENCODING));
+    let BodyHandle::Buffered(body) = response.body else { panic!("response was not buffered") };
+    assert_eq!(body, "omitted");
+}
+
+#[tokio::test]
+async fn byte_truncation_is_exact_and_in_limit_responses_are_unchanged() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 6
+        on_oversize:
+          action: truncate
+          method: bytes
+          marker: "[x]"
+"#);
+    let transforms = build_response_transforms(&c, "p", &c.profile).unwrap();
+    let mut oversized = marshal_core::ResponseParts {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+        body: BodyHandle::Buffered(bytes::Bytes::copy_from_slice("ééé!".as_bytes())),
+    };
+    transforms[0].apply(&request("api.example.com"), &mut oversized).await.unwrap();
+    let BodyHandle::Buffered(body) = oversized.body else { panic!("response was not buffered") };
+    assert_eq!(&body[..], &[0xc3, 0xa9, 0xc3, b'[', b'x', b']']);
+
+    let mut within_limit = marshal_core::ResponseParts {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+        body: BodyHandle::Buffered(bytes::Bytes::from_static(b"123456")),
+    };
+    transforms[0].apply(&request("api.example.com"), &mut within_limit).await.unwrap();
+    assert!(!within_limit.headers.contains_key("x-marshal-response-limited"));
+    let BodyHandle::Buffered(body) = within_limit.body else { panic!("response was not buffered") };
+    assert_eq!(body, "123456");
 }

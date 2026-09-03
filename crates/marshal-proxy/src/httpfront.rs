@@ -37,6 +37,9 @@ pub struct ProxyRequest {
     /// The complete head as received, so an allowed plaintext request can be replayed
     /// upstream without us having re-serialised (and possibly altered) it.
     pub raw_head: Vec<u8>,
+    /// Parsed end-to-end headers for request transforms. `raw_head` remains the source of
+    /// truth when no transform is configured, preserving the byte-for-byte relay behaviour.
+    pub headers: http::HeaderMap,
     pub is_connect: bool,
     /// `Proxy-Authorization`, when present. Selects an identity.
     pub proxy_auth: Option<marshal_core::Credential>,
@@ -74,16 +77,28 @@ where
     let method = parts.next().ok_or(HttpError::MalformedRequestLine)?.to_owned();
     let target = parts.next().ok_or(HttpError::MalformedRequestLine)?;
 
-    let headers: Vec<(&str, &str)> =
+    let header_lines: Vec<(&str, &str)> =
         lines.filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim(), v.trim()))).collect();
 
-    let host_header =
-        headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("host")).map(|(_, v)| (*v).to_owned());
+    let host_header = header_lines
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| (*v).to_owned());
 
-    let proxy_auth = headers
+    let proxy_auth = header_lines
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("proxy-authorization"))
         .and_then(|(_, v)| parse_basic(v));
+
+    let mut headers = http::HeaderMap::new();
+    for (name, value) in &header_lines {
+        let (Ok(name), Ok(value)) =
+            (http::HeaderName::from_bytes(name.as_bytes()), http::HeaderValue::from_str(value))
+        else {
+            continue;
+        };
+        headers.append(name, value);
+    }
 
     let is_connect = method.eq_ignore_ascii_case("CONNECT");
 
@@ -109,7 +124,7 @@ where
         (parse_authority(&host, 80)?, target.to_owned())
     };
 
-    Ok(ProxyRequest { authority, method, path, raw_head: head, is_connect, proxy_auth })
+    Ok(ProxyRequest { authority, method, path, raw_head: head, headers, is_connect, proxy_auth })
 }
 
 /// Parse `Proxy-Authorization: Basic <base64(user:pass)>`.

@@ -14,7 +14,7 @@ use http_body_util::BodyExt;
 use marshal_audit::JsonSink;
 use marshal_config::model::Config;
 use marshal_core::{AuditSink, DenyingDecider};
-use marshal_policy::{HostMatcher, build_chain};
+use marshal_policy::{HostMatcher, build_chain, build_response_transforms};
 use marshal_proxy::mitm::TlsEngine;
 use marshal_proxy::{Server, ServerConfig, UpstreamGuard};
 use support::*;
@@ -51,6 +51,7 @@ async fn harness(yaml: &str, passthrough: &[&str]) -> Harness {
 
     let cfg: Config = serde_yaml_ng::from_str(yaml).unwrap();
     let chain = build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap();
+    let response_transforms = build_response_transforms(&cfg, "p", &cfg.profile).unwrap();
     let guard = UpstreamGuard::new(Vec::<String>::new(), true).unwrap();
     let audit: Arc<dyn AuditSink> = Arc::new(JsonSink::new(tokio::io::sink()));
 
@@ -61,7 +62,7 @@ async fn harness(yaml: &str, passthrough: &[&str]) -> Harness {
             engine,
             HostMatcher::new(passthrough.iter(), Vec::<&str>::new()).unwrap(),
             Vec::new(),
-            Vec::new(),
+            response_transforms,
         )),
         Arc::new(guard),
         audit,
@@ -89,6 +90,97 @@ async fn interception_terminates_tls_and_forwards() {
     assert_eq!(resp.status(), 200);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
+}
+
+#[tokio::test]
+async fn an_oversized_response_is_truncated_on_the_wire() {
+    let h = harness(
+        r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 10
+        on_oversize:
+          action: truncate
+          method: utf8
+          marker: "[cut]"
+"#,
+        &[],
+    )
+    .await;
+    let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;
+
+    let resp = sender.send_request(request(h.upstream, "/large")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["x-marshal-response-limited"], "truncate");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"abcde[cut]");
+}
+
+#[tokio::test]
+async fn a_limit_transform_fails_loudly_for_an_sse_response() {
+    let h = harness(
+        r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 64
+"#,
+        &[],
+    )
+    .await;
+    let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;
+
+    let resp = sender.send_request(request(h.upstream, "/sse")).await.unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::BAD_GATEWAY);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"], "response_transform_failed");
+    assert!(error["message"].as_str().unwrap().contains("streaming response"));
+}
+
+#[tokio::test]
+async fn a_limit_transform_refuses_an_encoded_response_whose_decoded_size_is_unknown() {
+    let h = harness(
+        r#"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { cidrs: ["127.0.0.0/8"] }
+      on_match: allow
+      on_miss: pass
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 1024
+"#,
+        &[],
+    )
+    .await;
+    let mut sender = connect_through_proxy(h.proxy, h.upstream, &h.proxy_ca_pem).await;
+
+    let resp = sender.send_request(request(h.upstream, "/encoded")).await.unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.headers()["x-marshal-response-limited"], "fail");
+    assert!(!resp.headers().contains_key(hyper::header::CONTENT_ENCODING));
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"], "encoded_response_size_unknown");
 }
 
 #[tokio::test]

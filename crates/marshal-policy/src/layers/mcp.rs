@@ -55,7 +55,7 @@ impl PolicyLayer for Mcp {
             // Either there is no body, or it exceeded the cap. An MCP call that does not fit
             // in the cap cannot be inspected, and an uninspected call to a governed server is
             // exactly what this layer exists to prevent.
-            if matches!(cx.body, BodyHandle::Streaming) {
+            if matches!(cx.body, BodyHandle::Streaming | BodyHandle::OverLimit { .. }) {
                 return Ok(Verdict::Deny(Reason::new(
                     "mcp",
                     "mcp_body_too_large",

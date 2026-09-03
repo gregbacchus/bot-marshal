@@ -484,12 +484,14 @@ fn build_runtime(
     )> {
         let chain = Arc::new(build_chain(&cfg, label, profile, Arc::new(DenyingDecider))?);
         let response = marshal_policy::build_response_transforms(&cfg, label, profile)?;
+        let mut request = marshal_policy::build_request_transforms(&cfg, label, profile)?;
         let resolved = marshal_policy::resolve_profile(&cfg, profile)?;
         let injector = Arc::new(build_injector(&resolved, &cfg)?);
-        let (request, injector) = if injector.is_empty() {
-            (Vec::new(), None)
+        let injector = if injector.is_empty() {
+            None
         } else {
-            (vec![Arc::clone(&injector) as Arc<dyn marshal_core::RequestTransform>], Some(injector))
+            request.push(Arc::clone(&injector) as Arc<dyn marshal_core::RequestTransform>);
+            Some(injector)
         };
         Ok((chain, response, request, injector))
     };
@@ -1315,6 +1317,8 @@ mod tests {
                 r#"
 default_action: deny
 request_transforms:
+  set_headers:
+    Accept: application/json
   secrets:
     - name: SECRET_A
       source: {{ type: file, path: "{secret_a}" }}
@@ -1403,6 +1407,36 @@ profile:
              {all_values:?}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn configured_request_header_setters_are_wired_into_the_runtime() {
+        let dir = std::env::temp_dir()
+            .join(format!("marshal-build-runtime-header-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = write_two_profile_config(&dir);
+        let (runtime, _, _) =
+            build_runtime(&config, Some("profile-a".to_string())).expect("config builds");
+        let mut request = marshal_core::RequestContext {
+            identity: marshal_core::Identity::new("test"),
+            profile: Arc::from("profile-a"),
+            ingress: marshal_core::IngressMode::Explicit,
+            phase: marshal_core::Phase::Request,
+            client_addr: "127.0.0.1:1234".parse().unwrap(),
+            authority: marshal_core::Authority { host: "api.example.com".into(), port: 443 },
+            method: "GET".parse().unwrap(),
+            uri: "/".parse().unwrap(),
+            headers: Default::default(),
+            body: marshal_core::BodyHandle::Empty,
+            evidence: marshal_core::Evidence::new(),
+        };
+
+        for transform in &runtime.request_transforms["profile-a"] {
+            transform.apply(&mut request).await.unwrap();
+        }
+
+        assert_eq!(request.headers["accept"], "application/json");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

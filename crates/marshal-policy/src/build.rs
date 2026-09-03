@@ -12,13 +12,31 @@ use crate::layers::dlp::Oversize as DlpOversize;
 use crate::layers::{Allowlist, Denylist, Dlp, Mcp, Rules};
 use crate::mcp::McpPolicy;
 use crate::patterns;
-use crate::transforms::McpToolFilter;
+use crate::transforms::{McpToolFilter, RequestHeaderSetter, ResponseLimiter};
 use marshal_judge::{AnthropicProvider, CompiledScope, Judge, OpenAiProvider, Provider};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error("unknown transform bundle `{0}`")]
     UnknownTransformBundle(String),
+
+    #[error("profile `{profile}`: request_transforms.set_headers.{name}: invalid header name")]
+    InvalidRequestHeaderName { profile: String, name: String },
+
+    #[error(
+        "profile `{profile}`: request_transforms.set_headers.{name}: header is managed by the proxy"
+    )]
+    ManagedRequestHeader { profile: String, name: String },
+
+    #[error(
+        "profile `{profile}`: request_transforms.set_headers.{name}: invalid header value: {source}"
+    )]
+    InvalidRequestHeaderValue {
+        profile: String,
+        name: String,
+        #[source]
+        source: http::header::InvalidHeaderValue,
+    },
 
     #[error("profile `{profile}`, layer `{layer}`: {source}")]
     Pattern {
@@ -64,6 +82,44 @@ pub enum BuildError {
         #[source]
         source: crate::layers::rules::RuleCompileError,
     },
+}
+
+/// Build request-header rewrites declared directly or through a named transform bundle.
+pub fn build_request_transforms(
+    cfg: &Config,
+    profile_name: &str,
+    profile: &marshal_config::model::Profile,
+) -> Result<Vec<Arc<dyn marshal_core::RequestTransform>>, BuildError> {
+    let profile = resolve_profile(cfg, profile)?;
+    if profile.request_transforms.set_headers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut headers = Vec::with_capacity(profile.request_transforms.set_headers.len());
+    for (name, value) in &profile.request_transforms.set_headers {
+        let parsed_name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            BuildError::InvalidRequestHeaderName {
+                profile: profile_name.to_owned(),
+                name: name.clone(),
+            }
+        })?;
+        if marshal_config::model::request_header_is_managed(&parsed_name) {
+            return Err(BuildError::ManagedRequestHeader {
+                profile: profile_name.to_owned(),
+                name: name.clone(),
+            });
+        }
+        let parsed_value = http::HeaderValue::from_str(value).map_err(|source| {
+            BuildError::InvalidRequestHeaderValue {
+                profile: profile_name.to_owned(),
+                name: name.clone(),
+                source,
+            }
+        })?;
+        headers.push((parsed_name, parsed_value));
+    }
+
+    Ok(vec![Arc::new(RequestHeaderSetter::new(headers))])
 }
 
 /// Resolve a profile's `transforms: <name>` indirection, if it has one, into an effective
@@ -232,7 +288,12 @@ pub fn build_chain(
 
     // Same rule as an unimplemented policy layer: a profile naming a transform we cannot run
     // must not start. A response served untransformed is not what the operator asked for.
-    if let Some(t) = profile.response_transforms.body.first() {
+    if let Some(t) = profile
+        .response_transforms
+        .body
+        .iter()
+        .find(|t| !matches!(t, marshal_config::model::BodyTransform::Limit { .. }))
+    {
         return Err(BuildError::Unimplemented {
             profile: profile_name.to_owned(),
             layer: t.name(),
@@ -264,6 +325,11 @@ pub fn build_response_transforms(
                     source,
                 })?);
             out.push(Arc::new(McpToolFilter::new(policy, *max_body_bytes)));
+        }
+    }
+    for transform in &profile.response_transforms.body {
+        if let marshal_config::model::BodyTransform::Limit { max_bytes, on_oversize } = transform {
+            out.push(Arc::new(ResponseLimiter::new(*max_bytes, on_oversize.clone())));
         }
     }
     Ok(out)

@@ -223,6 +223,54 @@ mod tests {
     }
 
     #[test]
+    fn request_header_values_are_loaded_verbatim() {
+        let dir = TempDir::new("request-set-headers");
+        dir.write(
+            "config.yaml",
+            "tls: {}\nprofile:\n  default_action: deny\n  request_transforms:\n    set_headers:\n      Accept: application/json\n",
+        );
+
+        let cfg = load(dir.0.join("config.yaml")).unwrap();
+        assert_eq!(
+            cfg.profile.request_transforms.set_headers.get("Accept").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn response_limit_actions_are_loaded() {
+        let dir = TempDir::new("response-limit-actions");
+        dir.write(
+            "config.yaml",
+            r#"tls: {}
+profile:
+  default_action: deny
+  response_transforms:
+    body:
+      - transform: limit
+        max_bytes: 64
+        on_oversize: { action: fail }
+      - transform: limit
+        max_bytes: 64
+        on_oversize:
+          action: truncate
+          method: utf8
+          marker: "...[cut]"
+      - transform: limit
+        max_bytes: 64
+        on_oversize:
+          action: replace
+          body: "response omitted"
+"#,
+        );
+
+        let cfg = load(dir.0.join("config.yaml")).unwrap();
+        assert_eq!(cfg.profile.response_transforms.body.len(), 3);
+        assert!(cfg.profile.response_transforms.body.iter().all(|t| t.name() == "limit"));
+        assert!(cfg.profile.response_transforms.body.iter().all(|t| t.max_bytes() == 64));
+    }
+
+    #[test]
     fn a_profile_file_cannot_smuggle_in_an_unrelated_section() {
         // The whole point of the convention over an arbitrary include: a file under
         // profiles/ has no `tls`/`listeners` field to accidentally set — deserialising it

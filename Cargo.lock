@@ -1203,6 +1203,7 @@ name = "marshal-config"
 version = "0.1.0"
 dependencies = [
  "globset",
+ "http",
  "humantime-serde",
  "ipnet",
  "marshal-core",
