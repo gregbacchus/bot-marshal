@@ -857,3 +857,92 @@ async fn a_redirect_carrying_a_state_marshal_did_not_issue_is_not_touched() {
     let resp = sender.send_request(req).await.unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+#[tokio::test]
+async fn a_capturing_profile_still_streams_sse_first_byte_early() {
+    // A broker registers a response transform on the whole profile, which moves every
+    // response in that profile off the "no transforms, stream straight through" fast path.
+    // ADR-0007 makes this a correctness property, not a performance one: a buffering
+    // regression here does not error, it just goes quiet and then delivers everything at once.
+
+    let pki = test_pki();
+    let upstream = start_tls_upstream(&pki).await;
+    let generated = marshal_tls::CertificateAuthority::generate("test proxy CA", 30).unwrap();
+    let proxy_ca_pem = generated.cert_pem.clone();
+    let ca = marshal_tls::CertificateAuthority::from_pem(&generated.cert_pem, &generated.key_pem)
+        .unwrap();
+    let minter = Arc::new(marshal_tls::LeafMinter::new(Arc::new(ca), 64, 72));
+    let engine =
+        Arc::new(TlsEngine::with_extra_roots(minter, std::slice::from_ref(&pki.ca_pem)).unwrap());
+    let cfg: Config = serde_yaml_ng::from_str(ALLOW_LOOPBACK).unwrap();
+    let chain = build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap();
+
+    let redactor = Redactor::default();
+    let auth = fake_auth_server(vec![(200, token_body(MINTED_TOKEN, 3600))]).await;
+    let broker = Arc::new(
+        marshal_secrets::Oauth2Broker::new(
+            "SERVICE",
+            oauth_source(&auth, &redactor, Grant::Enrolled),
+            "https://auth.invalid/authorize",
+            "https://auth.invalid/token",
+        )
+        .unwrap(),
+    );
+
+    let server = Server::new(
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
+        handle(support::runtime_with_responders(
+            chain,
+            engine,
+            HostMatcher::default(),
+            vec![],
+            vec![Arc::clone(&broker) as Arc<dyn marshal_core::ResponseTransform>],
+            vec![broker as Arc<dyn marshal_core::RequestResponder>],
+        )),
+        Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
+        Arc::new(JsonSink::new(SharedWriter(Arc::new(AuditBuffer::default()))))
+            as Arc<dyn AuditSink>,
+    );
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut tx = Some(tx);
+        let _ = server
+            .run(move |a| {
+                let _ = tx.take().unwrap().send(a);
+            })
+            .await;
+    });
+    let proxy = rx.await.unwrap();
+
+    let mut sender = connect_through_proxy(proxy, upstream, &proxy_ca_pem).await;
+    let req = hyper::Request::builder()
+        .uri(format!("https://{upstream}/sse"))
+        .header("host", upstream.to_string())
+        .body(empty())
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let resp = sender.send_request(req).await.unwrap();
+    let mut body = resp.into_body();
+    let mut first_byte_at = None;
+    let mut events = 0;
+    while let Some(frame) =
+        futures::StreamExt::next(&mut http_body_util::BodyStream::new(&mut body)).await
+    {
+        if let Some(d) = frame.unwrap().data_ref()
+            && !d.is_empty()
+        {
+            first_byte_at.get_or_insert(started.elapsed());
+            events += 1;
+        }
+    }
+    let total = started.elapsed();
+    let first = first_byte_at.expect("the stream produced no data");
+    assert_eq!(events, 3, "all three events should arrive");
+    // The upstream sleeps 300ms between events, so a buffered response delivers everything
+    // at ~600ms. Streaming delivers the first well before that.
+    assert!(
+        first < total / 2,
+        "first byte at {first:?} of a {total:?} stream — this looks buffered, not streamed"
+    );
+}
