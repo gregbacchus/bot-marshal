@@ -243,6 +243,13 @@ pub struct Oauth2Config {
     pub extra_params: BTreeMap<String, String>,
     /// Subtracted from the provider's stated lifetime, so a token cannot expire in flight.
     pub expiry_skew: Duration,
+    /// How long any single call to the provider may take.
+    ///
+    /// Minting happens on the request path, so a token endpoint that accepts a connection and
+    /// then never answers would otherwise hang the proxied request indefinitely — and, worse,
+    /// hold the per-swap minting lock while every other request for that credential queues
+    /// behind it. The judge bounds its provider calls for the same reason.
+    pub timeout: Duration,
     /// Where the browser is sent to authorise. `authorization_code` only.
     pub authorization_endpoint: Option<String>,
     /// Where the provider sends the browser back with the code. Must be loopback:
@@ -317,13 +324,37 @@ impl Oauth2Source {
         self.store.cached_access(&self.name).map(|t| t.value)
     }
 
+    /// Resolve a credential this source will *present*, and teach the redactor before the
+    /// value can go anywhere.
+    ///
+    /// The token endpoint's *responses* are learned in [`Oauth2Source::post_token`]. This is
+    /// the other half, and it is easy to forget: a client secret, a signing key and a refresh
+    /// token are all values marshal holds and sends, so all three can end up in an error
+    /// string or a diagnostic. Resolving and learning in one function means a new call site
+    /// cannot do one without the other.
+    ///
+    /// The label is per-purpose rather than per-swap, so a stable client secret keeps its own
+    /// slot instead of competing with rotating tokens for the swap's bounded set (ADR-0029).
+    async fn present(&self, source: &Arc<dyn SecretSource>, purpose: &str) -> Result<SecretValue> {
+        let value = source.resolve().await?;
+        self.redactor.learn(format!("{}.{purpose}", self.name), value.expose());
+        Ok(value)
+    }
+
     /// The refresh token this grant will present, and where it came from.
     async fn refresh_token(&self) -> Result<Option<(SecretValue, bool)>> {
         match &self.cfg.grant {
             Grant::ClientCredentials | Grant::JwtBearer { .. } => Ok(None),
-            Grant::RefreshToken { source } => Ok(Some((source.resolve().await?, false))),
+            Grant::RefreshToken { source } => {
+                Ok(Some((self.present(source, "refresh_token").await?, false)))
+            }
             Grant::Enrolled => match self.store.grant(&self.name)? {
-                Some(g) => Ok(Some((g.refresh_token, true))),
+                Some(g) => {
+                    // Read from disk, so it has never been through `post_token`'s learning.
+                    self.redactor
+                        .learn(format!("{}.refresh_token", self.name), g.refresh_token.expose());
+                    Ok(Some((g.refresh_token, true)))
+                }
                 None => Err(Error::Config(format!(
                     "the `{}` credential has not been enrolled: run `marshal secrets oauth \
                      login {}` to authorise it once, then this swap works unattended",
@@ -347,7 +378,10 @@ impl Oauth2Source {
             }
             ClientAuth::ClientSecretPost { secret } => {
                 params.push(("client_id".into(), self.cfg.client_id.clone()));
-                params.push(("client_secret".into(), secret.resolve().await?.expose().to_owned()));
+                params.push((
+                    "client_secret".into(),
+                    self.present(secret, "client_secret").await?.expose().to_owned(),
+                ));
             }
             ClientAuth::PrivateKeyJwt { key } => {
                 // RFC 7521 §4.2: `client_id` is optional here, but enough providers require it
@@ -378,7 +412,7 @@ impl Oauth2Source {
                 // base64'd. Skipping that step works right up until a client secret contains
                 // a `:` or a non-ASCII byte, which is exactly the kind of bug that shows up
                 // only after a rotation.
-                let secret = secret.resolve().await?;
+                let secret = self.present(secret, "client_secret").await?;
                 let pair = format!(
                     "{}:{}",
                     percent_encode(self.cfg.client_id.as_bytes()),
@@ -443,7 +477,9 @@ impl Oauth2Source {
         with_jti: bool,
         scope: Option<String>,
     ) -> Result<String> {
-        let pem = key.source.resolve().await?;
+        // The signing key is the credential for these flows: whoever has the PEM can mint
+        // assertions indefinitely, so it belongs in the redactor as much as any token does.
+        let pem = self.present(&key.source, "private_key").await?;
         let jti = if with_jti { Some(random_urlsafe(16)?) } else { None };
         sign(
             &pem,
@@ -481,6 +517,26 @@ impl Oauth2Source {
         form_urlencode(params.iter().map(|(k, v)| (k.as_str(), v.as_str())))
     }
 
+    /// Bound any call to the provider.
+    ///
+    /// Every outbound call in this module goes through here, so a new one cannot accidentally
+    /// be unbounded. The error names the endpoint and the elapsed limit, because "it hung" is
+    /// not something an operator can act on.
+    async fn bounded<T>(
+        &self,
+        what: &str,
+        url: &str,
+        call: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        match tokio::time::timeout(self.cfg.timeout, call).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Config(format!(
+                "{what} the `{}` credential: {url} did not respond within {:?}",
+                self.name, self.cfg.timeout
+            ))),
+        }
+    }
+
     /// POST the token endpoint with `params` plus client authentication, and parse the reply.
     ///
     /// Every token this credential ever holds comes through here, which is what makes this the
@@ -495,21 +551,25 @@ impl Oauth2Source {
         let header_refs: Vec<(&str, &str)> =
             headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
-        let (status, body) = marshal_http::post_form(
-            &self.endpoint,
-            &self.tls,
-            self.guard.as_deref(),
-            &self.path,
-            &header_refs,
-            &form,
-        )
-        .await
-        .map_err(|e| {
-            Error::Config(format!(
-                "{what} the `{}` credential at {}: {e}",
-                self.name, self.cfg.token_endpoint
-            ))
-        })?;
+        let (status, body) = self
+            .bounded(what, &self.cfg.token_endpoint, async {
+                marshal_http::post_form(
+                    &self.endpoint,
+                    &self.tls,
+                    self.guard.as_deref(),
+                    &self.path,
+                    &header_refs,
+                    &form,
+                )
+                .await
+                .map_err(|e| {
+                    Error::Config(format!(
+                        "{what} the `{}` credential at {}: {e}",
+                        self.name, self.cfg.token_endpoint
+                    ))
+                })
+            })
+            .await?;
 
         if !status.is_success() {
             return Err(Error::Config(format!(
@@ -653,16 +713,20 @@ impl Oauth2Source {
         let header_refs: Vec<(&str, &str)> =
             headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
-        let (status, body) = marshal_http::post_form(
-            &endpoint,
-            &self.tls,
-            self.guard.as_deref(),
-            &path,
-            &header_refs,
-            &form,
-        )
-        .await
-        .map_err(|e| Error::Config(format!("requesting a device code from {url}: {e}")))?;
+        let (status, body) = self
+            .bounded("requesting a device code for", url, async {
+                marshal_http::post_form(
+                    &endpoint,
+                    &self.tls,
+                    self.guard.as_deref(),
+                    &path,
+                    &header_refs,
+                    &form,
+                )
+                .await
+                .map_err(|e| Error::Config(format!("requesting a device code from {url}: {e}")))
+            })
+            .await?;
 
         if !status.is_success() {
             return Err(Error::Config(format!(
@@ -686,16 +750,20 @@ impl Oauth2Source {
         let header_refs: Vec<(&str, &str)> =
             headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
-        let (status, body) = marshal_http::post_form(
-            &self.endpoint,
-            &self.tls,
-            self.guard.as_deref(),
-            &self.path,
-            &header_refs,
-            &form,
-        )
-        .await
-        .map_err(|e| Error::Config(format!("polling for the device token: {e}")))?;
+        let (status, body) = self
+            .bounded("polling for the device token for", &self.cfg.token_endpoint, async {
+                marshal_http::post_form(
+                    &self.endpoint,
+                    &self.tls,
+                    self.guard.as_deref(),
+                    &self.path,
+                    &header_refs,
+                    &form,
+                )
+                .await
+                .map_err(|e| Error::Config(format!("polling for the device token: {e}")))
+            })
+            .await?;
 
         if status.is_success() {
             let response = TokenResponse::parse(&body)?;
@@ -815,6 +883,16 @@ impl SecretSource for Oauth2Source {
         &self.name
     }
 
+    /// Only what is already held. Never mints.
+    ///
+    /// This is the override the trait's default exists for: resolving an OAuth2 source calls a
+    /// token endpoint, so seeding the redactor from it would mint a credential at boot, tie
+    /// process start to the provider's availability, and — against a provider that rotates
+    /// refresh tokens — consume a rotation on every start and reload.
+    async fn preload(&self) -> Result<Option<SecretValue>> {
+        Ok(self.cached())
+    }
+
     async fn resolve(&self) -> Result<SecretValue> {
         if let Some(token) = self.store.cached_access(&self.name) {
             return Ok(token.value);
@@ -862,6 +940,7 @@ mod tests {
                 audience: None,
                 extra_params: BTreeMap::new(),
                 expiry_skew: Duration::from_secs(60),
+                timeout: Duration::from_secs(10),
                 authorization_endpoint: Some("https://auth.example.com/oauth2/authorize".into()),
                 redirect_uri: Some("http://127.0.0.1:7777/callback".into()),
                 device_authorization_endpoint: Some("https://auth.example.com/device".into()),
@@ -886,6 +965,7 @@ mod tests {
                 audience: None,
                 extra_params: BTreeMap::new(),
                 expiry_skew: Duration::from_secs(60),
+                timeout: Duration::from_secs(10),
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
@@ -1044,6 +1124,7 @@ mod tests {
                 audience: None,
                 extra_params: BTreeMap::new(),
                 expiry_skew: Duration::from_secs(60),
+                timeout: Duration::from_secs(10),
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
@@ -1152,6 +1233,7 @@ mod tests {
                 audience: Some("https://api.example.com".into()),
                 extra_params: cfg_extra,
                 expiry_skew: Duration::from_secs(60),
+                timeout: Duration::from_secs(10),
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
@@ -1384,6 +1466,7 @@ mod tests {
                 audience: None,
                 extra_params: BTreeMap::new(),
                 expiry_skew: Duration::from_secs(60),
+                timeout: Duration::from_secs(10),
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,

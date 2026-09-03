@@ -74,6 +74,10 @@ impl std::fmt::Debug for SecretSwap {
 }
 
 /// Applies every configured swap to an allowed request.
+///
+/// `exceptions` is in the `Debug` output deliberately: it holds hosts and paths and never a
+/// value, and "which endpoints are deliberately left unauthenticated" is the first thing to
+/// check when a request unexpectedly arrives without a credential.
 #[derive(Debug)]
 pub struct SecretInjector {
     swaps: Vec<SecretSwap>,
@@ -115,15 +119,21 @@ impl SecretInjector {
         self.swaps.is_empty()
     }
 
-    /// Resolve every source once, for seeding the redactor at startup. A `SigV4` swap
+    /// Every value that can be seeded into the redactor at startup, without obtaining any.
+    ///
+    /// [`SecretSource::preload`], not `resolve`: a source that *fetches* a credential returns
+    /// only what it already holds, so starting the proxy never mints anything. A `SigV4` swap
     /// contributes two or three values under distinct labels, since none of them alone is
     /// "the secret" the way a single-source swap's is.
     pub async fn resolve_all(&self) -> Vec<(String, SecretValue)> {
         let mut out = Vec::new();
         for swap in &self.swaps {
             for (label, source) in labeled_sources(swap) {
-                match source.resolve().await {
-                    Ok(v) => out.push((label, v)),
+                match source.preload().await {
+                    Ok(Some(v)) => out.push((label, v)),
+                    // Nothing held yet, and nothing wrong. An OAuth2 source before its first
+                    // mint; it teaches the redactor itself when it obtains one (ADR-0029).
+                    Ok(None) => {}
                     Err(e) => {
                         tracing::warn!(secret = %label, error = %e, "could not resolve a secret");
                     }

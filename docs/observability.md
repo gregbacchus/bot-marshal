@@ -71,6 +71,42 @@ Each record carries the resolved identity, whether it was attributed, which reso
 the profile, the deciding layer, the full evidence trail, status and timing. Injected secrets
 are scrubbed from every audit path and log line.
 
+### A request marshal answered itself
+
+`action: allow` no longer implies the request reached the upstream. A
+[`RequestResponder`](adr/0031-a-responder-may-answer-a-request.md) may answer it instead, and
+the record says so in `reason`:
+
+```json
+{ "action": "allow", "method": "POST", "path": "/oauth2/token", "status_code": 200,
+  "reason": { "layer": "oauth2.token", "code": "oauth2_terminated",
+              "message": "marshal completed this OAuth2 exchange itself ..." } }
+```
+
+`reason.code` is the field to key on. Today `oauth2_terminated` is the only one, emitted when
+[in-band capture](configuration/transforms.md#in-band-capture) answers a token request rather
+than forwarding it. Every such response also carries `proxy-agent: bot-marshal` on the wire.
+
+### OAuth2 log lines
+
+Credential acquisition logs at `info` on the base log, independently of `--log-detail` (these
+are not per-request lines):
+
+| message | fields | when |
+|---|---|---|
+| `minted an oauth2 access token` | `secret`, `grant`, `expires_in_secs` | a token was obtained; once per expiry, not once per request |
+| `substituted marshal's PKCE challenge into an authorization request` | `secret` | in-band capture rewrote an authorization request |
+| `captured an authorization code in band and exchanged it` | `secret`, `scope` | capture succeeded |
+| `captured an authorization code but could not exchange it` | `secret`, `error` | **at `error`** — the agent's flow appears to have succeeded, but requests needing the credential will be refused |
+| `answered a token request locally` | `secret` | the agent's exchange was terminated at the proxy |
+| `the provider rotated this refresh token, but it comes from a source marshal does not own` | `secret`, `source` | **at `warn`** — the configured value is now dead; see `grant: refresh_token` |
+
+No value appears in any of them. `secret` is the swap name.
+
+A repeated `minted an oauth2 access token` at high frequency means the cache is not holding —
+usually a provider that omits `expires_in`, which is never cached because treating a token with
+no stated lifetime as immortal would mean a revoked credential is never re-fetched.
+
 ## Metrics
 
 `GET /v1/metrics` on the [management listener](operations.md) exposes Prometheus counters:

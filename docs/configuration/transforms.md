@@ -180,6 +180,7 @@ marshal needs it before the credential exists — there is nothing to derive it 
 | `audience` | sent as `audience=` when set |
 | `extra_params` | name/value pairs sent verbatim on every token request — the escape hatch for a provider this does not otherwise model (`resource`, a tenant id, a vendor flag) |
 | `expiry_skew` | subtracted from the stated lifetime so a token cannot expire in flight. Defaults to `60s` |
+| `timeout` | how long any single call to the provider may take. Defaults to `10s` |
 
 #### Grants
 
@@ -361,9 +362,16 @@ ever authorising again.
 #### What this costs
 
 **A request can block on a third party.** Minting happens on the request path, so a slow token
-endpoint makes the first request after an expiry slow. Failure is closed: a request whose
-credential cannot be minted is refused, with the provider's own `error` and
+endpoint makes the first request after an expiry slow — bounded by `timeout`, because an
+endpoint that accepts a connection and then goes silent would otherwise hang the request
+indefinitely while every other request for that credential queued behind it. Failure is closed:
+a request whose credential cannot be minted is refused, with the provider's own `error` and
 `error_description` in the 403 body, never forwarded unauthenticated.
+
+**A revoked token is not noticed until it expires.** Nothing invalidates a cached token when an
+upstream rejects it, so a credential revoked at the provider ahead of its stated expiry goes on
+being presented until the cached copy ages out. `marshal secrets oauth refresh <name>` forces a
+new one.
 
 **Concurrent requests on an expired token mint once**, not once each — some providers
 invalidate the previous refresh token on every use, which turns a concurrent double refresh
@@ -386,9 +394,14 @@ trail as `secrets.not_injected.<host><path>` rather than being silent.
 private CA works without further configuration: the roots the proxy trusts for upstream traffic
 are the roots marshal trusts when it calls a token endpoint for itself.
 
-**A minted token is redacted from the moment it is minted, not from startup** — see
-[ADR-0029](../adr/0029-the-redaction-set-is-learned-at-runtime.md). Nothing is minted at boot,
-so starting the proxy never depends on an auth server being reachable.
+**Every credential in play is redacted** — the tokens a provider returns, and the client
+secret, signing key and refresh token marshal presents. A minted token is redacted from the
+moment it is minted rather than from startup; see
+[ADR-0029](../adr/0029-the-redaction-set-is-learned-at-runtime.md).
+
+**Nothing is minted at boot**, so starting the proxy never depends on an auth server being
+reachable, never creates a credential nobody asked for, and — against a provider that rotates
+refresh tokens — never consumes a rotation just by starting or reloading.
 
 Secrets are redacted in every audit path and log line.
 

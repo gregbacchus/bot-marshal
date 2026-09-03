@@ -196,6 +196,7 @@ fn oauth_source(auth: &FakeAuthServer, redactor: &Redactor, grant: Grant) -> Arc
                 audience: None,
                 extra_params: Default::default(),
                 expiry_skew: Duration::ZERO,
+                timeout: Duration::from_secs(10),
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
@@ -383,6 +384,44 @@ async fn a_token_endpoint_failure_denies_the_request_and_names_the_cause() {
 }
 
 #[tokio::test]
+async fn every_credential_in_play_is_actually_in_the_redactor() {
+    // Asserting a value is *absent* from the audit trail passes whether or not anything would
+    // redact it — the value simply may never have been written. This asserts the mechanism:
+    // after one mint, the redactor must transform each credential. It covers what marshal
+    // receives (the token) and what marshal presents (the client secret), which are learned by
+    // different code paths and were not both covered before.
+    let auth = fake_auth_server(vec![(200, token_body(MINTED_TOKEN, 3600))]).await;
+    let redactor = Redactor::default();
+    let h =
+        harness(oauth_source(&auth, &redactor, Grant::ClientCredentials), redactor.clone()).await;
+    reflect(&h).await;
+
+    for (what, value) in [("minted access token", MINTED_TOKEN), ("client secret", CLIENT_SECRET)] {
+        let redacted = redactor.redact(value);
+        assert!(
+            !redacted.contains(value),
+            "the {what} is not in the redactor, so nothing would scrub it from output"
+        );
+    }
+    let _ = h;
+}
+
+#[tokio::test]
+async fn a_presented_refresh_token_is_redacted_too() {
+    // Learned on the way *out*, not from any response: a configured refresh token may never
+    // appear in a token response at all, so the response-side learning does not cover it.
+    const CONFIGURED_RT: &str = "rt_configuredrefreshtoken0000000000000";
+    let auth = fake_auth_server(vec![(200, token_body(MINTED_TOKEN, 3600))]).await;
+    let redactor = Redactor::default();
+    let grant = Grant::RefreshToken { source: Arc::new(Fixed(CONFIGURED_RT)) };
+    let h = harness(oauth_source(&auth, &redactor, grant), redactor.clone()).await;
+    reflect(&h).await;
+
+    assert!(!redactor.redact(CONFIGURED_RT).contains(CONFIGURED_RT));
+    let _ = h;
+}
+
+#[tokio::test]
 async fn neither_the_client_secret_nor_the_minted_token_reaches_the_audit_trail() {
     // The value being searched for here did not exist when the process started — this is
     // exactly the case a redactor sealed at startup could not have covered (ADR-0029).
@@ -398,6 +437,77 @@ async fn neither_the_client_secret_nor_the_minted_token_reaches_the_audit_trail(
     assert!(audit.contains("\"host\""), "the audit records should still be structured");
     assert!(!audit.contains(MINTED_TOKEN), "the minted access token appears in the audit trail");
     assert!(!audit.contains(CLIENT_SECRET), "the client secret appears in the audit trail");
+}
+
+#[tokio::test]
+async fn starting_up_does_not_mint_anything() {
+    // ADR-0030 promises the proxy never calls a token endpoint at boot: it must not create a
+    // credential nobody asked for, must not tie process start to a third party, and — against
+    // a provider that rotates refresh tokens — must not consume a rotation just by starting.
+    // `resolve_all` is what the CLI runs to seed the redactor before serving.
+    let auth = fake_auth_server(vec![(200, token_body(MINTED_TOKEN, 3600))]).await;
+    let redactor = Redactor::default();
+    let source = oauth_source(&auth, &redactor, Grant::ClientCredentials);
+
+    let injector = SecretInjector::new(vec![SecretSwap {
+        name: "SERVICE".into(),
+        injection: Injection::Bearer { source: source.clone() },
+        hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
+    }]);
+    let seeded = injector.resolve_all().await;
+
+    assert_eq!(auth.calls(), 0, "startup called the token endpoint {} time(s)", auth.calls());
+    assert!(seeded.is_empty(), "nothing is held before the first mint, so nothing is seeded");
+
+    // And it is genuinely lazy rather than broken: the first real request still mints.
+    source.resolve().await.unwrap();
+    assert_eq!(auth.calls(), 1);
+}
+
+#[tokio::test]
+async fn a_token_endpoint_that_never_answers_is_bounded_rather_than_hanging() {
+    // Minting is on the request path. An endpoint that accepts the connection and then goes
+    // silent would otherwise hang the request forever, holding the per-swap minting lock while
+    // every other request for that credential queues behind it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // Accept and never reply.
+        let _held = listener.accept().await;
+        std::future::pending::<()>().await;
+    });
+
+    let redactor = Redactor::default();
+    let source = Arc::new(
+        marshal_secrets::Oauth2Source::new(
+            "SERVICE",
+            Oauth2Config {
+                token_endpoint: format!("http://{addr}/token"),
+                client_id: "marshal".into(),
+                client_auth: ClientAuth::None,
+                grant: Grant::ClientCredentials,
+                scope: vec![],
+                audience: None,
+                extra_params: Default::default(),
+                expiry_skew: Duration::ZERO,
+                timeout: Duration::from_millis(300),
+                authorization_endpoint: None,
+                redirect_uri: None,
+                device_authorization_endpoint: None,
+            },
+            Arc::new(TokenStore::new(None)),
+            marshal_http::default_tls_config(),
+            None,
+            redactor,
+        )
+        .unwrap(),
+    );
+
+    let started = std::time::Instant::now();
+    let err = source.resolve().await.unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+    let msg = format!("{err}");
+    assert!(msg.contains("did not respond within"), "{msg}");
 }
 
 #[tokio::test]
@@ -648,6 +758,7 @@ async fn capture_harness(
                 audience: None,
                 extra_params: Default::default(),
                 expiry_skew: Duration::ZERO,
+                timeout: Duration::from_secs(10),
                 authorization_endpoint: Some(format!("https://{}/oauth2/authorize", provider.addr)),
                 redirect_uri: None,
                 device_authorization_endpoint: None,

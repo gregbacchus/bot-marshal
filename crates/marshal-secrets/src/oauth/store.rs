@@ -109,8 +109,12 @@ impl TokenStore {
         self.access.lock().expect("token cache lock").insert(swap.to_owned(), token);
     }
 
-    /// Drop the cached access token, forcing the next resolve to mint. Used by
-    /// `marshal secrets oauth refresh` and after a provider rejects a token as invalid.
+    /// Drop the cached access token, forcing the next resolve to mint.
+    ///
+    /// `marshal secrets oauth refresh` is the only caller. Nothing invalidates a token when an
+    /// upstream rejects it: a credential revoked at the provider before its stated expiry goes
+    /// on being presented until the cached copy ages out. Wiring that up needs the response
+    /// path to know which swap supplied the token, which it does not today.
     pub fn forget_access(&self, swap: &str) {
         self.access.lock().expect("token cache lock").remove(swap);
     }

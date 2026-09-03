@@ -2050,6 +2050,7 @@ fn build_oauth2_source(
             audience: spec.audience.clone(),
             extra_params: spec.extra_params.clone(),
             expiry_skew: spec.expiry_skew.unwrap_or(std::time::Duration::from_secs(60)),
+            timeout: spec.timeout.unwrap_or(std::time::Duration::from_secs(10)),
             authorization_endpoint: spec.authorization_endpoint.clone(),
             redirect_uri: spec.redirect_uri.clone(),
             device_authorization_endpoint: spec.device_authorization_endpoint.clone(),
@@ -2209,6 +2210,10 @@ struct Oauth2Spec {
     /// Defaults to 60s.
     #[serde(default, with = "humantime_serde")]
     expiry_skew: Option<std::time::Duration>,
+    /// How long any single call to the provider may take. Defaults to 10s. Minting happens on
+    /// the request path, so an unbounded call would hang a proxied request indefinitely.
+    #[serde(default, with = "humantime_serde")]
+    timeout: Option<std::time::Duration>,
     /// Where `marshal secrets oauth login` sends the browser. `authorization_code` only.
     #[serde(default)]
     authorization_endpoint: Option<String>,
@@ -2778,6 +2783,76 @@ request_transforms:
         let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
             .unwrap_err();
         assert!(err.to_string().contains("HS256"), "{err}");
+    }
+
+    #[test]
+    fn capture_in_band_yaml_actually_produces_a_broker() {
+        // The integration tests build brokers by hand, so nothing else checks that the config
+        // key reaches the runtime. Without this, `capture: in_band` could silently become a
+        // no-op and every capture test would still pass.
+        let yaml = |capture: &str| {
+            format!(
+                r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        grant: authorization_code
+        token_endpoint: https://auth.example.com/oauth2/token
+        authorization_endpoint: https://auth.example.com/oauth2/authorize
+        client_id: marshal
+        client_auth: none
+{capture}      inject: {{ type: bearer }}
+      rules: [{{ host: "api.example.com" }}]
+"#
+            )
+        };
+        let deps = SecretDeps {
+            store: Arc::new(marshal_secrets::TokenStore::new(Some(std::env::temp_dir()))),
+            tls: marshal_http::default_tls_config(),
+            guard: None,
+            redactor: marshal_core::Redactor::default(),
+        };
+        let cfg = marshal_config::model::Config::default();
+
+        let (_, brokers) =
+            build_secrets(&profile(&yaml("        capture: in_band\n")), &cfg, &deps).unwrap();
+        assert_eq!(brokers.len(), 1, "`capture: in_band` should register one broker");
+
+        // And the default really is off, rather than everything quietly getting a broker.
+        // Without capture the grant needs a redirect_uri, since enrolment binds it.
+        let off = yaml("        redirect_uri: http://127.0.0.1:7777/cb\n");
+        let (_, none) = build_secrets(&profile(&off), &cfg, &deps).unwrap();
+        assert!(none.is_empty(), "capture defaults to off");
+    }
+
+    #[test]
+    fn an_oauth2_swap_never_injects_into_its_own_endpoints() {
+        // The circularity guard, checked at the level the config actually configures.
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        token_endpoint: https://api.example.com/oauth2/token
+        client_id: marshal
+        client_auth: none
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        let (injector, _) =
+            build_secrets(&p, &marshal_config::model::Config::default(), &test_deps()).unwrap();
+        // The swap's own token endpoint shares the API's host, which is the case that bites.
+        assert!(
+            format!("{injector:?}").contains("api.example.com"),
+            "the token endpoint should be excluded from injection: {injector:?}"
+        );
     }
 
     #[test]

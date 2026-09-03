@@ -45,6 +45,13 @@ upstream:
   allow_private: false
   max_response_bytes: 0
 
+# The one directory marshal writes rather than reads: OAuth2 refresh tokens obtained by
+# `marshal secrets oauth login`. Created 0700, each file 0600, and marshal refuses a directory
+# other local users can read. Leave it unset and nothing is persisted — which is fine until a
+# swap uses `grant: authorization_code` or `device_code`, both of which need somewhere to keep
+# the credential across a restart. See docs/production.md.
+# state_dir: "/var/lib/bot-marshal"
+
 # The fallback for unattributed traffic — embedded, not named, so it is never sourced from
 # profiles/ where it would be easy to miss. Only the denylist and allowlist layers are
 # implemented (M1), so this uses just those.

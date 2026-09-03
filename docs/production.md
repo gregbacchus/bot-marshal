@@ -11,9 +11,32 @@ apart: **the proxy process holds the CA private key and the real credentials
 sudo useradd --system --no-create-home --home-dir /var/lib/bot-marshal bot-marshal
 sudo mkdir -p /etc/bot-marshal /var/lib/bot-marshal
 sudo chown bot-marshal:bot-marshal /var/lib/bot-marshal
-# tls.ca_cert / tls.ca_key in marshal.yaml should point under /var/lib/bot-marshal
+sudo chmod 0700 /var/lib/bot-marshal
+# tls.ca_cert / tls.ca_key and state_dir in marshal.yaml should point under /var/lib/bot-marshal
 sudo -u bot-marshal marshal --config /etc/bot-marshal/marshal.yaml ca init
 ```
+
+### `state_dir`
+
+`/var/lib/bot-marshal` is also where `state_dir` belongs — the one directory marshal *writes*
+rather than reads. Today it holds OAuth2 refresh tokens obtained by
+[`marshal secrets oauth login`](cli.md#marshal-secrets-oauth-login-name---open---timeout-duration).
+
+Marshal creates `<state_dir>/oauth/` mode `0700` and each grant file `0600`, and **refuses to
+use a directory any other local user can read** rather than quietly tightening it — a refresh
+token that has already been readable by someone else wants re-enrolling, not locking down after
+the fact. So the directory must be owned by the proxy's user and not group- or world-readable.
+
+Two operational consequences:
+
+* **Back it up, or be able to re-enrol.** For `grant: authorization_code` and `grant:
+  device_code` the refresh token is the only copy; losing it means a human at a browser again.
+  It is a live credential, so a backup of it needs the same protection as the CA key.
+* **`state_dir` changes take effect on restart, not on reload.** Moving live credentials to a
+  new directory underneath a running process would be worse than making the operator say when.
+
+`marshal secrets oauth status` reports which credentials are enrolled and how long ago, which is
+the check to run after a restore.
 
 ## systemd unit
 

@@ -39,7 +39,28 @@ impl std::fmt::Debug for SecretValue {
 #[async_trait::async_trait]
 pub trait SecretSource: Send + Sync + std::fmt::Debug {
     fn name(&self) -> &str;
+
+    /// Produce the secret, doing whatever that takes.
     async fn resolve(&self) -> Result<SecretValue>;
+
+    /// The value this source can supply **without going and getting one**, for seeding the
+    /// redactor at startup.
+    ///
+    /// The distinction only matters for a source where resolving has a cost or a side effect.
+    /// Reading an environment variable or a file is free and idempotent, so the default is
+    /// simply to resolve — and a failure here is worth reporting, because a missing variable
+    /// at startup is a configuration error the operator wants to hear about immediately.
+    ///
+    /// A source that *obtains* a credential rather than reading one — OAuth2 — must override
+    /// this to return only what it already holds. Resolving such a source at startup would
+    /// mint a credential nobody asked for, tie process start to a third party's availability,
+    /// and, against a provider that rotates refresh tokens, consume a rotation just by
+    /// booting.
+    ///
+    /// `Ok(None)` means "nothing yet, and that is not an error".
+    async fn preload(&self) -> Result<Option<SecretValue>> {
+        self.resolve().await.map(Some)
+    }
 }
 
 #[cfg(test)]
