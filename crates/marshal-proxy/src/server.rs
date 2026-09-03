@@ -58,6 +58,10 @@ struct Attribution {
     /// Request transforms for this profile, most importantly secret injection — a swap
     /// declared under one profile must never fire for an identity resolved into another.
     request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
+    /// Responders for this profile — see [`marshal_core::RequestResponder`]. Only consulted
+    /// on intercepted traffic: answering a request requires having parsed it, which the plain
+    /// relay path deliberately does not do.
+    responders: Vec<Arc<dyn marshal_core::RequestResponder>>,
 }
 
 impl std::fmt::Debug for Attribution {
@@ -120,6 +124,7 @@ impl Server {
                 chain: Arc::clone(&runtime.default_chain),
                 response_transforms: runtime.default_response_transforms.clone(),
                 request_transforms: runtime.default_request_transforms.clone(),
+                responders: runtime.default_responders.clone(),
             });
         }
 
@@ -129,11 +134,14 @@ impl Server {
                     runtime.response_transforms.get(&resolved.profile).cloned().unwrap_or_default();
                 let request_transforms =
                     runtime.request_transforms.get(&resolved.profile).cloned().unwrap_or_default();
+                let responders =
+                    runtime.responders.get(&resolved.profile).cloned().unwrap_or_default();
                 Some(Attribution {
                     resolved,
                     chain: Arc::clone(chain),
                     response_transforms,
                     request_transforms,
+                    responders,
                 })
             }
             None => {
@@ -422,6 +430,7 @@ impl Server {
                 profile: Arc::clone(&attribution.resolved.profile),
                 client_addr: peer,
                 request_transforms: attribution.request_transforms.clone(),
+                responders: attribution.responders.clone(),
                 stats: Arc::clone(&self.stats),
                 response_transforms: attribution.response_transforms.clone(),
                 attributed: attribution.resolved.attributed,
@@ -714,6 +723,7 @@ impl Server {
                     profile: Arc::clone(&attribution.resolved.profile),
                     client_addr: peer,
                     request_transforms: attribution.request_transforms.clone(),
+                    responders: attribution.responders.clone(),
                     stats: Arc::clone(&self.stats),
                     response_transforms: attribution.response_transforms.clone(),
                     attributed: attribution.resolved.attributed,

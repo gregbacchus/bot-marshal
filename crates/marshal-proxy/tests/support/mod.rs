@@ -381,6 +381,26 @@ pub fn runtime_with(
     request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
     response_transforms: Vec<Arc<dyn marshal_core::ResponseTransform>>,
 ) -> marshal_proxy::runtime::Runtime {
+    runtime_with_responders(
+        chain,
+        tls,
+        passthrough,
+        request_transforms,
+        response_transforms,
+        vec![],
+    )
+}
+
+/// As [`runtime_with`], plus responders — anything that may answer a request instead of
+/// letting it reach the upstream.
+pub fn runtime_with_responders(
+    chain: marshal_policy::Chain,
+    tls: Arc<marshal_proxy::mitm::TlsEngine>,
+    passthrough: marshal_policy::HostMatcher,
+    request_transforms: Vec<Arc<dyn marshal_core::RequestTransform>>,
+    response_transforms: Vec<Arc<dyn marshal_core::ResponseTransform>>,
+    responders: Vec<Arc<dyn marshal_core::RequestResponder>>,
+) -> marshal_proxy::runtime::Runtime {
     let mut chains = std::collections::HashMap::new();
     chains.insert(Arc::from("p"), Arc::new(chain));
 
@@ -394,9 +414,15 @@ pub fn runtime_with(
         request_map.insert(Arc::from("p"), request_transforms);
     }
 
+    let mut responder_map = std::collections::HashMap::new();
+    if !responders.is_empty() {
+        responder_map.insert(Arc::from("p"), responders);
+    }
+
     marshal_proxy::runtime::Runtime {
         chains,
         response_transforms: response_map,
+        responders: responder_map,
         request_transforms: request_map,
         default_chain: Arc::new(marshal_policy::Chain::new(
             "default",
@@ -405,6 +431,7 @@ pub fn runtime_with(
             Arc::new(marshal_core::DenyingDecider),
         )),
         default_response_transforms: Vec::new(),
+        default_responders: Vec::new(),
         default_request_transforms: Vec::new(),
         identities: no_resolvers(),
         passthrough,

@@ -542,43 +542,66 @@ fn build_runtime(
     // produced it.
     let mut request_transforms: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::RequestTransform>>> =
         HashMap::new();
+    let mut responders: HashMap<Arc<str>, Vec<Arc<dyn marshal_core::RequestResponder>>> =
+        HashMap::new();
     let mut injectors: Vec<Arc<SecretInjector>> = Vec::new();
 
     let deps = secret_deps(config_path, &cfg, redactor)?;
 
-    let build_one = |label: &str,
-                     profile: &marshal_config::model::Profile|
-     -> anyhow::Result<(
+    type Built = (
         Arc<marshal_policy::Chain>,
         Vec<Arc<dyn marshal_core::ResponseTransform>>,
         Vec<Arc<dyn marshal_core::RequestTransform>>,
+        Vec<Arc<dyn marshal_core::RequestResponder>>,
         Option<Arc<SecretInjector>>,
-    )> {
-        let chain = Arc::new(build_chain(&cfg, label, profile, Arc::new(DenyingDecider))?);
-        let response = marshal_policy::build_response_transforms(&cfg, label, profile)?;
-        let mut request = marshal_policy::build_request_transforms(&cfg, label, profile)?;
-        let resolved = marshal_policy::resolve_profile(&cfg, profile)?;
-        let injector = Arc::new(build_injector(&resolved, &cfg, &deps)?);
-        let injector = if injector.is_empty() {
-            None
-        } else {
-            request.push(Arc::clone(&injector) as Arc<dyn marshal_core::RequestTransform>);
-            Some(injector)
-        };
-        Ok((chain, response, request, injector))
-    };
+    );
+    let build_one =
+        |label: &str, profile: &marshal_config::model::Profile| -> anyhow::Result<Built> {
+            let chain = Arc::new(build_chain(&cfg, label, profile, Arc::new(DenyingDecider))?);
+            let mut response = marshal_policy::build_response_transforms(&cfg, label, profile)?;
+            let mut request = marshal_policy::build_request_transforms(&cfg, label, profile)?;
+            let resolved = marshal_policy::resolve_profile(&cfg, profile)?;
+            let (injector, brokers) = build_secrets(&resolved, &cfg, &deps)?;
 
-    let (default_chain, default_response_transforms, default_request_transforms, default_injector) =
-        build_one("profile", &cfg.profile)?;
+            // Before the injector: the broker rewrites an authorization request, and injecting a
+            // credential into that request first would be setting a header on the one request in
+            // the flow that is specifically not authenticated yet.
+            let mut responders: Vec<Arc<dyn marshal_core::RequestResponder>> = Vec::new();
+            for broker in brokers {
+                request.push(Arc::clone(&broker) as Arc<dyn marshal_core::RequestTransform>);
+                response.push(Arc::clone(&broker) as Arc<dyn marshal_core::ResponseTransform>);
+                responders.push(broker as Arc<dyn marshal_core::RequestResponder>);
+            }
+
+            let injector = Arc::new(injector);
+            let injector = if injector.is_empty() {
+                None
+            } else {
+                request.push(Arc::clone(&injector) as Arc<dyn marshal_core::RequestTransform>);
+                Some(injector)
+            };
+            Ok((chain, response, request, responders, injector))
+        };
+
+    let (
+        default_chain,
+        default_response_transforms,
+        default_request_transforms,
+        default_responders,
+        default_injector,
+    ) = build_one("profile", &cfg.profile)?;
     if let Some(injector) = default_injector {
         injectors.push(injector);
     }
 
     for (name, profile) in &cfg.profiles {
-        let (chain, response, request, injector) = build_one(name, profile)?;
+        let (chain, response, request, profile_responders, injector) = build_one(name, profile)?;
         chains.insert(Arc::from(name.as_str()), chain);
         if !response.is_empty() {
             response_transforms.insert(Arc::from(name.as_str()), response);
+        }
+        if !profile_responders.is_empty() {
+            responders.insert(Arc::from(name.as_str()), profile_responders);
         }
         // Keyed on the transforms, not on the injector: a profile with `set_headers` and no
         // secrets still has request transforms, and gating the insert on the injector dropped
@@ -627,13 +650,7 @@ fn build_runtime(
         cfg.tls.cert_cache_size,
         cfg.tls.leaf_expiry_hours,
     ));
-    let mut extra_roots = Vec::new();
-    for path in &cfg.tls.upstream_ca_certs {
-        let path = expand_tilde(path);
-        extra_roots.push(std::fs::read_to_string(&path).map_err(|e| {
-            anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
-        })?);
-    }
+    let extra_roots = read_extra_roots(&cfg)?;
     let tls = Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(minter, &extra_roots)?);
 
     let passthrough = marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?;
@@ -642,9 +659,11 @@ fn build_runtime(
         marshal_proxy::runtime::Runtime {
             chains,
             response_transforms,
+            responders,
             request_transforms,
             default_chain,
             default_response_transforms,
+            default_responders,
             default_request_transforms,
             identities,
             passthrough,
@@ -1689,7 +1708,24 @@ fn build_injector(
     cfg: &marshal_config::model::Config,
     deps: &SecretDeps,
 ) -> anyhow::Result<SecretInjector> {
+    Ok(build_secrets(profile, cfg, deps)?.0)
+}
+
+/// Everything a profile's `secrets` produce: the swaps, and any in-band OAuth2 brokers.
+///
+/// A broker is not a swap — it is three hooks on the request path rather than a credential to
+/// set — so it comes back separately rather than being folded into the injector.
+fn build_secrets(
+    profile: &marshal_config::model::Profile,
+    cfg: &marshal_config::model::Config,
+    deps: &SecretDeps,
+) -> anyhow::Result<(SecretInjector, Vec<Arc<marshal_secrets::Oauth2Broker>>)> {
     use marshal_core::SecretSource;
+
+    let mut brokers: Vec<Arc<marshal_secrets::Oauth2Broker>> = Vec::new();
+    // An OAuth2 credential's own endpoints, which must never have that credential injected
+    // into them — see `SecretInjector::excluding` for why.
+    let mut exceptions: Vec<(String, String)> = Vec::new();
 
     let mut swaps = Vec::new();
     for (i, raw) in profile.request_transforms.secrets.iter().enumerate() {
@@ -1703,6 +1739,23 @@ fn build_injector(
         // below, which derives it from the source. A swap using one therefore has to say what
         // it is called; there is nothing sensible to derive it from.
         let swap_label = spec.name.clone().unwrap_or_else(|| format!("secrets[{i}]"));
+
+        if let Some(SecretSourceSpec::Oauth2(oauth)) = &spec.source {
+            for url in [Some(&oauth.token_endpoint), oauth.authorization_endpoint.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(pair) = host_and_path(url) {
+                    exceptions.push(pair);
+                }
+            }
+            if oauth.capture == CaptureSpec::InBand {
+                brokers.push(Arc::new(
+                    build_broker(oauth, deps, &swap_label)
+                        .map_err(|e| anyhow::anyhow!("request_transforms.secrets[{i}]: {e}"))?,
+                ));
+            }
+        }
 
         // `source` is required for every kind except `sigv4`, which carries its own two (or
         // three) secrets instead — one `source:` value cannot express an access key pair.
@@ -1776,7 +1829,13 @@ fn build_injector(
 
         swaps.push(SecretSwap { name, injection, hosts });
     }
-    Ok(SecretInjector::new(swaps))
+    Ok((SecretInjector::new(swaps).excluding(exceptions), brokers))
+}
+
+/// `(host, path)` from a full URL, for the injection exclusion list.
+fn host_and_path(url: &str) -> Option<(String, String)> {
+    let (endpoint, path) = marshal_http::Endpoint::parse_with_path(url).ok()?;
+    Some((endpoint.host, path))
 }
 
 /// Everything a secret source might need that is not in its own config: the shared token
@@ -1795,6 +1854,23 @@ impl std::fmt::Debug for SecretDeps {
     }
 }
 
+/// The PEMs named by `tls.upstream_ca_certs`.
+///
+/// Read once and used twice: by the MITM engine for proxied traffic, and by the client marshal
+/// uses for its own outbound calls. An operator who trusts a CA means both.
+fn read_extra_roots(cfg: &marshal_config::model::Config) -> anyhow::Result<Vec<String>> {
+    cfg.tls
+        .upstream_ca_certs
+        .iter()
+        .map(|path| {
+            let path = expand_tilde(path);
+            std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!("reading tls.upstream_ca_certs entry {}: {e}", path.display())
+            })
+        })
+        .collect()
+}
+
 fn secret_deps(
     config_path: &std::path::Path,
     cfg: &marshal_config::model::Config,
@@ -1810,7 +1886,10 @@ fn secret_deps(
         // `global` so a reload does not discard live tokens: reloading is a configuration
         // operation, and re-minting every credential in the process is not one.
         store: marshal_secrets::TokenStore::global(state_dir),
-        tls: marshal_http::default_tls_config(),
+        // The same roots the proxy trusts for upstream traffic. An internal auth server behind
+        // a private CA is an ordinary deployment, and "trusted for proxied requests but not for
+        // marshal's own" would be a distinction with nothing behind it.
+        tls: marshal_http::with_extra_roots(&read_extra_roots(cfg)?)?,
         // The same denylist proxied traffic obeys. A token endpoint URL comes from config and
         // names a third party; one pointing at link-local is an SSRF, not a configuration.
         guard: Some(Arc::new(marshal_http::UpstreamGuard::new(
@@ -1881,9 +1960,14 @@ fn build_oauth2_source(
                 spec.authorization_endpoint.is_some(),
                 "source.authorization_endpoint is required for `grant: authorization_code`"
             );
+            // Not required under `capture: in_band`: there the redirect URI is the agent's,
+            // taken from the request marshal is intercepting, and marshal binds nothing. It
+            // is still required for `marshal secrets oauth login`, which does bind it — and
+            // that command says so itself if it is missing.
             anyhow::ensure!(
-                spec.redirect_uri.is_some(),
-                "source.redirect_uri is required for `grant: authorization_code`"
+                spec.redirect_uri.is_some() || spec.capture == CaptureSpec::InBand,
+                "source.redirect_uri is required for `grant: authorization_code`, so that \
+                 `marshal secrets oauth login` has a loopback address to receive the code on"
             );
             enrolled_grant(spec, deps)?
         }
@@ -1936,6 +2020,45 @@ fn build_oauth2_source(
         deps.redactor.clone(),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Build the in-band broker for a swap whose `capture` is `in_band`.
+fn build_broker(
+    spec: &Oauth2Spec,
+    deps: &SecretDeps,
+    swap_label: &str,
+) -> anyhow::Result<marshal_secrets::Oauth2Broker> {
+    anyhow::ensure!(
+        matches!(spec.grant, GrantSpec::AuthorizationCode),
+        "`capture: in_band` only applies to `grant: authorization_code` — it takes over an \
+         authorization flow the agent starts, and the other grants have no such flow. \
+         (`grant: {}` here.)",
+        spec.grant.label()
+    );
+    let authorize = spec.authorization_endpoint.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("`capture: in_band` needs `source.authorization_endpoint`")
+    })?;
+
+    // Capture depends on marshal seeing the *response* — it lifts the code out of a redirect,
+    // and answers the token request instead of forwarding it. Both require the connection to
+    // be intercepted, which a plain `http://` request through the explicit proxy is not: it is
+    // relayed. Refusing here is the difference between a configuration error and a capture
+    // that silently never happens.
+    for (key, url) in
+        [("authorization_endpoint", authorize), ("token_endpoint", &spec.token_endpoint)]
+    {
+        anyhow::ensure!(
+            url.starts_with("https://"),
+            "`capture: in_band` needs `source.{key}` to be https — marshal captures the code \
+             from the response, which requires the connection to be intercepted, and a plain \
+             http request through the proxy is relayed rather than intercepted. \
+             (`{url}` here.)"
+        );
+    }
+
+    let source = Arc::new(build_oauth2_source(spec, deps, swap_label)?);
+    marshal_secrets::Oauth2Broker::new(swap_label, source, authorize, &spec.token_endpoint)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn build_host_matcher(
@@ -2056,6 +2179,21 @@ struct Oauth2Spec {
     /// RFC 8628 device authorization endpoint. `device_code` only.
     #[serde(default)]
     device_authorization_endpoint: Option<String>,
+    /// Whether marshal takes over an authorization flow the *agent* starts. `off` by default:
+    /// this rewrites requests the agent made and answers requests it sent, which is a much
+    /// larger claim on its behaviour than injecting a header.
+    #[serde(default)]
+    capture: CaptureSpec,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CaptureSpec {
+    #[default]
+    Off,
+    /// Substitute marshal's PKCE challenge, intercept the redirect, complete the exchange,
+    /// and answer the agent's token request locally. See ADR-0032.
+    InBand,
 }
 
 #[derive(Debug, Default, Clone, Copy, serde::Deserialize)]

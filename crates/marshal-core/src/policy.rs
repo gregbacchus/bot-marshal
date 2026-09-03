@@ -182,3 +182,52 @@ pub trait ResponseTransform: Send + Sync + std::fmt::Debug {
         None
     }
 }
+
+/// A response marshal produces itself, instead of forwarding the request.
+#[derive(Debug, Clone)]
+pub struct SynthesizedResponse {
+    pub status: u16,
+    /// Set verbatim. `content-length` is added by the proxy from the body.
+    pub headers: Vec<(String, String)>,
+    pub body: bytes::Bytes,
+    /// Machine-readable code for the audit record, e.g. `"oauth2_terminated"`. The layer name
+    /// comes from [`RequestResponder::name`].
+    pub code: String,
+    /// One line for a human reading the audit trail.
+    pub message: String,
+}
+
+/// **Answers** a request, rather than deciding whether it may proceed or rewriting it.
+///
+/// The third thing that can happen to an allowed request, alongside being transformed and
+/// being forwarded. Until this existed, a request that did not reach the upstream had been
+/// denied; now it may also have been *served*, by marshal, on the upstream's behalf.
+///
+/// It exists for one situation, and the shape follows from it: marshal has taken over a
+/// protocol exchange the client believes it is conducting, and must give the client a
+/// well-formed answer rather than a refusal. An OAuth2 token endpoint whose credential marshal
+/// already holds is the case that motivated it — the client's request cannot be allowed
+/// through (it would redeem, or fail to redeem, a code marshal owns) and cannot be refused
+/// (the client's state machine would stall on an error it cannot act on).
+///
+/// Deliberately **not** a [`PolicyLayer`]: a layer decides *whether*, runs before transforms,
+/// and therefore never sees the request as it would actually have been sent. A responder runs
+/// last, on the finished request, which is the only point at which "what would the upstream
+/// have been asked?" is a well-formed question.
+///
+/// See [ADR-0031](../../../docs/adr/0031-a-responder-may-answer-a-request.md).
+#[async_trait::async_trait]
+pub trait RequestResponder: Send + Sync + std::fmt::Debug {
+    fn name(&self) -> &str;
+
+    /// A responder that inspects a request body must say so, exactly as a transform does.
+    fn body_requirement(&self) -> BodyRequirement {
+        BodyRequirement::Streaming
+    }
+
+    /// `Some` to answer the request; `None` to let it go upstream unchanged.
+    ///
+    /// `&mut` so a responder can record evidence whether or not it answers — "considered and
+    /// declined" is worth as much in an audit trail as "answered".
+    async fn respond(&self, cx: &mut RequestContext) -> Result<Option<SynthesizedResponse>>;
+}

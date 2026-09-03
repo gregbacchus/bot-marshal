@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use marshal_core::{RequestTransform, ResponseTransform};
+use marshal_core::{RequestResponder, RequestTransform, ResponseTransform};
 use marshal_policy::{Chain, HostMatcher};
 
 use crate::identity::IdentityRegistry;
@@ -30,12 +30,16 @@ pub struct Runtime {
     /// `request_transforms.secrets` is only meaningful for identities resolved into that
     /// profile, and must not leak into another profile's requests.
     pub request_transforms: HashMap<Arc<str>, Vec<Arc<dyn RequestTransform>>>,
+    /// Per profile, same scoping again: something that answers a request on the upstream's
+    /// behalf is as profile-specific as the credential it is answering about.
+    pub responders: HashMap<Arc<str>, Vec<Arc<dyn RequestResponder>>>,
     /// The chain for the base config's embedded, unnamed `profile:` — used whenever a
     /// connection is unattributed and `identities.unidentified.profile` did not name a
     /// different, real profile instead. See [`crate::identity::IdentityRegistry::uses_default_fallback`].
     pub default_chain: Arc<Chain>,
     pub default_response_transforms: Vec<Arc<dyn ResponseTransform>>,
     pub default_request_transforms: Vec<Arc<dyn RequestTransform>>,
+    pub default_responders: Vec<Arc<dyn RequestResponder>>,
     pub identities: Arc<IdentityRegistry>,
     /// Hosts tunnelled without interception, for genuinely certificate-pinned clients. The
     /// only sanctioned exception to interception — see [`Runtime::tls`].
@@ -120,6 +124,7 @@ mod tests {
         Runtime {
             chains,
             response_transforms: HashMap::new(),
+            responders: HashMap::new(),
             request_transforms: HashMap::new(),
             default_chain: Arc::new(Chain::new(
                 "default",
@@ -128,6 +133,7 @@ mod tests {
                 Arc::new(DenyingDecider),
             )),
             default_response_transforms: Vec::new(),
+            default_responders: Vec::new(),
             default_request_transforms: Vec::new(),
             identities: Arc::new(IdentityRegistry::new(
                 vec![],

@@ -120,6 +120,9 @@ pub struct MitmHandler {
     pub client_addr: std::net::SocketAddr,
     /// Applied after the chain allows. Rewriting is not deciding.
     pub request_transforms: Vec<Arc<dyn RequestTransform>>,
+    /// Consulted last, on the finished request: something here may answer it instead of
+    /// forwarding it. See [`marshal_core::RequestResponder`].
+    pub responders: Vec<Arc<dyn marshal_core::RequestResponder>>,
     /// Applied to the response on its way back to the agent.
     pub response_transforms: Vec<Arc<dyn ResponseTransform>>,
     /// Counters. Intercepted requests must be recorded here too: once TLS is terminated a
@@ -138,6 +141,7 @@ impl MitmHandler {
         self.request_transforms
             .iter()
             .map(|t| t.body_requirement())
+            .chain(self.responders.iter().map(|r| r.body_requirement()))
             .fold(self.chain.body_requirement(), |acc, r| acc.combine(r))
     }
 
@@ -288,6 +292,40 @@ async fn handle_request(
             emit(&handler, &cx, &reason, Action::Deny, outcome.evidence, None, started, false)
                 .await;
             return Ok(denial_response(&reason, &cx, jsonrpc_id));
+        }
+    }
+
+    // Last, on the finished request: a responder may answer it rather than let it go
+    // upstream. After the transforms on purpose — "what would the upstream have been asked?"
+    // is only a well-formed question once every rewrite has been applied.
+    for responder in &handler.responders {
+        match responder.respond(&mut cx).await {
+            Ok(Some(synth)) => {
+                let reason =
+                    Reason::new(responder.name(), synth.code.clone(), synth.message.clone());
+                emit(
+                    &handler,
+                    &cx,
+                    &reason,
+                    Action::Allow,
+                    outcome.evidence,
+                    Some(synth.status),
+                    started,
+                    would_deny,
+                )
+                .await;
+                return Ok(synthesized_response(synth));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // Same rule as a transform: something that could not do its job must not be
+                // silently skipped, because the request it would have answered is one the
+                // upstream must not see.
+                let reason = Reason::new(responder.name(), "responder_failed", e.to_string());
+                emit(&handler, &cx, &reason, Action::Deny, outcome.evidence, None, started, false)
+                    .await;
+                return Ok(denial_response(&reason, &cx, jsonrpc_id));
+            }
         }
     }
 
@@ -679,6 +717,36 @@ fn denial_response(
         .header("proxy-agent", "bot-marshal")
         .body(Full::new(bytes).map_err(|e: std::convert::Infallible| match e {}).boxed())
         .expect("a static denial response is always valid")
+}
+
+/// Turn a responder's answer into a response for the client.
+fn synthesized_response(synth: marshal_core::SynthesizedResponse) -> Response<ProxyBody> {
+    let mut builder = Response::builder()
+        .status(StatusCode::from_u16(synth.status).unwrap_or(StatusCode::OK))
+        // Marked, always. A client debugging a response it did not get from the server it
+        // addressed should be able to see that from the response itself.
+        .header("proxy-agent", "bot-marshal");
+    for (name, value) in &synth.headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .header(hyper::header::CONTENT_LENGTH, synth.body.len())
+        .body(Full::new(synth.body).map_err(|e: std::convert::Infallible| match e {}).boxed())
+        .unwrap_or_else(|_| {
+            // A responder that produced an unbuildable response is a bug, not a client error;
+            // refusing is the only safe thing left, since forwarding is no longer an option.
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("proxy-agent", "bot-marshal")
+                .body(
+                    Full::new(Bytes::from_static(
+                        b"{\"error\":\"responder_produced_invalid_response\"}",
+                    ))
+                    .map_err(|e: std::convert::Infallible| match e {})
+                    .boxed(),
+                )
+                .expect("a static response is always valid")
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

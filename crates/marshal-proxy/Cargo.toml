@@ -41,6 +41,7 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde_yaml_ng.workspace = true
 rcgen = { workspace = true }

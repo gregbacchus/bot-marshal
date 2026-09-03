@@ -77,11 +77,38 @@ impl std::fmt::Debug for SecretSwap {
 #[derive(Debug)]
 pub struct SecretInjector {
     swaps: Vec<SecretSwap>,
+    /// `(host, path)` pairs that must never be injected into, whatever a swap's `rules` say.
+    exceptions: Vec<(String, String)>,
 }
 
 impl SecretInjector {
     pub fn new(swaps: Vec<SecretSwap>) -> Self {
-        Self { swaps }
+        Self { swaps, exceptions: Vec::new() }
+    }
+
+    /// Exclude specific endpoints from injection entirely.
+    ///
+    /// This exists for one situation, and it is not a nicety. An OAuth2 credential's own
+    /// authorization and token endpoints must never have that credential set on them:
+    ///
+    /// * the authorization request is, by construction, the one request in the flow that is
+    ///   not yet authenticated — that is what the flow is *for*;
+    /// * under in-band capture it is also circular. Injecting means minting, minting needs a
+    ///   credential, and the credential is what the authorization request exists to obtain.
+    ///   The request is refused, so nothing is ever captured, so nothing can ever be minted.
+    ///
+    /// A `rules` scope wide enough to cover both the API and its auth server is an ordinary
+    /// thing to write — they are often the same host — so this is enforced rather than left
+    /// to the operator to notice.
+    pub fn excluding(mut self, endpoints: Vec<(String, String)>) -> Self {
+        self.exceptions = endpoints;
+        self
+    }
+
+    fn excluded(&self, cx: &RequestContext) -> Option<&(String, String)> {
+        self.exceptions.iter().find(|(host, path)| {
+            cx.authority.host.eq_ignore_ascii_case(host) && cx.uri.path() == path
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -143,6 +170,13 @@ impl RequestTransform for SecretInjector {
     }
 
     async fn apply(&self, cx: &mut RequestContext) -> Result<()> {
+        if let Some((host, path)) = self.excluded(cx) {
+            // Recorded rather than silent: "the credential was deliberately not set here" is a
+            // fact somebody debugging a 401 needs, and its absence would otherwise look like a
+            // scoping mistake.
+            cx.evidence.record(format!("secrets.not_injected.{host}{path}"), true);
+            return Ok(());
+        }
         for swap in &self.swaps {
             if swap.hosts.matches(&cx.authority.host).is_none() {
                 continue;
@@ -431,6 +465,57 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_excluded_endpoint_is_not_injected_into_even_when_its_host_matches() {
+        // The circularity this prevents: an OAuth2 swap scoped to a host that also serves the
+        // authorization endpoint would try to mint a credential in order to authenticate the
+        // very request that exists to obtain it.
+        #[derive(Debug)]
+        struct Boom;
+        #[async_trait::async_trait]
+        impl SecretSource for Boom {
+            fn name(&self) -> &str {
+                "BOOM"
+            }
+            async fn resolve(&self) -> Result<SecretValue> {
+                Err(Error::Config("this source must never be resolved".into()))
+            }
+        }
+
+        let injector = SecretInjector::new(vec![SecretSwap {
+            name: "SERVICE".into(),
+            injection: Injection::Bearer { source: Arc::new(Boom) },
+            hosts: marshal_policy::HostMatcher::new(["auth.example.com"], Vec::<&str>::new())
+                .unwrap(),
+        }])
+        .excluding(vec![("auth.example.com".to_owned(), "/oauth2/authorize".to_owned())]);
+
+        let mut cx = context("auth.example.com", "/oauth2/authorize");
+        injector.apply(&mut cx).await.expect("the excluded endpoint must not resolve the source");
+        assert!(!cx.headers.contains_key(http::header::AUTHORIZATION));
+
+        // A different path on the same host is still injected — and so still fails, which is
+        // what proves the exclusion above was doing the work rather than the host not matching.
+        let mut other = context("auth.example.com", "/v1/things");
+        assert!(injector.apply(&mut other).await.is_err());
+    }
+
+    fn context(host: &str, path: &str) -> RequestContext {
+        RequestContext {
+            identity: marshal_core::Identity::unidentified(),
+            profile: std::sync::Arc::from("p"),
+            ingress: marshal_core::IngressMode::Explicit,
+            phase: marshal_core::Phase::Request,
+            client_addr: "127.0.0.1:1".parse().unwrap(),
+            authority: marshal_core::Authority { host: host.to_owned(), port: 443 },
+            method: http::Method::GET,
+            uri: format!("https://{host}{path}").parse().unwrap(),
+            headers: http::HeaderMap::new(),
+            body: BodyHandle::Empty,
+            evidence: marshal_core::Evidence::new(),
+        }
+    }
 
     #[test]
     fn append_query_adds_to_an_empty_query_string() {

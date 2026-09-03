@@ -25,8 +25,9 @@ audited separately.
 ² OpenTelemetry export is not implemented — see below.
 
 ³ `client_credentials`, `refresh_token`, `authorization_code` (with PKCE) and `device_code`
-all work end to end, the last two via `marshal secrets oauth login`. `jwt_bearer` and
-`private_key_jwt` are not implemented, and neither is in-band capture — see below.
+all work end to end, the last two via `marshal secrets oauth login`, and `capture: in_band`
+takes over an authorization flow an agent starts. `jwt_bearer` and `private_key_jwt` are not
+implemented — see below.
 
 ## Removed
 
@@ -75,11 +76,7 @@ for anyone already running OPA policy.
 and exchange it, which is how Google service accounts, Salesforce and Snowflake authenticate.
 Needs RS256/ES256 signing, which `marshal-secrets` has no dependency for yet.
 
-**In-band OAuth2 capture.** The agent driving an authorization flow *through* the proxy, with
-marshal substituting its own PKCE challenge, intercepting the redirect, completing the exchange
-itself, and handing the agent a flow that completes on nothing usable. The interesting version
-of the feature, and a much larger change: it needs a request-path component that can *answer* a
-request rather than forward it, which today only a denial can do.
+
 
 ## Architecture
 
@@ -93,7 +90,7 @@ without a network.
 | `marshal-config` | layered YAML load, the `profiles/`/`bundles/`/`transforms/` convention, validation |
 | `marshal-tls` | CA load/generate, leaf minting, cache, rustls configs |
 | `marshal-policy` | chain runner and the denylist, allowlist, rules, dlp, mcp layers |
-| `marshal-secrets` | env/file/oauth2 sources, TTL cache, token store, injection and redaction |
+| `marshal-secrets` | env/file/oauth2 sources, TTL cache, token store, in-band capture, injection and redaction |
 | `marshal-judge` | the LLM judge layer: providers, structured verdicts, cache, breaker |
 | `marshal-launch` | `marshal run`: netns and cgroup isolation, identity registration |
 | `marshal-http` | the upstream guard, and the one-shot client for calls marshal makes as itself |

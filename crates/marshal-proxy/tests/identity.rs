@@ -123,6 +123,7 @@ async fn harness(
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: HashMap::new(),
+            responders: HashMap::new(),
             request_transforms: std::collections::HashMap::new(),
             default_chain: Arc::new(marshal_policy::Chain::new(
                 "default",
@@ -131,6 +132,7 @@ async fn harness(
                 Arc::new(DenyingDecider),
             )),
             default_response_transforms: Vec::new(),
+            default_responders: Vec::new(),
             default_request_transforms: Vec::new(),
             identities: Arc::new(IdentityRegistry::new(
                 resolvers,
@@ -402,6 +404,7 @@ async fn the_unix_listener_identifies_by_so_peercred() {
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: HashMap::new(),
+            responders: HashMap::new(),
             request_transforms: std::collections::HashMap::new(),
             default_chain: Arc::new(marshal_policy::Chain::new(
                 "default",
@@ -410,6 +413,7 @@ async fn the_unix_listener_identifies_by_so_peercred() {
                 Arc::new(DenyingDecider),
             )),
             default_response_transforms: Vec::new(),
+            default_responders: Vec::new(),
             default_request_transforms: Vec::new(),
             identities: Arc::new(IdentityRegistry::new(
                 vec![resolver],
@@ -521,6 +525,7 @@ async fn two_explicit_ports_resolve_to_different_identities() {
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: HashMap::new(),
+            responders: HashMap::new(),
             request_transforms: std::collections::HashMap::new(),
             default_chain: Arc::new(marshal_policy::Chain::new(
                 "default",
@@ -529,6 +534,7 @@ async fn two_explicit_ports_resolve_to_different_identities() {
                 Arc::new(DenyingDecider),
             )),
             default_response_transforms: Vec::new(),
+            default_responders: Vec::new(),
             default_request_transforms: Vec::new(),
             identities: Arc::new(IdentityRegistry::new(
                 vec![resolver],

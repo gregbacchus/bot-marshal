@@ -55,6 +55,9 @@ proposing a change to it.
   requires `i_understand_this_is_allow_by_default: true`.
 * **Chain ordering is semantic.** ([ADR-0003](docs/adr/0003-policy-as-a-short-circuiting-chain.md)) Layers short-circuit on the first terminal verdict; that is
   what gives a `denylist` precedence over a later judge approval, with no special-casing.
+* **An allowed request has three possible ends, not two.** ([ADR-0031](docs/adr/0031-a-responder-may-answer-a-request.md)) It is forwarded, or a
+  `RequestResponder` *answers* it on the upstream's behalf, or a transform failed and it is
+  refused. "Did not reach the upstream" no longer means "was denied" — check `reason.code`.
 * **Evidence is append-only.** ([ADR-0003](docs/adr/0003-policy-as-a-short-circuiting-chain.md)) A layer adds facts and flags; it never mutates or removes
   another layer's. The trail is emitted verbatim in the audit record.
 * **Identity is derived from the connection, never asserted by the client.** ([ADR-0009](docs/adr/0009-identity-is-derived-from-the-connection.md))

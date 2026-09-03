@@ -77,6 +77,22 @@ impl std::fmt::Debug for AuthCodeFlow {
 }
 
 impl AuthCodeFlow {
+    /// A flow marshal did not start, but has taken over.
+    ///
+    /// In-band capture substitutes marshal's PKCE challenge into an authorization request the
+    /// *agent* built, so the state and the redirect URI are the agent's — they have to be, or
+    /// the agent's own state check fails and the provider rejects a redirect_uri it never saw.
+    /// Only the verifier is marshal's, and that is the half that decides who can redeem the
+    /// code.
+    pub(crate) fn intercepted(
+        url: String,
+        state: String,
+        verifier: String,
+        redirect_uri: String,
+    ) -> Self {
+        Self { url, state, verifier, redirect_uri }
+    }
+
     /// Check a callback's `state` against the one issued, in constant time.
     ///
     /// Not because a timing attack on a CSRF token is likely against a loopback listener that

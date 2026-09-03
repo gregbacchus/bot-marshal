@@ -116,6 +116,13 @@ Relocating a directory doesn't loosen anything: a file found there is still dese
 nothing but a profile, bundle, or transform bundle, so the same structural guarantees apply
 regardless of where the path points.
 
+### Trusting a private CA
+
+`tls.upstream_ca_certs` adds roots on top of the public ones. It applies to **both** kinds of
+outbound connection marshal makes: proxied traffic on an agent's behalf, and calls marshal
+makes as itself — an OAuth2 token endpoint, an LLM judge. An operator who says "trust this CA"
+means both; trusting it for one and not the other would be a distinction with nothing behind it.
+
 ### `state_dir`
 
 Everything above is configuration marshal is *given*. `state_dir` is the one directory marshal

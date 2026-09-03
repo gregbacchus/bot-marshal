@@ -71,6 +71,7 @@ async fn harness() -> Harness {
         handle(marshal_proxy::runtime::Runtime {
             chains,
             response_transforms: transforms,
+            responders: std::collections::HashMap::new(),
             request_transforms: std::collections::HashMap::new(),
             default_chain: Arc::new(marshal_policy::Chain::new(
                 "default",
@@ -79,6 +80,7 @@ async fn harness() -> Harness {
                 Arc::new(DenyingDecider),
             )),
             default_response_transforms: Vec::new(),
+            default_responders: Vec::new(),
             default_request_transforms: Vec::new(),
             identities: Arc::new(IdentityRegistry::new(vec![], Some(Arc::from("p")), false, false)),
             passthrough: HostMatcher::default(),

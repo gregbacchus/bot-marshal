@@ -41,6 +41,8 @@ later, so a future change is made knowingly rather than by accident.
 | [0028](0028-sigv4-buffers-the-body.md) | SigV4 injection buffers the body, capped, as a declared exception | Accepted |
 | [0029](0029-the-redaction-set-is-learned-at-runtime.md) | The redaction set is learned at runtime, not sealed at startup | Accepted |
 | [0030](0030-oauth2-is-a-secret-source.md) | OAuth2 is a secret source, not an injection kind | Accepted |
+| [0031](0031-a-responder-may-answer-a-request.md) | A responder may answer a request instead of forwarding it | Accepted |
+| [0032](0032-marshal-owns-the-pkce-verifier.md) | Marshal owns the PKCE verifier and terminates the authorization flow | Accepted |
 
 ## Writing a new one
 

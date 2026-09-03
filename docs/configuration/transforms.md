@@ -245,6 +245,68 @@ marshal refuses to record an enrolment that would not survive a restart.
 `device_code` is the one that works over SSH — it binds nothing and needs no browser on the
 host.
 
+#### In-band capture
+
+Everything above assumes marshal was given, or enrolled, the credential in advance. `capture:
+in_band` covers the other case: an **agent** that drives an OAuth authorization flow itself.
+
+Left alone, that ends with the agent holding live tokens — precisely the state boundary
+injection exists to prevent. Under `capture: in_band` it ends with the agent holding nothing:
+
+```yaml
+      source:
+        type: oauth2
+        grant: authorization_code
+        capture: in_band
+        token_endpoint: https://auth.example.com/oauth2/token
+        authorization_endpoint: https://auth.example.com/oauth2/authorize
+        client_id: marshal
+        client_secret: { type: env, var: SERVICE_CLIENT_SECRET }
+        scope: ["offline_access"]
+```
+
+What happens, in order:
+
+1. **The agent's authorization request has its PKCE challenge replaced** with one marshal
+   derived from a verifier only marshal holds. Its `state` and `redirect_uri` are untouched, so
+   the agent's own CSRF check still passes and the provider still recognises the redirect URI.
+   From here, the code the provider will issue is redeemable *only* by marshal — not because
+   the agent is blocked from trying, but because it does not hold the matching verifier.
+2. **The redirect never reaches the agent with a real code in it.** Marshal intercepts the
+   `Location` header, lifts the code out, and completes the exchange itself — a direct call to
+   the token endpoint, out of band, nothing forwarded. The `code` the agent receives is an inert
+   sentinel. The real code is replaced whether or not marshal's own exchange succeeded; if it
+   failed, the agent must not get the chance either, and the failure surfaces as a refused API
+   request naming the cause.
+3. **The agent's own token request is answered locally and never forwarded** — a well-formed
+   token response carrying a sentinel. Its state machine completes normally, on nothing. That
+   response, like every response marshal synthesizes, carries `proxy-agent: bot-marshal`.
+
+The sentinel is not a placeholder to be recognised later. Injection is unconditional, so
+whatever the agent presents to the API is overwritten with the real token regardless.
+
+Marshal also keeps the refresh token the exchange produced, exactly as
+`marshal secrets oauth login` would — so the credential survives a restart without the agent
+ever authorising again.
+
+**What it costs, and when not to use it:**
+
+* **Only `grant: authorization_code`.** The other grants have no authorization flow to take over.
+* **Both endpoints must be `https`.** Capture depends on marshal seeing the *response*, which
+  requires the connection to be intercepted; a plain `http` request through the explicit proxy
+  is relayed instead. This is a config error, not a silent no-op.
+* **A client that checks its own flow breaks.** One that verifies the challenge in the
+  authorization URL matches the one it generated, or validates the token response against a
+  nonce, will fail — correctly, from its point of view. There is no way to support both.
+* **It is best-effort.** The provider redirects whoever made the authorization request. If that
+  is a browser rather than the agent's HTTP client, the browser must also be behind the proxy.
+  An authorization request made outside the proxy's capture is never rewritten at all.
+  [`marshal secrets oauth login`](../cli.md#marshal-secrets-oauth-login-name---open---timeout-duration)
+  is the guaranteed path; this is the convenient one.
+
+`capture` defaults to `off`. See [ADR-0032](../adr/0032-marshal-owns-the-pkce-verifier.md) and
+[ADR-0031](../adr/0031-a-responder-may-answer-a-request.md).
+
 #### What this costs
 
 **A request can block on a third party.** Minting happens on the request path, so a slow token
@@ -260,6 +322,18 @@ into a broken credential rather than merely a wasted round trip.
 rules that constrain agent egress. A token endpoint on the public internet is unaffected; an
 *internal* auth server on RFC1918 needs `upstream.allow_private: true`, which also opens agent
 egress to private addresses. A refusal names the exact rule that blocked it.
+
+**An OAuth2 swap never injects into its own endpoints.** The `token_endpoint` and
+`authorization_endpoint` are excluded from injection automatically, whatever `rules` says —
+they are frequently on the same host as the API. The authorization request is by construction
+the one request in the flow that is not yet authenticated, and under `capture: in_band` setting
+a credential on it is also circular: injecting means minting, minting needs the credential, and
+the credential is what the request exists to obtain. The exclusion is recorded in the evidence
+trail as `secrets.not_injected.<host><path>` rather than being silent.
+
+**`tls.upstream_ca_certs` applies to marshal's own calls too.** An internal auth server behind a
+private CA works without further configuration: the roots the proxy trusts for upstream traffic
+are the roots marshal trusts when it calls a token endpoint for itself.
 
 **A minted token is redacted from the moment it is minted, not from startup** — see
 [ADR-0029](../adr/0029-the-redaction-set-is-learned-at-runtime.md). Nothing is minted at boot,

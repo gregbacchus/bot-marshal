@@ -86,6 +86,11 @@ each other. [Transforms](configuration/transforms.md) run only after the chain h
 
 * **`request_transforms`** rewrite an allowed request on its way out — header filtering,
   swapping a placeholder for a real credential so the agent never holds it.
+* **Responders** are the third thing that can happen to an allowed request. A
+  [`RequestResponder`](../crates/marshal-core/src/policy.rs) runs last, on the finished request,
+  and may **answer** it rather than let it reach the upstream — used by in-band OAuth2 capture
+  to complete a protocol exchange marshal has taken over. Every synthesized response carries
+  `proxy-agent: bot-marshal`. See [ADR-0031](adr/0031-a-responder-may-answer-a-request.md).
 * **`response_transforms`** rewrite what comes back — redacting a secret the upstream echoed,
   summarising or compacting a body too large to be useful to an agent.
 

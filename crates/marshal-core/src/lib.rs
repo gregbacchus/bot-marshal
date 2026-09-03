@@ -23,7 +23,8 @@ pub use evidence::{Evidence, Fact, Flag, LayerOutcome};
 pub use hosts::{HostMatcher, MatchKind, PatternError};
 pub use identity::{ConnInfo, Credential, Identity, IdentityResolver, PeerCred, Resolved};
 pub use policy::{
-    BodyRequirement, CostClass, FailureMode, PolicyLayer, RequestTransform, ResponseTransform,
+    BodyRequirement, CostClass, FailureMode, PolicyLayer, RequestResponder, RequestTransform,
+    ResponseTransform, SynthesizedResponse,
 };
 pub use redact::Redactor;
 pub use request::{Authority, BodyHandle, IngressMode, Phase, RequestContext, ResponseParts};

@@ -20,4 +20,4 @@ pub use client::{ClientBody, MAX_RESPONSE_BYTES, json_post_request, post_form, p
 pub use endpoint::{AsyncConn, Endpoint};
 pub use error::HttpError;
 pub use guard::{GuardError, UpstreamGuard};
-pub use tls::default_tls_config;
+pub use tls::{default_tls_config, with_extra_roots};
