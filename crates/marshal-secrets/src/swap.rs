@@ -141,10 +141,10 @@ impl RequestTransform for SecretInjector {
                     continue;
                 }
                 let Ok(text) = value.to_str() else { continue };
-                if !text.contains(&swap.proxy_value) {
+                let Some(replaced) = replace_in_header(text, &swap.proxy_value, real.expose())
+                else {
                     continue;
-                }
-                let replaced = text.replace(&swap.proxy_value, real.expose());
+                };
                 if let Ok(v) = http::HeaderValue::from_str(&replaced) {
                     cx.headers.insert(name.clone(), v);
                     swapped_anywhere = true;
@@ -190,7 +190,7 @@ fn placeholder_present(cx: &RequestContext, swap: &SecretSwap) -> bool {
         {
             return false;
         }
-        value.to_str().map(|t| t.contains(&swap.proxy_value)).unwrap_or(false)
+        value.to_str().map(|t| header_contains(t, &swap.proxy_value)).unwrap_or(false)
     });
     if in_headers {
         return true;
@@ -209,4 +209,164 @@ fn placeholder_present(cx: &RequestContext, swap: &SecretSwap) -> bool {
     }
 
     false
+}
+
+/// Whether `placeholder` appears in a header value, either directly (a bearer token, an API
+/// key — anything the client sends as plain text) or inside the decoded credential of a
+/// `Basic` challenge (`Authorization: Basic base64("user:password")`) — the scheme git,
+/// package registries, and container registries all normally use. No configuration
+/// distinguishes the two cases: this is not a heuristic guess at what a header *might* be,
+/// it is recognising a fixed, unambiguous wire format (RFC 7617) once the header is already
+/// one this swap was configured to look at.
+fn header_contains(text: &str, placeholder: &str) -> bool {
+    if text.contains(placeholder) {
+        return true;
+    }
+    decode_basic(text).is_some_and(|decoded| decoded.contains(placeholder))
+}
+
+/// As [`header_contains`], but performs the substitution and returns the header's new value.
+/// `None` means the placeholder was not found by either method, so the caller leaves the
+/// header untouched.
+fn replace_in_header(text: &str, placeholder: &str, real: &str) -> Option<String> {
+    if text.contains(placeholder) {
+        return Some(text.replace(placeholder, real));
+    }
+    let decoded = decode_basic(text)?;
+    if !decoded.contains(placeholder) {
+        return None;
+    }
+    Some(format!("Basic {}", base64_encode(decoded.replace(placeholder, real).as_bytes())))
+}
+
+/// Decode the credential out of a `Basic` challenge, if `text` is one. `None` for anything
+/// else — a missing `Basic ` prefix, invalid base64, or non-UTF-8 decoded bytes — none of
+/// which are errors, just "this header is not that".
+fn decode_basic(text: &str) -> Option<String> {
+    let encoded = text.strip_prefix("Basic ").or_else(|| text.strip_prefix("basic "))?;
+    String::from_utf8(base64_decode(encoded)?).ok()
+}
+
+/// Minimal standard-alphabet base64 decoder, matching the one in `marshal-proxy`'s
+/// `httpfront` — duplicated rather than shared, since pulling in a dependency (or a
+/// cross-crate coupling) for either direction of twenty lines of encoding is more surface
+/// than the thing it replaces.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for b in input.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            b'\r' | b'\n' => continue,
+            _ => return None,
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(BASE64_ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(BASE64_ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 { BASE64_ALPHABET[(b2 & 0x3f) as usize] as char } else { '=' });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_round_trips_through_all_padding_cases() {
+        // One, two, and zero bytes of padding, so a chunk-boundary bug would show up.
+        for input in ["a", "ab", "abc", "abcd", "x-access-token:ghp_realtoken", ""] {
+            let encoded = base64_encode(input.as_bytes());
+            let decoded = base64_decode(&encoded).unwrap();
+            assert_eq!(decoded, input.as_bytes(), "round-trip failed for {input:?}");
+        }
+    }
+
+    #[test]
+    fn base64_encode_matches_a_known_vector() {
+        // RFC 4648's own test vector, so this isn't just internally self-consistent.
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+    }
+
+    #[test]
+    fn header_contains_finds_a_plain_bearer_token() {
+        assert!(header_contains("Bearer marshal-placeholder", "marshal-placeholder"));
+        assert!(!header_contains("Bearer something-else", "marshal-placeholder"));
+    }
+
+    #[test]
+    fn header_contains_finds_a_placeholder_inside_basic_auth() {
+        let encoded = base64_encode(b"x-access-token:marshal-placeholder");
+        assert!(header_contains(&format!("Basic {encoded}"), "marshal-placeholder"));
+    }
+
+    #[test]
+    fn header_contains_does_not_false_positive_on_an_unrelated_basic_header() {
+        let encoded = base64_encode(b"someone:something-else");
+        assert!(!header_contains(&format!("Basic {encoded}"), "marshal-placeholder"));
+    }
+
+    #[test]
+    fn header_contains_ignores_malformed_basic_headers() {
+        // Not valid base64, and not UTF-8 once decoded — neither should panic or false-match.
+        assert!(!header_contains("Basic not-valid-base64!!!", "marshal-placeholder"));
+        assert!(!header_contains(&format!("Basic {}", base64_encode(&[0xff, 0xfe])), "x"));
+    }
+
+    #[test]
+    fn replace_in_header_swaps_a_plain_bearer_token() {
+        let out =
+            replace_in_header("Bearer marshal-placeholder", "marshal-placeholder", "real").unwrap();
+        assert_eq!(out, "Bearer real");
+    }
+
+    #[test]
+    fn replace_in_header_swaps_and_re_encodes_a_basic_challenge() {
+        let encoded = base64_encode(b"x-access-token:marshal-placeholder");
+        let out = replace_in_header(&format!("Basic {encoded}"), "marshal-placeholder", "ghp_real")
+            .unwrap();
+        assert_eq!(out, format!("Basic {}", base64_encode(b"x-access-token:ghp_real")));
+    }
+
+    #[test]
+    fn replace_in_header_leaves_a_non_matching_header_alone() {
+        assert!(
+            replace_in_header("Bearer something-else", "marshal-placeholder", "real").is_none()
+        );
+        let encoded = base64_encode(b"someone:something-else");
+        assert!(
+            replace_in_header(&format!("Basic {encoded}"), "marshal-placeholder", "real").is_none()
+        );
+    }
 }

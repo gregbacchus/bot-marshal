@@ -197,6 +197,67 @@ async fn the_placeholder_is_swapped_for_the_real_credential() {
 }
 
 #[tokio::test]
+async fn the_placeholder_is_swapped_inside_a_basic_auth_challenge() {
+    // git-over-HTTPS, most package registries, and container registry auth all normally send
+    // credentials as `Authorization: Basic base64("user:password")`, not a plain bearer
+    // token. The placeholder must be found inside the *decoded* credential and the header
+    // re-encoded — the exact same config as the bearer-token case, no extra flag.
+    let h = harness(ALLOW_LOOPBACK, vec![swap(MatchSites::default(), true)], &[REAL_SECRET]).await;
+
+    use base64_test_helper::b64;
+    let placeholder_basic = format!("Basic {}", b64(&format!("x-access-token:{PLACEHOLDER}")));
+
+    let seen =
+        reflect(&h, |b| b.header("authorization", placeholder_basic).body(empty()).unwrap()).await;
+
+    let expected = format!("Basic {}", b64(&format!("x-access-token:{REAL_SECRET}")));
+    assert_eq!(
+        seen["authorization"], expected,
+        "the decoded credential must carry the real secret, re-encoded"
+    );
+}
+
+#[tokio::test]
+async fn a_basic_auth_challenge_without_the_placeholder_is_left_alone() {
+    // A Basic header that happens not to carry the placeholder (a different service's
+    // credential, entirely unrelated auth) must not be touched or misread as a match.
+    let h = harness(ALLOW_LOOPBACK, vec![swap(MatchSites::default(), false)], &[REAL_SECRET]).await;
+
+    use base64_test_helper::b64;
+    let unrelated = format!("Basic {}", b64("someone:something-else-entirely"));
+
+    let seen =
+        reflect(&h, |b| b.header("authorization", unrelated.clone()).body(empty()).unwrap()).await;
+
+    assert_eq!(seen["authorization"], unrelated, "an unrelated Basic header must pass through");
+}
+
+mod base64_test_helper {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    /// Minimal standard base64 encoder, so this test file does not need a dependency to
+    /// construct the exact wire format `Authorization: Basic` uses.
+    pub fn b64(input: &str) -> String {
+        let input = input.as_bytes();
+        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+        for chunk in input.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = chunk.get(1).copied().unwrap_or(0);
+            let b2 = chunk.get(2).copied().unwrap_or(0);
+            out.push(ALPHABET[(b0 >> 2) as usize] as char);
+            out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 { ALPHABET[(b2 & 0x3f) as usize] as char } else { '=' });
+        }
+        out
+    }
+}
+
+#[tokio::test]
 async fn the_real_secret_never_appears_in_the_audit_trail() {
     // The plan's acceptance criterion, tested the way an operator would check it: search the
     // entire audit output for the literal value.

@@ -71,12 +71,43 @@ request_transforms:
 | `source` | `{ type: env, var: ... }` or `{ type: file, path: ... }` |
 | `proxy_value` | the placeholder the agent is given and configured with |
 | `match_headers` | which headers to search for the placeholder |
-| `require` | fail the request if the real secret cannot be resolved, rather than forwarding the placeholder |
+| `require` | refuse the request if it does not carry the placeholder at all, rather than forwarding it as-is |
 | `rules` | the hosts this swap applies to — a credential is never offered to a host that shouldn't see it |
 
 Secrets are redacted in every audit path and log line. `require: true` is the safe setting:
-without it, an unresolvable secret means the placeholder goes upstream, which fails in a
-confusing way rather than an obvious one.
+without it, a request that simply forgot the placeholder goes upstream unauthenticated, which
+fails in a confusing way (a bare 401 the agent has no way to explain) rather than an obvious
+one. If the secret source itself fails to resolve — the environment variable is unset, the
+file is missing — the request fails regardless of `require`, since there is nothing to inject
+either way.
+
+### Basic auth
+
+`git` over HTTPS, most package registries (npm, pip, cargo private registries), and container
+registry logins all commonly send credentials as `Authorization: Basic
+base64("user:password")` rather than a plain bearer token. This needs no separate
+configuration: a swap that scans the `authorization` header (the default) finds the
+placeholder whether it appears in plain text or inside a `Basic` challenge's decoded
+credential, and re-encodes correctly when it swaps it in.
+
+```yaml
+request_transforms:
+  secrets:
+    - name: GIT_TOKEN
+      source: { type: env, var: GIT_TOKEN }
+      proxy_value: "marshal-git-placeholder"
+      require: true
+      rules: [{ host: "github.com" }]
+```
+
+```bash
+git clone https://x-access-token:marshal-git-placeholder@github.com/owner/repo
+```
+
+The agent's git config, npm `.npmrc`, pip index URL, or `docker login` password never holds
+anything but the placeholder; whichever of the two forms the client happens to send is
+recognised without a flag to set, because `Basic <base64>` is a fixed wire format
+([RFC 7617](https://www.rfc-editor.org/rfc/rfc7617)), not something the proxy has to guess at.
 
 ## Response body transforms
 
