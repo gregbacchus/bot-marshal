@@ -130,5 +130,9 @@ publishes prebuilt macOS and Linux archives to GitHub and updates
 `gregbacchus/homebrew-tap`.
 
 The tap repository must exist, and this repository must have a `HOMEBREW_TAP_TOKEN` Actions
-secret with write access to it. To change the generated release workflow, edit
-`dist-workspace.toml` and run `dist generate`; do not edit the workflow directly.
+secret. The token needs Contents and Pull requests write access to this repository, plus
+Contents write access to `gregbacchus/homebrew-tap`. Using this token for the release pull
+request ensures its normal CI workflows run once without separate manual dispatches. To change
+the generated release workflow, edit `dist-workspace.toml` and run `dist generate`; do not edit
+the workflow directly. Pull requests build all configured release targets, while only a merged
+release pull request publishes artifacts and updates the tap.
