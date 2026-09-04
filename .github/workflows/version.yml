@@ -35,7 +35,7 @@ jobs:
           command: release
           version: 0.3.161
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       - name: Dispatch artifact release
         if: steps.release.outputs.releases_created == 'true'
         env:
@@ -56,7 +56,6 @@ jobs:
     if: github.ref == 'refs/heads/main' && needs.release.result == 'success'
     runs-on: ubuntu-latest
     permissions:
-      actions: write
       contents: write
       pull-requests: write
     steps:
@@ -65,21 +64,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - id: release-pr
-        uses: release-plz/action@b5543c19b03be9bd48852d20ca89f478b7723260 # v0.5.132
+      - uses: release-plz/action@b5543c19b03be9bd48852d20ca89f478b7723260 # v0.5.132
         with:
           command: release-pr
           version: 0.3.161
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Pull requests created with GITHUB_TOKEN do not emit another pull_request event.
-      - name: Verify release pull request
-        if: steps.release-pr.outputs.prs_created == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ steps.release-pr.outputs.pr }}
-        run: |
-          set -euo pipefail
-          branch="$(jq -r '.head_branch' <<<"$PR")"
-          gh workflow run ci.yml --ref "$branch"
-          gh workflow run release.yml --ref "$branch" -f tag=dry-run
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
