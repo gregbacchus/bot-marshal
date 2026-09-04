@@ -155,6 +155,7 @@ header.header {
 .sidebar-content a[aria-current='page'] {
   border-radius: 7px;
   background: color-mix(in srgb, var(--sl-color-accent) 15%, transparent);
+  color: var(--sl-color-white);
 }
 .sidebar-content summary,
 .sidebar-content .large {
