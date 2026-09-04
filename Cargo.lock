@@ -1227,7 +1227,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "marshal-audit"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "marshal-core",
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-cli"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-config"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "globset",
  "http",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-dns"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "hickory-resolver",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-http"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "http",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-judge"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-launch"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "marshal-config",
  "marshal-core",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-policy"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-proxy"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-secrets"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-tls"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "marshal-core",
  "moka",

@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.2.0](https://github.com/gregbacchus/bot-marshal/compare/f100e985a57189756f2b14548b0715af0d7ea7ff..v0.2.0) - 2026-09-04
+#### Features
+- allow marshal run to launch under the default profile - ([f100e98](https://github.com/gregbacchus/bot-marshal/commit/f100e985a57189756f2b14548b0715af0d7ea7ff)) - test, Claude Sonnet 5
+#### Documentation
+- clarify marshal run depends on a running marshal serve - ([8932301](https://github.com/gregbacchus/bot-marshal/commit/89323016f59743f393230c2e6ac150487a268d61)) - test, Claude Sonnet 5
+
+- - -
+
 ## [v0.1.2](https://github.com/gregbacchus/bot-marshal/compare/e0be6421e4250c1e9600c251e945a067c3069a15..v0.1.2) - 2026-09-04
 #### Bug Fixes
 - push the prefixed tag, not the bare version, in cog's post-bump hook - ([e0be642](https://github.com/gregbacchus/bot-marshal/commit/e0be6421e4250c1e9600c251e945a067c3069a15)) - test, Claude Sonnet 5
