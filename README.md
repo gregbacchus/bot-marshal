@@ -52,7 +52,8 @@ Then read **[Getting started](docs/getting-started.md)** for the walkthrough, an
 
 ## Documentation
 
-Full documentation lives in **[docs/](docs/)**.
+Full documentation lives in **[docs/](docs/)**, published at
+**<https://gregbacchus.github.io/bot-marshal/>**.
 
 | | |
 |---|---|
@@ -103,6 +104,7 @@ crates/          eleven crates; marshal-core holds the traits and depends on no 
 config/          a fuller example config, with profiles/, bundles/ and transforms/
 examples/docker/ compose: two containers captured with no proxy env vars at all
 docs/            documentation, including architecture decision records
+site/            the published documentation site, built from docs/
 ```
 
 `AGENTS.md` covers working on this codebase.

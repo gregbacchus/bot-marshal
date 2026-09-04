@@ -1,0 +1,242 @@
+/* bot-marshal docs theme.
+   Dark-first, high-contrast, terminal-adjacent: the audience is people who read
+   proxy logs. Accents are a signal colour, not decoration — allow is teal,
+   deny is amber/red, and that mapping holds everywhere on the site. */
+
+:root {
+  --sl-font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --sl-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --bm-allow: #2dd4bf;
+  --bm-deny: #fb7185;
+  --bm-flag: #fbbf24;
+  --bm-grid: rgba(148, 163, 184, 0.14);
+}
+
+/* Dark (default) */
+:root {
+  --sl-color-accent-low: #0b3b38;
+  --sl-color-accent: #14b8a6;
+  --sl-color-accent-high: #99f6e4;
+
+  --sl-color-white: #f8fafc;
+  --sl-color-gray-1: #e6edf6;
+  --sl-color-gray-2: #b6c2d2;
+  --sl-color-gray-3: #7d8a9c;
+  --sl-color-gray-4: #47536a;
+  --sl-color-gray-5: #2a3242;
+  --sl-color-gray-6: #1a2130;
+  --sl-color-black: #0b0f18;
+
+  --sl-color-bg: #0b0f18;
+  --sl-color-bg-nav: rgba(11, 15, 24, 0.72);
+  --sl-color-bg-sidebar: transparent;
+  --sl-color-hairline-shade: rgba(148, 163, 184, 0.12);
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #ccfbf1;
+  --sl-color-accent: #0d9488;
+  --sl-color-accent-high: #115e59;
+
+  --sl-color-white: #0b1220;
+  --sl-color-gray-1: #16202f;
+  --sl-color-gray-2: #37465c;
+  --sl-color-gray-3: #64748b;
+  --sl-color-gray-4: #94a3b8;
+  --sl-color-gray-5: #dbe3ed;
+  --sl-color-gray-6: #f1f5f9;
+  --sl-color-gray-7: #f8fafc;
+  --sl-color-black: #ffffff;
+
+  --sl-color-bg: #ffffff;
+  --sl-color-bg-nav: rgba(255, 255, 255, 0.78);
+  --sl-color-hairline-shade: rgba(15, 23, 42, 0.1);
+  --bm-grid: rgba(15, 23, 42, 0.07);
+}
+
+/* A faint grid behind everything: reads as instrumentation, not wallpaper. */
+body {
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -10%, color-mix(in srgb, var(--sl-color-accent) 16%, transparent), transparent),
+    linear-gradient(var(--bm-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bm-grid) 1px, transparent 1px);
+  background-size: 100% 720px, 56px 56px, 56px 56px;
+  background-repeat: no-repeat, repeat, repeat;
+  -webkit-font-smoothing: antialiased;
+}
+
+header.header {
+  backdrop-filter: blur(12px) saturate(140%);
+  background: var(--sl-color-bg-nav);
+  border-bottom: 1px solid var(--sl-color-hairline-shade);
+}
+
+.site-title {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.site-title::before {
+  content: '';
+  display: inline-block;
+  inline-size: 0.55rem;
+  block-size: 0.55rem;
+  margin-inline-end: 0.55rem;
+  border-radius: 50%;
+  background: var(--bm-allow);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bm-allow) 22%, transparent);
+}
+
+/* Typography ------------------------------------------------------------- */
+
+.sl-markdown-content {
+  --sl-text-h1: 2.6rem;
+  line-height: 1.72;
+}
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3 {
+  letter-spacing: -0.022em;
+}
+.sl-markdown-content h2 {
+  padding-block-end: 0.4rem;
+  border-block-end: 1px solid var(--sl-color-hairline-shade);
+}
+.sl-markdown-content :is(p, li) {
+  text-wrap: pretty;
+}
+.sl-markdown-content a:not(:where(.not-content *)) {
+  text-underline-offset: 0.22em;
+  text-decoration-thickness: 1px;
+}
+
+/* Inline code should read as a token, not as prose. */
+.sl-markdown-content code:not(:where(pre code)) {
+  background: color-mix(in srgb, var(--sl-color-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sl-color-accent) 22%, transparent);
+  border-radius: 5px;
+  padding: 0.1em 0.38em;
+  font-size: 0.875em;
+}
+
+.sl-markdown-content blockquote {
+  border-inline-start: 2px solid var(--sl-color-accent);
+  background: color-mix(in srgb, var(--sl-color-accent) 7%, transparent);
+  border-radius: 0 8px 8px 0;
+  padding: 0.2rem 1rem;
+}
+
+.expressive-code .frame {
+  border-radius: 12px;
+  box-shadow: 0 18px 40px -28px rgba(0, 0, 0, 0.85);
+}
+
+/* Tables: the docs use them for config reference, so they must stay scannable. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.925rem;
+}
+.sl-markdown-content :is(th, td) {
+  border-block-end: 1px solid var(--sl-color-hairline-shade);
+  padding: 0.55rem 0.85rem;
+}
+.sl-markdown-content th {
+  text-align: start;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--sl-color-gray-3);
+}
+
+/* Sidebar ---------------------------------------------------------------- */
+
+.sidebar-content a[aria-current='page'] {
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--sl-color-accent) 15%, transparent);
+}
+.sidebar-content summary,
+.sidebar-content .large {
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--sl-color-gray-3);
+}
+
+/* Splash page ------------------------------------------------------------ */
+
+.hero h1 {
+  font-size: clamp(2.6rem, 7vw, 4.2rem);
+  letter-spacing: -0.035em;
+  background: linear-gradient(120deg, var(--sl-color-white) 30%, var(--bm-allow));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero .tagline {
+  max-width: 44ch;
+  font-size: 1.1rem;
+  color: var(--sl-color-gray-2);
+}
+
+.bm-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-block-end: 1.1rem;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--sl-color-accent) 35%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sl-color-accent) 10%, transparent);
+  font-family: var(--sl-font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sl-color-accent-high);
+}
+
+/* The request-path strip: capture -> identity -> policy -> transform -> upstream */
+.bm-flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+  margin: 2.5rem 0 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--sl-color-hairline-shade);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--sl-color-gray-6) 60%, transparent);
+  font-family: var(--sl-font-mono);
+  font-size: 0.8rem;
+}
+.bm-flow span {
+  padding: 0.3rem 0.6rem;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--sl-color-accent) 12%, transparent);
+  color: var(--sl-color-gray-1);
+  white-space: nowrap;
+}
+.bm-flow i {
+  color: var(--sl-color-gray-4);
+  font-style: normal;
+}
+.bm-flow span.deny {
+  background: color-mix(in srgb, var(--bm-deny) 16%, transparent);
+  color: var(--bm-deny);
+}
+
+.card-grid .card {
+  border-radius: 14px;
+  border: 1px solid var(--sl-color-hairline-shade);
+  background: color-mix(in srgb, var(--sl-color-gray-6) 55%, transparent);
+  transition: border-color 0.18s ease, transform 0.18s ease;
+}
+.card-grid .card:hover {
+  border-color: color-mix(in srgb, var(--sl-color-accent) 45%, transparent);
+  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
