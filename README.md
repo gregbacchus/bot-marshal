@@ -123,24 +123,27 @@ cargo build --release
 alias marshal=./target/release/marshal
 ```
 
-Merges to `main` with a release-worthy Conventional Commit create or update a release pull
-request. Merging that pull request updates the workspace version and changelog, creates the
-version tag, and dispatches [the release workflow](.github/workflows/release.yml). The workflow
-publishes prebuilt macOS and Linux archives to GitHub and updates
-`gregbacchus/homebrew-tap`.
+Merges to `main` with a release-worthy Conventional Commit ([`fix:`/`feat:`/a breaking `!`](AGENTS.md))
+are bumped, tagged, and released automatically by [the version workflow](.github/workflows/version.yml):
+[cocogitto](https://github.com/cocogitto/cocogitto) computes the next version from commit history,
+updates `CHANGELOG.md` and the workspace version, commits and tags directly on `main` — no bot pull
+request, so there's nothing to review or approve before it runs — and dispatches
+[the release workflow](.github/workflows/release.yml), which publishes prebuilt macOS and Linux
+archives to GitHub and updates `gregbacchus/homebrew-tap`.
+
+Cocogitto only reads git history and edits text; unlike release-plz, it never runs `cargo package`,
+so it doesn't need every internal crate to carry a crates.io-resolvable version — the reason this
+project moved off release-plz. See `cog.toml` for the version-bump hooks and [`docs/adr/`](docs/adr/)
+if this decision needs revisiting.
 
 The tap repository must exist, and this repository needs two fine-grained personal access token
 Actions secrets:
 
-* `RELEASE_PLZ_TOKEN`: Contents and Pull requests write access to this repository. Without it,
-  release-plz falls back to `GITHUB_TOKEN`, and GitHub requires approval before running checks on
-  the generated release pull request.
+* `RELEASE_PLZ_TOKEN`: Contents write access to this repository, so the version workflow can push
+  the bump commit and tag directly to `main`. Without it, it falls back to `GITHUB_TOKEN`, whose
+  pushes don't trigger other workflows — including the tag-triggered release build.
 * `HOMEBREW_TAP_TOKEN`: Contents write access to `gregbacchus/homebrew-tap`.
 
 Keeping these tokens separate limits each one to a single repository. To change the generated
-release workflow, edit `dist-workspace.toml` and run `dist generate`. The workflow carries one
-deliberate hand-edit, marked as such: the `plan` job skips pull requests from a `release-plz-*`
-branch, because that tree is identical to the tag build that follows minutes later, and every
-artifact build is four targets. `dist generate` overwrites it, so re-apply it after a dist
-upgrade. Ordinary pull requests build all configured release targets, while only a merged
-release pull request publishes artifacts and updates the tap.
+release workflow, edit `dist-workspace.toml` and run `dist generate`. Pull requests build all
+configured release targets, while only a pushed tag publishes artifacts and updates the tap.

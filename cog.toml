@@ -1,0 +1,26 @@
+from_latest_tag = true
+ignore_merge_commits = true
+tag_prefix = "v"
+skip_ci = "[skip ci]"
+
+# Only marshal-cli is released — see AGENTS.md's Conventions section for what each commit
+# type requests. `sed` edits `[workspace.package] version`, the single source every crate
+# inherits via `version.workspace = true`; `cargo check` then refreshes Cargo.lock so the
+# eleven library crates' recorded versions move with it. No crate is published (see
+# Cargo.toml), so this never needs a real registry, unlike release-plz's `cargo package`
+# based approach, which does — that mismatch is why this project uses cocogitto instead.
+pre_bump_hooks = [
+  "sed -i 's/^version = \"[^\"]*\"/version = \"{{version}}\"/' Cargo.toml",
+  "cargo check --workspace --quiet",
+]
+post_bump_hooks = [
+  "git push",
+  "git push origin {{version}}",
+]
+
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "github.com"
+repository = "bot-marshal"
+owner = "gregbacchus"
