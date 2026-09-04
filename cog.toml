@@ -15,7 +15,11 @@ pre_bump_hooks = [
 ]
 post_bump_hooks = [
   "git push",
-  "git push origin {{version}}",
+  # `{{version}}` is always the bare semver, never the `tag_prefix`-ed tag name — cocogitto's
+  # own docs example uses this same bare form and is wrong for any project with a
+  # `tag_prefix` set. Confirmed the hard way: this pushed the commit but not the tag, and
+  # `version.yml`'s tag-dispatch step never ran because the tag genuinely wasn't on origin.
+  "git push origin v{{version}}",
 ]
 
 [changelog]
