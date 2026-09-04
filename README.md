@@ -138,6 +138,9 @@ Actions secrets:
 * `HOMEBREW_TAP_TOKEN`: Contents write access to `gregbacchus/homebrew-tap`.
 
 Keeping these tokens separate limits each one to a single repository. To change the generated
-release workflow, edit `dist-workspace.toml` and run `dist generate`; do not edit the workflow
-directly. Pull requests build all configured release targets, while only a merged release pull
-request publishes artifacts and updates the tap.
+release workflow, edit `dist-workspace.toml` and run `dist generate`. The workflow carries one
+deliberate hand-edit, marked as such: the `plan` job skips pull requests from a `release-plz-*`
+branch, because that tree is identical to the tag build that follows minutes later, and every
+artifact build is four targets. `dist generate` overwrites it, so re-apply it after a dist
+upgrade. Ordinary pull requests build all configured release targets, while only a merged
+release pull request publishes artifacts and updates the tap.
