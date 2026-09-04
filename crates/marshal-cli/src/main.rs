@@ -203,13 +203,13 @@ enum OauthCommand {
 
         /// Bootstrap, running the command itself in a network sandbox.
         ///
-        /// As `--wait`, but marshal launches the command with no route out except its own
-        /// proxy, so the exchange cannot avoid being seen.
+        /// As `--wait`, but marshal launches the command itself, with no route out except its
+        /// own proxy, so the exchange cannot avoid being seen.
         ///
-        /// Collects arguments until the next flag, so marshal's own options can follow it. A
-        /// command that needs its own flags wants a shell: `--run sh -c "some-cli login --x"`.
-        #[arg(long, num_args = 1.., conflicts_with = "wait")]
-        run: Vec<String>,
+        /// The command follows `--`, and everything after it is passed through verbatim —
+        /// including the command's own flags.
+        #[arg(long, conflicts_with = "wait")]
+        run: bool,
 
         /// What bootstrap does with the exchange it captures.
         #[arg(long, default_value = "observe")]
@@ -224,6 +224,10 @@ enum OauthCommand {
         /// routing around the proxy; the others identify without enforcing.
         #[arg(long, default_value = "netns")]
         isolation: String,
+
+        /// The command `--run` launches. Everything after `--` reaches it untouched.
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
     },
     /// Show which OAuth2 credentials are enrolled, and since when.
     Status {
@@ -1524,11 +1528,24 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
             Ok(())
         }
 
-        OauthCommand::Login { name, open, timeout, wait, run, mode, host, isolation } => {
+        OauthCommand::Login { name, open, timeout, wait, run, mode, host, isolation, command } => {
+            anyhow::ensure!(
+                run || command.is_empty(),
+                "`{}` was given as a command but there is no `--run` to launch it. Did you mean \
+                 `marshal secrets oauth login {name} --run -- {}`?",
+                command.join(" "),
+                command.join(" ")
+            );
+            anyhow::ensure!(
+                !run || !command.is_empty(),
+                "`--run` needs a command to launch: \
+                 `marshal secrets oauth login {name} --run -- <cmd> [args...]`"
+            );
+
             // The bootstrap path forks here, before any swap lookup: it runs precisely when no
             // swap is configured for this credential yet, so `name` is a storage key rather
             // than a reference to anything.
-            if wait || !run.is_empty() {
+            if wait || run {
                 anyhow::ensure!(
                     deps.store.persists(),
                     "bootstrapping `{name}` needs a top-level `state_dir` to keep the captured \
@@ -1542,7 +1559,7 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
                     },
                     host,
                     timeout,
-                    run,
+                    run: command,
                     isolation,
                 };
                 return bootstrap_capture(config_path, &cfg, &deps, opts).await;

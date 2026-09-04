@@ -2,3 +2,6 @@
 *.pem
 *.key
 *.crt
+
+# Python bytecode from scripts/
+__pycache__/

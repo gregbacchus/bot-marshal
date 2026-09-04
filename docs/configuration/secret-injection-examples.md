@@ -183,12 +183,12 @@ discovered, ready to paste into a profile for unattended use.
 Or let marshal launch it, confined so its egress cannot avoid the proxy:
 
 ```bash
-marshal secrets oauth login CLAUDE_SUBSCRIPTION --run claude login
+marshal secrets oauth login CLAUDE_SUBSCRIPTION --run -- claude login
 ```
 
 The browser never needs to be proxied — only Claude Code's own network calls, which is where
 the exchange happens. See
-[`marshal secrets oauth login --wait`](../cli.md#marshal-secrets-oauth-login-name---wait----run-cmd)
+[`marshal secrets oauth login --wait`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd)
 for `--mode`, `--isolation`, and the rest.
 
 Once enrolled, the permanent swap uses the values it reported:
@@ -225,7 +225,7 @@ hunting for them:
 
 ```bash
 marshal secrets oauth login CODEX_SUBSCRIPTION --wait
-# or: marshal secrets oauth login CODEX_SUBSCRIPTION --run codex login
+# or: marshal secrets oauth login CODEX_SUBSCRIPTION --run -- codex login
 ```
 
 ---

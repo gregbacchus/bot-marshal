@@ -29,7 +29,7 @@ namespace — does control. And it carries everything worth knowing: `code`, `co
 
 ## Decision
 
-A second capture mechanism, `marshal secrets oauth login <name> --wait` / `--run <cmd>`, which
+A second capture mechanism, `marshal secrets oauth login <name> --wait` / `--run -- <cmd>`, which
 intercepts the token exchange and nothing else. It requires no configuration for the credential
 at all: `<name>` is a storage key, not a reference to a swap, because bootstrap runs precisely
 when no swap exists yet. It reports the configuration it discovered so the operator can write

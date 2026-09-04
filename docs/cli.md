@@ -84,7 +84,7 @@ Two things that commonly go wrong the first time, and what they look like:
   address itself; a redirect anywhere else hands the authorization code to something that is
   not marshal, which is the one thing the flow exists to prevent.
 
-### `marshal secrets oauth login <name> --wait` / `--run <cmd>`
+### `marshal secrets oauth login <name> --wait` / `--run -- <cmd>`
 
 Bootstrap a credential whose OAuth application you do **not** control — a vendor's own CLI
 subscription login, where the `client_id` and endpoints belong to them and are not published.
@@ -104,10 +104,11 @@ login, and log in as you normally would. The browser never has to be proxied —
 own network calls, which is where the exchange happens.
 
 ```bash
-marshal secrets oauth login CLAUDE_SUBSCRIPTION --run some-vendor-cli login
+marshal secrets oauth login CLAUDE_SUBSCRIPTION --run -- some-vendor-cli login
 ```
 
 does the same but launches the command itself, confined so its egress cannot avoid the proxy.
+Everything after `--` reaches the command untouched, its own flags included.
 `--isolation` takes the same values as [`marshal run`](#marshal-run---profile-name---isolation-netnscgroupnone---proxy-url---bind-path---dry-run----command)
 and has the same prerequisites — `netns` is the only one that actually prevents the command
 routing around the proxy.
