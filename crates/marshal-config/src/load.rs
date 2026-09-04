@@ -1,8 +1,9 @@
 //! Loading: a base file with a mandatory embedded `profile:` (the fallback for unattributed
 //! traffic — unnamed, and not referenceable from anywhere), plus, by convention, one *named*
 //! profile per file under `profiles_path` (default `profiles/`), one bundle per file under
-//! `bundles_path` (default `bundles/`), and one transform bundle per file under
-//! `transforms_path` (default `transforms/`) — each resolved relative to the base file.
+//! `bundles_path` (default `bundles/`), one bind group per file under `bind_groups_path`
+//! (default `bind-groups/`), and one transform bundle per file under `transforms_path` (default
+//! `transforms/`) — each resolved relative to the base file.
 //!
 //! This is deliberately a fixed convention rather than an arbitrary `include:` glob of full
 //! config documents: a file under `profiles_path` can only ever be a profile — its schema has
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 
 use crate::layer::HostSet;
-use crate::model::{Config, Profile, TransformBundle};
+use crate::model::{BindGroup, Config, Profile, TransformBundle};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -42,6 +43,12 @@ pub enum LoadError {
          only one place"
     )]
     DuplicateBundle { name: String, path: PathBuf },
+
+    #[error(
+        "bind group `{name}` is defined both in {path} and inline in the base config — name \
+         it in only one place"
+    )]
+    DuplicateBindGroup { name: String, path: PathBuf },
 }
 
 /// Load a config file: its mandatory embedded `profile:`, plus every named profile under
@@ -61,6 +68,13 @@ pub fn load(path: impl AsRef<Path>) -> Result<Config, LoadError> {
     for (name, path, bundle) in load_dir::<HostSet>(&bundles_dir)? {
         if cfg.bundles.insert(name.clone(), bundle).is_some() {
             return Err(LoadError::DuplicateBundle { name, path });
+        }
+    }
+
+    let bind_groups_dir = resolve_dir(dir, &cfg.bind_groups_path);
+    for (name, path, group) in load_dir::<BindGroup>(&bind_groups_dir)? {
+        if cfg.bind_groups.insert(name.clone(), group).is_some() {
+            return Err(LoadError::DuplicateBindGroup { name, path });
         }
     }
 
@@ -208,6 +222,29 @@ mod tests {
 
         let cfg = load(dir.0.join("config.yaml")).unwrap();
         assert_eq!(cfg.bundles["github"].domains, vec!["github.com".to_string()]);
+    }
+
+    #[test]
+    fn one_bind_group_per_file_is_keyed_by_filename() {
+        let dir = TempDir::new("bind-groups-ok");
+        dir.write("config.yaml", BASE);
+        dir.write("bind-groups/claude.yaml", "paths: [\"~/.local/bin\"]\n");
+
+        let cfg = load(dir.0.join("config.yaml")).unwrap();
+        assert_eq!(cfg.bind_groups["claude"].paths, vec!["~/.local/bin".to_string()]);
+    }
+
+    #[test]
+    fn a_bind_group_defined_both_inline_and_as_a_file_is_a_load_error() {
+        let dir = TempDir::new("bind-groups-duplicate");
+        dir.write(
+            "config.yaml",
+            "tls: {}\nprofile:\n  default_action: deny\nbind_groups:\n  claude:\n    paths: [\"/x\"]\n",
+        );
+        dir.write("bind-groups/claude.yaml", "paths: [\"~/.local/bin\"]\n");
+
+        let err = load(dir.0.join("config.yaml")).unwrap_err();
+        assert!(matches!(err, LoadError::DuplicateBindGroup { name, .. } if name == "claude"));
     }
 
     #[test]

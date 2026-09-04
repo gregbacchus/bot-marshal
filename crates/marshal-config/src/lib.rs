@@ -14,6 +14,7 @@ pub mod validate;
 pub use env_file::EnvFileError;
 pub use load::{LoadError, load, resolve_dir};
 pub use model::{
-    BodyTransform, Config, EnvFileSetting, Profile, RequestTransforms, ResponseTransforms,
+    BindGroup, BodyTransform, Config, EnvFileSetting, Profile, RequestTransforms,
+    ResponseTransforms, Sandbox,
 };
 pub use validate::{Diagnostic, Severity, validate};

@@ -333,6 +333,17 @@ fn check_profile(
         }
     }
 
+    // Bind group references must resolve, same as bundle references above.
+    for b in &profile.sandbox.bind_groups {
+        if !cfg.bind_groups.contains_key(b) {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{at}.sandbox.bind_groups"),
+                message: format!("references unknown bind group `{b}`"),
+            });
+        }
+    }
+
     if let Some(name) = &profile.transforms {
         let has_inline_request = profile.request_transforms.headers.is_some()
             || !profile.request_transforms.set_headers.is_empty()
@@ -618,5 +629,22 @@ response_transforms:
                 .iter()
                 .any(|d| d.severity == Severity::Error && d.location == "profiles.p.transforms")
         );
+    }
+
+    #[test]
+    fn a_profile_referencing_an_unknown_bind_group_is_an_error() {
+        let cfg = cfg_with(Profile {
+            sandbox: crate::model::Sandbox {
+                bind_groups: vec!["nope".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let diagnostics = validate(&cfg);
+        assert!(diagnostics.iter().any(|d| {
+            d.severity == Severity::Error
+                && d.location == "profiles.p.sandbox.bind_groups"
+                && d.message.contains("nope")
+        }));
     }
 }

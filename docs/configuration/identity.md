@@ -234,6 +234,12 @@ agent genuinely needs one. **This is an egress firewall, not a general-purpose s
 the workspace itself is fully read-write, and nothing here defends against what the agent does
 with the files it can already reach.
 
+There is no `$HOME` bind, and the agent command itself is not exempt: a tool installed
+somewhere user-local (`~/.local/bin`, a version manager, `npm -g`, `cargo install`, …) needs
+`--bind` for its own path too, or `netns` isolation cannot find it — see [CLI › `marshal
+run`](../cli.md#marshal-run---profile-name---isolation-netnscgroupnone---proxy-url---bind-path---bind-group-name---dry-run----command)
+for the symlink caveat that usually makes one `--bind` insufficient.
+
 ```bash
 marshal run --profile coding-agent --isolation cgroup -- claude   # identify only
 marshal run --profile coding-agent --isolation none   -- claude   # env vars only

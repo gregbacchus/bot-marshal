@@ -117,6 +117,12 @@ enum Command {
         #[arg(long = "bind")]
         binds: Vec<PathBuf>,
 
+        /// A named bind group (`bind_groups`/`bind_groups_path` in the config) to bind
+        /// read-write, on top of whatever the profile's own `sandbox.bind_groups` already
+        /// names. Repeatable. Ignored by every isolation mode but `netns`.
+        #[arg(long = "bind-group")]
+        bind_groups: Vec<String>,
+
         /// Print the command and environment instead of running anything.
         #[arg(long)]
         dry_run: bool,
@@ -359,15 +365,17 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Run { profile, isolation, proxy, binds, dry_run, command } => run_command(
-            &config_path,
-            profile.as_deref(),
-            &isolation,
-            &proxy,
-            &binds,
-            dry_run,
-            &command,
-        ),
+        Command::Run { profile, isolation, proxy, binds, bind_groups, dry_run, command } => {
+            run_command(
+                &config_path,
+                profile.as_deref(),
+                &isolation,
+                &proxy,
+                RunBinds { binds: &binds, bind_groups: &bind_groups },
+                dry_run,
+                &command,
+            )
+        }
         Command::Sandbox { socket, listen, ca, command } => {
             let listen = match listen.parse() {
                 Ok(a) => a,
@@ -911,15 +919,22 @@ fn build_identities(
 }
 
 /// `marshal run`: launch an agent under a profile.
+/// `--bind`/`--bind-group`, grouped so `run_command` stays under clippy's argument-count limit.
+struct RunBinds<'a> {
+    binds: &'a [PathBuf],
+    bind_groups: &'a [String],
+}
+
 fn run_command(
     config_path: &std::path::Path,
     profile: Option<&str>,
     isolation: &str,
     proxy: &str,
-    binds: &[PathBuf],
+    run_binds: RunBinds<'_>,
     dry_run: bool,
     command: &[String],
 ) -> ExitCode {
+    let RunBinds { binds, bind_groups: bind_group_names } = run_binds;
     let isolation: marshal_launch::Isolation = match isolation.parse() {
         Ok(i) => i,
         Err(e) => {
@@ -994,6 +1009,35 @@ fn run_command(
         .and_then(|e| e.unix_socket.as_ref())
         .map(|p| expand_tilde(p));
 
+    // The profile's own `sandbox.bind_groups`/`extra_binds` apply even when `--bind`/
+    // `--bind-group` weren't passed on the command line — that's the whole point of naming
+    // them on the profile instead of retyping `--bind` for every launch (ADR-0036).
+    let sandbox = match profile {
+        Some(name) => &cfg.profiles[name].sandbox,
+        None => &cfg.profile.sandbox,
+    };
+    let mut group_names: Vec<&str> = sandbox.bind_groups.iter().map(String::as_str).collect();
+    for name in bind_group_names {
+        if !group_names.contains(&name.as_str()) {
+            group_names.push(name);
+        }
+    }
+
+    let mut resolved_binds: Vec<PathBuf> = Vec::new();
+    for name in &group_names {
+        let Some(group) = cfg.bind_groups.get(*name) else {
+            eprintln!(
+                "error: unknown bind group `{name}`; {} is configured with: {}",
+                config_path.display(),
+                cfg.bind_groups.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+            return ExitCode::FAILURE;
+        };
+        resolved_binds.extend(group.paths.iter().map(|p| expand_tilde(p)));
+    }
+    resolved_binds.extend(sandbox.extra_binds.iter().map(|p| expand_tilde(p)));
+    resolved_binds.extend(binds.iter().cloned());
+
     let id = std::process::id();
     let mut cmd = match marshal_launch::build_command_with(
         isolation,
@@ -1002,7 +1046,7 @@ fn run_command(
         &endpoint,
         command,
         unix_socket.as_deref(),
-        binds,
+        &resolved_binds,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -1014,6 +1058,16 @@ fn run_command(
     if dry_run {
         println!("isolation: {isolation:?}");
         println!("scope:     {}", marshal_launch::scope_name(profile, id));
+        if !resolved_binds.is_empty() {
+            println!(
+                "binds:     {}",
+                resolved_binds
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         println!(
             "command:   {} {:?}",
             cmd.get_program().to_string_lossy(),
@@ -1338,10 +1392,11 @@ fn config_check(path: &std::path::Path, env_file: Option<&AppliedEnv>) -> ExitCo
     println!(
         // +1 for the embedded `profile:`, always present but not part of `cfg.profiles` —
         // that map is exclusively the *named* ones under `profiles_path`.
-        "{} ok: {} profile(s), {} bundle(s), {warnings} warning(s)",
+        "{} ok: {} profile(s), {} bundle(s), {} bind group(s), {warnings} warning(s)",
         path.display(),
         cfg.profiles.len() + 1,
-        cfg.bundles.len()
+        cfg.bundles.len(),
+        cfg.bind_groups.len()
     );
     // The env file was already read and applied before this command ran — its syntax errors
     // and a missing named file have therefore already failed the check. Report what it

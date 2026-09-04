@@ -1,0 +1,6 @@
+# Illustrative only — paths for a hypothetical user-local install. Verify with
+# `which <tool>` / `readlink -f "$(which <tool>)"` before pointing this at a real one; install
+# layouts differ enough between package managers and version managers that no default is safe
+# to ship as a real binding.
+paths:
+  - "~/.local/bin"

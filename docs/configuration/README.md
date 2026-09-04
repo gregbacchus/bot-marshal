@@ -6,6 +6,7 @@ every restart.
 * [Profiles](profiles.md) — the unit of policy; embedded vs named, warn mode.
 * [Policy layers](policy-layers.md) — `denylist`, `allowlist`, `rules`, `dlp`, `mcp`, `judge`.
 * [Bundles](bundles.md) — named, reusable allow-lists.
+* [Bind groups](bind-groups.md) — named, reusable `--isolation netns` bind paths.
 * [Transforms](transforms.md) — header setting/filtering, secret injection, response rewriting.
 * [Secret injection examples](secret-injection-examples.md) — worked configs for OpenAI, Anthropic, OpenRouter, Claude Code, Codex, GitHub, and others.
 * [Identity](identity.md) — which agent is connecting, and `marshal run`.
@@ -83,7 +84,8 @@ identities:                # see Identity
 
 The base config has exactly one embedded profile, `profile:` — the fallback applied to traffic
 nobody could attribute. Every *named* profile lives one-per-file under a `profiles/` directory
-next to the config file, and the same convention holds for `bundles/` and `transforms/`:
+next to the config file, and the same convention holds for `bundles/`, `bind-groups/` and
+`transforms/`:
 
 ```
 /etc/bot-marshal/
@@ -94,6 +96,8 @@ next to the config file, and the same convention holds for `bundles/` and `trans
 ├── bundles/
 │   ├── github.yaml
 │   └── npm.yaml
+├── bind-groups/
+│   └── claude.yaml
 └── transforms/
     └── default-headers.yaml
 ```
@@ -105,18 +109,19 @@ a parse error, not a silent no-op.
 
 ### Relocating the directories
 
-`profiles_path` / `bundles_path` / `transforms_path` rename or relocate any of the three, if
-the default name next to the config file doesn't fit — a bundle set shared outside this
-config's own tree, for instance:
+`profiles_path` / `bundles_path` / `bind_groups_path` / `transforms_path` rename or relocate
+any of the four, if the default name next to the config file doesn't fit — a bundle set shared
+outside this config's own tree, for instance:
 
 ```yaml
 profiles_path: "agent-profiles"                         # relative to this file, like the default
 bundles_path: "~/.config/bot-marshal/shared-bundles"    # ~/ expands against $HOME
+bind_groups_path: "~/.config/bot-marshal/shared-binds"  # ~/ expands against $HOME
 ```
 
 Relocating a directory doesn't loosen anything: a file found there is still deserialised as
-nothing but a profile, bundle, or transform bundle, so the same structural guarantees apply
-regardless of where the path points.
+nothing but a profile, bundle, bind group, or transform bundle, so the same structural
+guarantees apply regardless of where the path points.
 
 ## The env file
 

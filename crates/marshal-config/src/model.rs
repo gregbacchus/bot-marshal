@@ -39,6 +39,13 @@ pub struct Config {
     /// Directory scanned for one bundle per file. Same resolution rules as `profiles_path`.
     #[serde(default = "default_bundles_path")]
     pub bundles_path: String,
+    /// Named path lists importable by a profile's `sandbox.bind_groups`, resolved by
+    /// `marshal run --isolation netns` into `--bind` entries. See [`BindGroup`].
+    #[serde(default)]
+    pub bind_groups: BTreeMap<String, BindGroup>,
+    /// Directory scanned for one bind group per file. Same resolution rules as `profiles_path`.
+    #[serde(default = "default_bind_groups_path")]
+    pub bind_groups_path: String,
     /// Every named transform bundle found under `transforms_path` — see [`Profile::transforms`].
     #[serde(skip)]
     pub transforms: BTreeMap<String, TransformBundle>,
@@ -85,6 +92,25 @@ fn default_profiles_path() -> String {
 
 fn default_bundles_path() -> String {
     "bundles".to_owned()
+}
+
+fn default_bind_groups_path() -> String {
+    "bind-groups".to_owned()
+}
+
+/// A named, reusable list of filesystem paths a profile can pull into `--isolation netns`'s
+/// bind allowlist by name (`sandbox.bind_groups`), instead of every profile that launches the
+/// same tool repeating its install paths. Sugar over `marshal run --bind`, not a new
+/// capability: every path still ends up read-write inside the namespace exactly as if it had
+/// been passed with `--bind` directly (see ADR-0024, ADR-0036).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindGroup {
+    /// Absolute, or `~/`-prefixed to expand against `$HOME` at launch time — resolution
+    /// happens in `marshal-cli`, not here, since it depends on the invoking user's `$HOME`
+    /// rather than anything fixed at config-load time.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 fn default_transforms_path() -> String {
@@ -267,6 +293,25 @@ pub struct Profile {
     /// Applied on the way back to the agent. Ignored if `transforms` is set.
     #[serde(default)]
     pub response_transforms: ResponseTransforms,
+    /// Extra paths `marshal run --isolation netns` binds into the namespace for an agent
+    /// launched under this profile, beyond the workspace and the fixed system directories.
+    /// Ignored by `--isolation cgroup`/`none`, which have no bind allowlist to extend.
+    #[serde(default)]
+    pub sandbox: Sandbox,
+}
+
+/// Filesystem access `marshal run --isolation netns` grants an agent beyond the fixed
+/// allowlist ([`crate::model::Config::bind_groups`] docs, and ADR-0024/ADR-0036) — read-write,
+/// same as `--bind` on the command line, since both end up as the same bwrap `--bind` argument.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sandbox {
+    /// Names of imported bind groups, e.g. `claude`, `node`.
+    #[serde(default)]
+    pub bind_groups: Vec<String>,
+    /// Paths specific to this profile, not worth naming and sharing via a bind group.
+    #[serde(default)]
+    pub extra_binds: Vec<String>,
 }
 
 /// Whether a profile enforces its policy or only reports on it.

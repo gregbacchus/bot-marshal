@@ -109,7 +109,7 @@ marshal secrets oauth login CLAUDE_SUBSCRIPTION --run -- some-vendor-cli login
 
 does the same but launches the command itself, confined so its egress cannot avoid the proxy.
 Everything after `--` reaches the command untouched, its own flags included.
-`--isolation` takes the same values as [`marshal run`](#marshal-run---profile-name---isolation-netnscgroupnone---proxy-url---bind-path---dry-run----command)
+`--isolation` takes the same values as [`marshal run`](#marshal-run---profile-name---isolation-netnscgroupnone---proxy-url---bind-path---bind-group-name---dry-run----command)
 and has the same prerequisites — `netns` is the only one that actually prevents the command
 routing around the proxy.
 
@@ -188,7 +188,7 @@ this flag only changes which one catches traffic nothing could attribute.
 one-line summary — in append mode, created if missing. See
 [Observability](observability.md#the-audit-log).
 
-## `marshal run --profile <name> [--isolation netns|cgroup|none] [--proxy <url>] [--bind <path>] [--dry-run] -- <command...>`
+## `marshal run --profile <name> [--isolation netns|cgroup|none] [--proxy <url>] [--bind <path>] [--bind-group <name>] [--dry-run] -- <command...>`
 
 Launches an agent under a profile. See
 [Identity › Launching an agent](configuration/identity.md#launching-an-agent) for what each
@@ -208,7 +208,13 @@ nothing is listening on.
 | `--isolation` | `netns` | `netns` enforces, `cgroup` identifies, `none` sets env vars only |
 | `--proxy <url>` | `http://127.0.0.1:8080` | the address the agent is told to use |
 | `--bind <path>` | none, repeatable | extra path bound read-write inside `--isolation netns`; ignored by other modes |
+| `--bind-group <name>` | none, repeatable | a named [bind group](configuration/bind-groups.md) bound the same way as `--bind`; ignored by other modes |
 | `--dry-run` | off | print the command, environment and sandbox wiring; run nothing |
+
+`--bind`/`--bind-group` on the command line add to, never replace, whatever the profile's own
+`sandbox.bind_groups`/`sandbox.extra_binds` already names — see [Bind
+groups](configuration/bind-groups.md) for defining those once instead of retyping `--bind` on
+every invocation that launches the same tool.
 
 `--proxy` is **not** read from the config file, so it must match whatever `serve` is actually
 listening on. The default matches `serve`'s own default.
@@ -239,10 +245,32 @@ marshal run --profile coding-agent --bind ~/.cache/uv -- uv sync
 ```
 
 ```bash
-marshal run --profile coding-agent -- claude
 marshal run --profile llm-agent --isolation cgroup -- python agent.py
 marshal run -- claude   # no --profile: the embedded profile applies, unattributed-style
 ```
+
+**The agent binary itself is not exempt.** If `<command...>` is installed anywhere outside the
+workspace and `READONLY_SYSTEM_DIRS` (`/usr /etc /bin /sbin /lib /lib64`) — which covers most
+user-local installs: `~/.local/bin`, a Node/Python version manager, `npm -g`, `cargo install`,
+etc. — `--isolation netns` cannot find it at all and fails with `No such file or directory`.
+There is no `$HOME` bind by default. Two things commonly need binding, not just one: the
+directory the command is *invoked from* (wherever it is on `$PATH`) and, if that's a symlink,
+wherever it actually resolves to — `bwrap` does not follow symlinks when deciding what to bind,
+so binding only the symlink's directory still leaves the real file unreachable:
+
+```bash
+which claude                   # /home/you/.local/bin/claude
+readlink -f "$(which claude)"  # /home/you/.local/share/claude/versions/2.1.220
+marshal run --profile coding-agent \
+  --bind ~/.local/bin --bind ~/.local/share/claude -- claude
+```
+
+`--dry-run` now prints the resolved `binds:` line precisely so this is diagnosable — if a bare
+`marshal run --profile coding-agent -- claude` fails to find the binary, add `--dry-run` and
+check whether the command's real path (after resolving symlinks) is in that list. Since the
+same two paths are needed every time this agent launches, [naming them as a bind
+group](configuration/bind-groups.md) on the profile is usually better than retyping `--bind`
+twice on every invocation.
 
 ## `marshal sandbox`
 

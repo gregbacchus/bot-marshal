@@ -46,6 +46,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0033](0033-the-env-file-is-an-overlay-not-the-environment.md) | The env file is an overlay, not the environment | Accepted |
 | [0034](0034-bootstrap-capture-reads-the-token-exchange.md) | Bootstrap capture reads the token exchange, and trusts the session | Accepted |
 | [0035](0035-release-versioning-uses-cocogitto-not-release-plz.md) | Release versioning uses cocogitto, not release-plz | Accepted |
+| [0036](0036-bind-groups-are-named-and-shared-like-bundles.md) | Bind groups are named and shared, the same way bundles are | Accepted |
 
 ## Writing a new one
 
