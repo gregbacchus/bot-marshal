@@ -26,8 +26,14 @@ audited separately.
 
 ³ Complete: `client_credentials`, `refresh_token`, `jwt_bearer`, `authorization_code` (with
 PKCE) and `device_code`, the last two enrolled via `marshal secrets oauth login`;
-`client_secret_basic`/`_post`, `private_key_jwt` and public clients; and `capture: in_band`,
-which takes over an authorization flow an agent starts.
+`client_secret_basic`/`_post`, `private_key_jwt` and public clients; and two capture
+mechanisms with deliberately different threat models —
+[`capture: in_band`](configuration/transforms.md#in-band-capture), which owns the PKCE verifier
+so an untrusted agent cannot redeem its own code
+([ADR-0032](adr/0032-marshal-owns-the-pkce-verifier.md)), and
+[`oauth login --wait`/`--run`](cli.md#marshal-secrets-oauth-login-name---wait----run----cmd),
+which learns a credential whose OAuth application marshal does not control by observing a real
+login ([ADR-0034](adr/0034-bootstrap-capture-reads-the-token-exchange.md)).
 
 ## Removed
 
@@ -71,6 +77,14 @@ not start end to end as written.
 
 **Rego rules via `regorus`.** The `rules` layer is CEL only. Rego is designed for as an opt-in
 for anyone already running OPA policy.
+
+**A config shape for an already-enrolled credential.** A swap written after
+`oauth login --wait`/`--run` needs only `token_endpoint` and `client_id` to keep minting, but
+`grant: authorization_code` still requires `authorization_endpoint` and `redirect_uri` because
+`config check` cannot know the credential is already enrolled. The fix is a static variant
+alongside `capture: in_band`'s existing exemption — deliberately *not* a runtime check of
+`state_dir`, which would make `config check` pass or fail depending on the machine it runs on
+and break it as a CI gate.
 
 
 

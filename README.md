@@ -9,8 +9,9 @@ need GitHub, npm, PyPI and LLM APIs, and those same hosts are exfiltration chann
 boundary has to understand HTTP, not just IPs.
 
 `bot-marshal` is a single binary that agent traffic is pointed at. It enforces default-deny
-egress with per-request policy, injects real credentials at the boundary so the agent never
-holds them, produces a complete audit trail, and does not break streaming.
+egress with per-request policy, puts real credentials on requests at the boundary — minting
+short-lived OAuth2 tokens itself where that is what the API wants — so the agent never holds
+them, produces a complete audit trail, and does not break streaming.
 
 Conceptually indebted to [iron-proxy](https://github.com/paradigmxyz/iron-proxy); an
 independent Rust implementation rather than a port.
@@ -95,14 +96,19 @@ Full documentation lives in **[docs/](docs/)**, published at
 * **Interception is mandatory.** A plain relay cannot enforce per-request policy, and cannot
   even guarantee the client reaches the host it claimed — see
   [Concepts](docs/concepts.md#why-interception-is-mandatory).
+* **Credentials are obtained at the boundary, not just held there.** For OAuth2 the proxy mints
+  and refreshes tokens itself, so what an agent could steal is a request that already worked,
+  never a credential it can reuse — see
+  [secret injection examples](docs/configuration/secret-injection-examples.md).
 
 ## Repository layout
 
 ```
-crates/          eleven crates; marshal-core holds the traits and depends on no other
+crates/          twelve crates; marshal-core holds the traits and depends on no other
 config/          a fuller example config, with profiles/, bundles/ and transforms/
 examples/docker/ compose: two containers captured with no proxy env vars at all
 docs/            documentation, including architecture decision records
+scripts/         checks CI runs that aren't cargo's
 site/            the published documentation site, built from docs/
 ```
 
