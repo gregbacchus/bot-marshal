@@ -24,8 +24,8 @@ tap = "gregbacchus/homebrew-tap"
 publish-jobs = ["homebrew"]
 # Match the project and tap name rather than the internal Cargo package name.
 formula = "bot-marshal"
-# .github/workflows/release.yml carries one hand-edit dist doesn't know about: the "plan"
-# job skips release-plz's own pull request, since its tree is identical to the tag build
-# that follows minutes later. Without this, `dist plan` refuses to run on any drift from
-# its generated output.
+# release.yml carries hand-edits dist doesn't know about: a pull request builds only
+# x86_64-unknown-linux-gnu instead of every target, and skips the global (checksums/Homebrew
+# formula) step outright, since it needs every target's artifacts to be meaningful and a pull
+# request never publishes anyway. See the comments at each edit's site in release.yml.
 allow-dirty = ["ci"]

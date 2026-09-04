@@ -160,16 +160,22 @@ explicitly in the message: config schema keys, audit JSON fields, management API
 metric names are all public interfaces that something downstream may depend on.
 
 Pull request titles and direct commits to `main` **must use Conventional Commits** because release
-automation uses the resulting commit history to choose the next version. A scope is optional:
+automation ([cocogitto](https://github.com/cocogitto/cocogitto), see [README.md](README.md)) uses
+the resulting commit history to choose the next version. A scope is optional:
 `feat(oauth): add device-code capture` is valid.
 
 * `fix: ...` requests a patch release.
 * `feat: ...` requests a minor release.
-* A type followed by `!`, such as `feat!: ...`, requests a breaking release and must describe the
-  incompatible public-interface change in the body under `BREAKING CHANGE:`. Before `1.0.0` this
-  increments the minor version; from `1.0.0` onward it increments the major version.
-* `docs:`, `test:`, `refactor:`, `chore:`, and `ci:` must be used for changes of those kinds; they
-  do not request a release unless marked as breaking.
+* A `!` after either, such as `feat!: ...` or `fix!: ...`, must describe the incompatible
+  public-interface change in the body under `BREAKING CHANGE:`. Before `1.0.0`, cocogitto never
+  bumps the major version, `!` included — `feat!:` still bumps minor (same as plain `feat:`) and
+  `fix!:` still bumps patch (same as plain `fix:`); the marker documents the break for readers
+  without changing the release math. From `1.0.0` onward, `!` on *any* type — including
+  `docs!:`/`chore!:`/etc. — triggers a major release; the type itself only governs whether a
+  *non-breaking* commit of that type releases at all (see below).
+* `docs:`, `test:`, `refactor:`, `chore:`, and `ci:` must be used for changes of those kinds; none
+  of them requests a release on its own, before or after `1.0.0` — reserve a non-breaking,
+  release-worthy change for a `fix:` or `feat:` commit.
 
 Before squash-merging a pull request, its title must accurately describe the whole change and use
 the correct prefix because the title becomes the commit message on `main`.
