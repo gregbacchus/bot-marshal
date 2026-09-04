@@ -153,10 +153,24 @@ An ADR that lists only benefits is advocacy, not a record. State the cost.
 * For secret handling, grep the entire audit output for the literal secret value and assert
   zero hits.
 
-## Commits
+## Commits and pull requests
 
 Commit at stable, verified points — all four verification commands green. Note breaking changes
 explicitly in the message: config schema keys, audit JSON fields, management API shapes, and
 metric names are all public interfaces that something downstream may depend on.
+
+Pull request titles and direct commits to `main` **must use Conventional Commits** because release
+automation uses the resulting commit history to choose the next version. A scope is optional:
+`feat(oauth): add device-code capture` is valid.
+
+* `fix: ...` requests a patch release.
+* `feat: ...` requests a minor release.
+* A type followed by `!`, such as `feat!: ...`, requests a major release and must describe the
+  incompatible public-interface change in the body under `BREAKING CHANGE:`.
+* `docs:`, `test:`, `refactor:`, `chore:`, and `ci:` must be used for changes of those kinds; they
+  do not request a release unless marked as breaking.
+
+Before squash-merging a pull request, its title must accurately describe the whole change and use
+the correct prefix because the title becomes the commit message on `main`.
 
 Use a `Co-Authored-By:` trailer when an agent authored the change.
