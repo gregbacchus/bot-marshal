@@ -155,6 +155,19 @@ Because cgroups are inherited, the `git`, `npm` and `curl` processes the agent s
 most of its egress actually comes from — are identified too. That gives distinct identities
 for agents running as the *same* uid, which uid alone cannot do.
 
+`--profile` can be omitted:
+
+```bash
+marshal run -- claude
+```
+
+The scope is then named `marshal-<id>.scope`, with no profile segment — a shape the `launched`
+resolver does not recognise, so it declines to match, exactly as it does for any cgroup that
+isn't its naming convention at all. The connection falls through to the ordinary unattributed
+path and gets the embedded `profile:`, same as any other unattributed traffic. Isolation is
+unaffected either way — `netns` still removes the agent's route out regardless of whether it
+ends up identified.
+
 ### `netns` enforces rather than identifies
 
 That is what separates it from every other mode. An unprivileged namespace has loopback and

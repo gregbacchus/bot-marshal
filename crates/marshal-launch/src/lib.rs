@@ -83,9 +83,16 @@ pub struct ProxyEndpoint {
 /// Build the scope name the `launched` resolver reads identity back out of.
 ///
 /// The naming convention *is* the registration: no control socket, and nothing to get out of
-/// sync if the proxy restarts.
-pub fn scope_name(profile: &str, id: u32) -> String {
-    format!("marshal-{profile}-{id}.scope")
+/// sync if the proxy restarts. `profile: None` (no `--profile`) omits the profile segment
+/// entirely, producing a shape (`marshal-<id>.scope`) `parse_scope` does not recognise — the
+/// same "no opinion" outcome as a cgroup naming nothing marshal-related at all, so the
+/// connection falls through to the ordinary unattributed path and gets the embedded `profile:`
+/// exactly as unattributed traffic already does. No sentinel, no reserved name.
+pub fn scope_name(profile: Option<&str>, id: u32) -> String {
+    match profile {
+        Some(profile) => format!("marshal-{profile}-{id}.scope"),
+        None => format!("marshal-{id}.scope"),
+    }
 }
 
 /// Environment an agent needs to route through the proxy and trust its CA.
@@ -135,7 +142,7 @@ pub fn proxy_env(endpoint: &ProxyEndpoint) -> Vec<(String, String)> {
 /// spawning anything.
 pub fn build_command(
     isolation: Isolation,
-    profile: &str,
+    profile: Option<&str>,
     id: u32,
     endpoint: &ProxyEndpoint,
     argv: &[String],
@@ -148,7 +155,7 @@ pub fn build_command(
 /// workspace and the fixed system paths, ignored by every isolation mode but `netns`.
 pub fn build_command_with(
     isolation: Isolation,
-    profile: &str,
+    profile: Option<&str>,
     id: u32,
     endpoint: &ProxyEndpoint,
     argv: &[String],
@@ -228,7 +235,7 @@ const READONLY_SYSTEM_DIRS: &[&str] = &["/usr", "/etc", "/bin", "/sbin", "/lib",
 /// `/dev` because devices are not filesystem access this proxy has any opinion on, `/tmp`
 /// because the host's real one may hold other processes' sockets exactly like `/run` does.
 fn build_netns_command(
-    profile: &str,
+    profile: Option<&str>,
     id: u32,
     endpoint: &ProxyEndpoint,
     argv: &[String],
@@ -381,7 +388,7 @@ mod tests {
 
     #[test]
     fn scope_names_round_trip_through_the_resolver() {
-        let name = scope_name("coding-agent", 4821);
+        let name = scope_name(Some("coding-agent"), 4821);
         assert_eq!(name, "marshal-coding-agent-4821.scope");
         // The launcher and the resolver must agree, or identity silently stops working.
         let (profile, identity) =
@@ -389,6 +396,19 @@ mod tests {
                 .unwrap();
         assert_eq!(profile, "coding-agent");
         assert_eq!(identity, "coding-agent-4821");
+    }
+
+    #[test]
+    fn no_profile_names_a_scope_the_resolver_does_not_recognise() {
+        // `marshal run` with no `--profile` must not register any identity — the connection
+        // is meant to fall through to the same unattributed/default path `marshal serve`
+        // already uses, not conjure up a magic name that means "default".
+        let name = scope_name(None, 4821);
+        assert_eq!(name, "marshal-4821.scope");
+        assert!(
+            marshal_proxy::identity::launched::parse_scope(&format!("0::/user.slice/{name}"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -415,7 +435,7 @@ mod tests {
     fn cgroup_mode_names_the_scope_and_forwards_the_environment() {
         let cmd = build_command(
             Isolation::Cgroup,
-            "coding-agent",
+            Some("coding-agent"),
             7,
             &endpoint(),
             &["claude".to_string(), "--help".to_string()],
@@ -437,7 +457,7 @@ mod tests {
 
         let cmd = build_command_with(
             Isolation::Netns,
-            "coding-agent",
+            Some("coding-agent"),
             7,
             &endpoint(),
             &["claude".to_string()],
@@ -472,7 +492,7 @@ mod tests {
 
         let cmd = build_command_with(
             Isolation::Netns,
-            "p",
+            Some("p"),
             1,
             &endpoint(),
             &["true".to_string()],
@@ -501,7 +521,7 @@ mod tests {
 
         let cmd = build_command_with(
             Isolation::Netns,
-            "p",
+            Some("p"),
             1,
             &endpoint(),
             &["true".to_string()],
@@ -537,7 +557,7 @@ mod tests {
 
         let cmd = build_command_with(
             Isolation::Netns,
-            "p",
+            Some("p"),
             1,
             &endpoint(),
             &["true".to_string()],
@@ -560,7 +580,7 @@ mod tests {
     fn netns_without_a_unix_socket_is_refused_with_the_reason() {
         let err = build_command_with(
             Isolation::Netns,
-            "p",
+            Some("p"),
             1,
             &endpoint(),
             &["true".to_string()],
@@ -580,7 +600,7 @@ mod tests {
     #[test]
     fn an_empty_command_is_an_error() {
         assert!(matches!(
-            build_command(Isolation::None, "p", 1, &endpoint(), &[]),
+            build_command(Isolation::None, Some("p"), 1, &endpoint(), &[]),
             Err(LaunchError::NoCommand)
         ));
     }

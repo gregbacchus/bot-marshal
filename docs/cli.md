@@ -196,7 +196,7 @@ isolation mode actually buys.
 
 | flag | default | |
 |---|---|---|
-| `--profile <name>` | required | a *named* profile, from `profiles/` |
+| `--profile <name>` | none | a *named* profile, from `profiles/`; omit to run under the embedded `profile:` instead — the same one unattributed traffic falls back to |
 | `--isolation` | `netns` | `netns` enforces, `cgroup` identifies, `none` sets env vars only |
 | `--proxy <url>` | `http://127.0.0.1:8080` | the address the agent is told to use |
 | `--bind <path>` | none, repeatable | extra path bound read-write inside `--isolation netns`; ignored by other modes |
@@ -223,6 +223,7 @@ marshal run --profile coding-agent --bind ~/.cache/uv -- uv sync
 ```bash
 marshal run --profile coding-agent -- claude
 marshal run --profile llm-agent --isolation cgroup -- python agent.py
+marshal run -- claude   # no --profile: the embedded profile applies, unattributed-style
 ```
 
 ## `marshal sandbox`

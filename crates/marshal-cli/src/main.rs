@@ -94,9 +94,11 @@ enum Command {
 
     /// Launch an agent so the proxy can identify it.
     Run {
-        /// Profile the agent runs under.
+        /// Profile the agent runs under. Omit to run under the embedded `profile:` — the
+        /// agent is launched and isolated exactly the same, it just isn't tagged with a named
+        /// profile, so it gets the same fallback unattributed traffic already gets.
         #[arg(long)]
-        profile: String,
+        profile: Option<String>,
 
         /// How the agent is isolated:
         /// `netns` (no route out except the proxy — enforces, not just identifies),
@@ -357,9 +359,15 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Run { profile, isolation, proxy, binds, dry_run, command } => {
-            run_command(&config_path, &profile, &isolation, &proxy, &binds, dry_run, &command)
-        }
+        Command::Run { profile, isolation, proxy, binds, dry_run, command } => run_command(
+            &config_path,
+            profile.as_deref(),
+            &isolation,
+            &proxy,
+            &binds,
+            dry_run,
+            &command,
+        ),
         Command::Sandbox { socket, listen, ca, command } => {
             let listen = match listen.parse() {
                 Ok(a) => a,
@@ -905,7 +913,7 @@ fn build_identities(
 /// `marshal run`: launch an agent under a profile.
 fn run_command(
     config_path: &std::path::Path,
-    profile: &str,
+    profile: Option<&str>,
     isolation: &str,
     proxy: &str,
     binds: &[PathBuf],
@@ -927,7 +935,9 @@ fn run_command(
             return ExitCode::FAILURE;
         }
     };
-    if !cfg.profiles.contains_key(profile) {
+    if let Some(profile) = profile
+        && !cfg.profiles.contains_key(profile)
+    {
         eprintln!(
             "error: unknown profile `{profile}`; {} is configured with: {}",
             config_path.display(),
@@ -1827,7 +1837,7 @@ async fn run_sandboxed_bootstrap(
 
     let mut cmd = marshal_launch::build_command_with(
         isolation,
-        "bootstrap",
+        Some("bootstrap"),
         std::process::id(),
         &endpoint,
         &opts.run,
