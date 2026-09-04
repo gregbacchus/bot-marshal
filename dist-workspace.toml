@@ -24,3 +24,8 @@ tap = "gregbacchus/homebrew-tap"
 publish-jobs = ["homebrew"]
 # Match the project and tap name rather than the internal Cargo package name.
 formula = "bot-marshal"
+# release.yml carries hand-edits dist doesn't know about: a pull request builds only
+# x86_64-unknown-linux-gnu instead of every target, and skips the global (checksums/Homebrew
+# formula) step outright, since it needs every target's artifacts to be meaningful and a pull
+# request never publishes anyway. See the comments at each edit's site in release.yml.
+allow-dirty = ["ci"]
