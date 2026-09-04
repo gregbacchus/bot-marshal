@@ -165,8 +165,9 @@ automation uses the resulting commit history to choose the next version. A scope
 
 * `fix: ...` requests a patch release.
 * `feat: ...` requests a minor release.
-* A type followed by `!`, such as `feat!: ...`, requests a major release and must describe the
-  incompatible public-interface change in the body under `BREAKING CHANGE:`.
+* A type followed by `!`, such as `feat!: ...`, requests a breaking release and must describe the
+  incompatible public-interface change in the body under `BREAKING CHANGE:`. Before `1.0.0` this
+  increments the minor version; from `1.0.0` onward it increments the major version.
 * `docs:`, `test:`, `refactor:`, `chore:`, and `ci:` must be used for changes of those kinds; they
   do not request a release unless marked as breaking.
 

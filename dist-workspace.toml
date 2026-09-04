@@ -9,6 +9,8 @@ cargo-dist-version = "0.32.0"
 packages = ["marshal-cli"]
 # CI backends to support
 ci = "github"
+# Releases are dispatched by release-plz after it creates the version tag.
+dispatch-releases = true
 # The installers to generate for each app
 installers = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
