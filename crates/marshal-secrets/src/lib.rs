@@ -5,8 +5,9 @@ pub mod source;
 pub mod swap;
 
 pub use oauth::{
-    Algorithm, AssertionKey, AuthCodeFlow, ClientAuth, DeviceAuthorization, DevicePoll, Enrolled,
-    Grant, Oauth2Broker, Oauth2Config, Oauth2Source, StoredGrant, TokenStore,
+    Algorithm, AssertionKey, AuthCodeFlow, BootstrapCapture, Bootstrapped, CaptureMode, ClientAuth,
+    DeviceAuthorization, DevicePoll, Enrolled, Grant, Oauth2Broker, Oauth2Config, Oauth2Source,
+    StoredGrant, TokenStore,
 };
 pub use source::{EnvSource, FileSource};
 pub use swap::{Injection, SecretInjector, SecretSwap};

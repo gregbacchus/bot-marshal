@@ -166,50 +166,51 @@ is nothing Claude-Code-specific about it.
 
 ### Claude Code — subscription login (`claude login`)
 
-Logging in with a Claude Pro/Max subscription instead of an API key is a different thing
-entirely: an interactive OAuth flow against Anthropic's own auth infrastructure, producing a
-token scoped to the subscription rather than to API billing. Marshal's OAuth2 support
-(`grant: authorization_code`, [Transforms § OAuth2](transforms.md#oauth2)) is built to acquire
-exactly this shape of credential — but the concrete `client_id`, `authorization_endpoint` and
-`token_endpoint` for this flow are not something documented here, because they belong to
-Anthropic's client application and this project has no verified, stable values to publish as
-fact. Anthropic's own tooling doesn't currently support running with a boundary proxy in front
-of a subscription login anyway.
+Logging in with a Claude Pro/Max subscription instead of an API key is an interactive OAuth
+flow against Anthropic's own auth infrastructure. The `client_id` and endpoints belong to their
+client application and are not published — so rather than asking you to find them, marshal can
+watch a real login and learn them:
 
-The template below is the shape the config would take *if* you have those three values (from
-your own client registration, or from inspecting the tool's own OAuth requests) — treat it as a
-starting point to fill in and test against `marshal config check`, not as something to paste
-verbatim:
+```bash
+marshal secrets oauth login CLAUDE_SUBSCRIPTION --wait
+```
+
+That prints a proxy address and a CA path. Export them in the terminal where you run
+`claude login`, log in as usual, and marshal captures the credential from the token exchange
+Claude Code itself performs — printing the `token_endpoint`, `client_id` and `redirect_uri` it
+discovered, ready to paste into a profile for unattended use.
+
+Or let marshal launch it, confined so its egress cannot avoid the proxy:
+
+```bash
+marshal secrets oauth login CLAUDE_SUBSCRIPTION --run claude login
+```
+
+The browser never needs to be proxied — only Claude Code's own network calls, which is where
+the exchange happens. See
+[`marshal secrets oauth login --wait`](../cli.md#marshal-secrets-oauth-login-name---wait----run-cmd)
+for `--mode`, `--isolation`, and the rest.
+
+Once enrolled, the permanent swap uses the values it reported:
 
 ```yaml
-request_transforms:
-  secrets:
-    - name: CLAUDE_SUBSCRIPTION
       source:
         type: oauth2
         grant: authorization_code
-        token_endpoint: https://REPLACE-WITH-THE-REAL-TOKEN-ENDPOINT
-        authorization_endpoint: https://REPLACE-WITH-THE-REAL-AUTHORIZE-ENDPOINT
-        redirect_uri: http://127.0.0.1:41111/callback   # loopback only — marshal binds it
-        client_id: REPLACE-WITH-THE-REAL-CLIENT-ID
+        token_endpoint: <printed by the bootstrap run>
+        authorization_endpoint: <printed by the bootstrap run>
+        client_id: <printed by the bootstrap run>
+        redirect_uri: <printed by the bootstrap run>
         client_auth: none
       inject: { type: bearer }
       rules: [{ host: "api.anthropic.com" }]
 ```
 
-Once the real values are in place, enroll once with:
-
-```bash
-marshal secrets oauth login CLAUDE_SUBSCRIPTION --open
-```
-
-which opens a browser, captures the redirect on marshal's own loopback listener, and stores the
-resulting refresh token under `state_dir` — see [`state_dir`](README.md#state_dir). From then
-on the swap mints its own access tokens unattended, and Claude Code itself never needs to hold
-one. If instead you want Claude Code to drive its *own* login through the proxy and end up
-holding nothing either, that's what `capture: in_band` is for
-([Transforms § In-band capture](transforms.md#in-band-capture)) — a heavier mechanism, and worth
-reading ADR-0032 before reaching for it.
+If instead you want Claude Code to drive its *own* login through the proxy every time and never
+hold anything, that is `capture: in_band`
+([Transforms § In-band capture](transforms.md#in-band-capture)) — a different mechanism with a
+different threat model; read [ADR-0034](../adr/0034-bootstrap-capture-reads-the-token-exchange.md)
+on which applies.
 
 ### OpenAI Codex CLI — API key mode
 
@@ -218,15 +219,13 @@ as in the OpenAI section above. Reuse that swap.
 
 ### OpenAI Codex CLI — ChatGPT sign-in
 
-Codex also supports signing in with a ChatGPT account instead of an API key, which is again an
-OAuth flow with credentials specific to OpenAI's own client application. The same caveat as
-Claude Code's subscription login applies — this page won't publish a guessed `client_id` and
-call it correct. The shape is the same `authorization_code` + loopback `redirect_uri` template
-above, pointed at `api.openai.com` instead, filled in with values from OpenAI's own client
-registration or observed traffic, and enrolled the same way:
+Same situation as Claude Code's subscription login, and the same answer — the credentials
+belong to OpenAI's own client application, so let marshal observe a real login rather than
+hunting for them:
 
 ```bash
-marshal secrets oauth login CODEX_SUBSCRIPTION --open
+marshal secrets oauth login CODEX_SUBSCRIPTION --wait
+# or: marshal secrets oauth login CODEX_SUBSCRIPTION --run codex login
 ```
 
 ---

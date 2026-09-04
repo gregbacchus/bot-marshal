@@ -1060,3 +1060,326 @@ async fn a_capturing_profile_still_streams_sse_first_byte_early() {
         "first byte at {first:?} of a {total:?} stream — this looks buffered, not streamed"
     );
 }
+
+// ===========================================================================================
+// Bootstrap capture: learning a credential from a login somebody else performed.
+//
+// The other mechanism (above) owns the PKCE verifier and excludes an adversarial agent. This
+// one knows nothing about the provider in advance and reads the client's own completed
+// exchange — a different threat model, so it gets its own provider stand-in and its own tests.
+// ===========================================================================================
+
+/// A provider that only implements the token endpoint, because that is all bootstrap touches.
+#[derive(Debug)]
+struct TokenOnlyProvider {
+    addr: std::net::SocketAddr,
+    /// Every exchange it was asked to perform, as its raw form body.
+    exchanges: Arc<std::sync::Mutex<Vec<String>>>,
+    /// How many polls to answer `authorization_pending` before issuing a token.
+    pending_polls: Arc<AtomicUsize>,
+}
+
+const BOOTSTRAP_ACCESS: &str = "at_BOOTSTRAP_captured_000000000000000000";
+const BOOTSTRAP_REFRESH: &str = "rt_BOOTSTRAP_captured_00000000000000000";
+
+async fn token_only_provider(
+    pki: &TestPki,
+    pending_polls: usize,
+    issue_refresh: bool,
+) -> TokenOnlyProvider {
+    use hyper::{Request as HReq, Response as HResp};
+
+    let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(pki.leaf_pem.as_bytes())
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let key =
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(pki.leaf_key_pem.as_bytes()).unwrap();
+    let mut cfg =
+        rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key).unwrap();
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let exchanges = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remaining = Arc::new(AtomicUsize::new(pending_polls));
+
+    let (ex, rem) = (Arc::clone(&exchanges), Arc::clone(&remaining));
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let (acceptor, ex, rem) = (acceptor.clone(), Arc::clone(&ex), Arc::clone(&rem));
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(tcp).await else { return };
+                let service = hyper::service::service_fn(
+                    move |req: HReq<hyper::body::Incoming>| {
+                        let (ex, rem) = (Arc::clone(&ex), Arc::clone(&rem));
+                        async move {
+                            let body = req.into_body().collect().await.unwrap().to_bytes();
+                            let body = String::from_utf8_lossy(&body).into_owned();
+                            ex.lock().unwrap().push(body);
+
+                            // Answer `authorization_pending` until the configured number of polls
+                            // has gone by — the shape a real device-code flow has.
+                            if rem.load(Ordering::SeqCst) > 0 {
+                                rem.fetch_sub(1, Ordering::SeqCst);
+                                return Ok::<_, std::convert::Infallible>(
+                                    HResp::builder()
+                                        .status(400)
+                                        .header("content-type", "application/json")
+                                        .body(full(
+                                            br#"{"error":"authorization_pending"}"#.to_vec(),
+                                        ))
+                                        .unwrap(),
+                                );
+                            }
+
+                            let json = if issue_refresh {
+                                format!(
+                                    r#"{{"access_token":"{BOOTSTRAP_ACCESS}","token_type":"Bearer","expires_in":3600,"refresh_token":"{BOOTSTRAP_REFRESH}","scope":"offline_access"}}"#
+                                )
+                            } else {
+                                format!(
+                                    r#"{{"access_token":"{BOOTSTRAP_ACCESS}","token_type":"Bearer","expires_in":3600}}"#
+                                )
+                            };
+                            Ok(HResp::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(full(json.into_bytes()))
+                                .unwrap())
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
+                    .await;
+            });
+        }
+    });
+
+    TokenOnlyProvider { addr, exchanges, pending_polls: remaining }
+}
+
+struct BootstrapHarness {
+    proxy: std::net::SocketAddr,
+    provider: std::net::SocketAddr,
+    proxy_ca_pem: String,
+    audit: Arc<AuditBuffer>,
+}
+
+async fn bootstrap_harness(
+    mode: marshal_secrets::CaptureMode,
+    store_dir: std::path::PathBuf,
+    pending_polls: usize,
+    issue_refresh: bool,
+) -> (
+    BootstrapHarness,
+    TokenOnlyProvider,
+    Redactor,
+    tokio::sync::oneshot::Receiver<marshal_secrets::Bootstrapped>,
+) {
+    let pki = test_pki();
+    let provider = token_only_provider(&pki, pending_polls, issue_refresh).await;
+
+    let generated = marshal_tls::CertificateAuthority::generate("test proxy CA", 30).unwrap();
+    let proxy_ca_pem = generated.cert_pem.clone();
+    let ca = marshal_tls::CertificateAuthority::from_pem(&generated.cert_pem, &generated.key_pem)
+        .unwrap();
+    let minter = Arc::new(marshal_tls::LeafMinter::new(Arc::new(ca), 64, 72));
+    let engine =
+        Arc::new(TlsEngine::with_extra_roots(minter, std::slice::from_ref(&pki.ca_pem)).unwrap());
+
+    let cfg: Config = serde_yaml_ng::from_str(ALLOW_LOOPBACK).unwrap();
+    let chain = build_chain(&cfg, "p", &cfg.profile, Arc::new(DenyingDecider)).unwrap();
+
+    let redactor = Redactor::default();
+    let buffer = Arc::new(AuditBuffer::default());
+    let sink = JsonSink::new(SharedWriter(Arc::clone(&buffer))).redacting(redactor.clone());
+
+    let (capture, captured) = marshal_secrets::BootstrapCapture::new(
+        "BOOTSTRAPPED",
+        mode,
+        None,
+        Arc::new(TokenStore::new(Some(store_dir))),
+        support::client_config(&pki.ca_pem),
+        None,
+        redactor.clone(),
+        Duration::from_secs(10),
+    );
+
+    let server = Server::new(
+        ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
+        handle(support::runtime_with_responders(
+            chain,
+            engine,
+            HostMatcher::default(),
+            vec![Arc::clone(&capture) as Arc<dyn RequestTransform>],
+            vec![Arc::clone(&capture) as Arc<dyn marshal_core::ResponseTransform>],
+            vec![capture as Arc<dyn marshal_core::RequestResponder>],
+        )),
+        Arc::new(UpstreamGuard::new(Vec::<String>::new(), true).unwrap()),
+        Arc::new(sink) as Arc<dyn AuditSink>,
+    );
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut tx = Some(tx);
+        let _ = server
+            .run(move |a| {
+                let _ = tx.take().unwrap().send(a);
+            })
+            .await;
+    });
+
+    (
+        BootstrapHarness {
+            proxy: rx.await.unwrap(),
+            provider: provider.addr,
+            proxy_ca_pem,
+            audit: buffer,
+        },
+        provider,
+        redactor,
+        captured,
+    )
+}
+
+/// The token exchange a CLI tool performs after its own browser handoff completed.
+async fn agent_exchange(h: &BootstrapHarness, grant: &str) -> serde_json::Value {
+    let mut sender = connect_through_proxy(h.proxy, h.provider, &h.proxy_ca_pem).await;
+    let form = format!(
+        "grant_type={grant}&code=REALCODE&code_verifier=the-agents-own-verifier&client_id=agentapp&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb"
+    );
+    let req = hyper::Request::builder()
+        .method("POST")
+        .uri(format!("https://{}/oauth2/token", h.provider))
+        .header("host", h.provider.to_string())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(full(form.into_bytes()))
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)
+}
+
+#[tokio::test]
+async fn observe_lets_the_real_exchange_through_and_still_enrols() {
+    let dir = temp_state("bootstrap-observe");
+    let (h, provider, _r, captured) =
+        bootstrap_harness(marshal_secrets::CaptureMode::Observe, dir.clone(), 0, true).await;
+
+    let seen = agent_exchange(&h, "authorization_code").await;
+
+    // The client's own login succeeds: it gets the provider's real answer, untouched.
+    assert_eq!(seen["access_token"], BOOTSTRAP_ACCESS);
+    assert_eq!(provider.exchanges.lock().unwrap().len(), 1);
+
+    // And marshal kept a copy.
+    let learned = tokio::time::timeout(Duration::from_secs(2), captured).await.unwrap().unwrap();
+    assert!(learned.enrolled);
+    assert_eq!(learned.client_id.as_deref(), Some("agentapp"));
+    assert_eq!(learned.token_endpoint, format!("https://{}/oauth2/token", h.provider));
+    assert_eq!(
+        TokenStore::new(Some(dir)).grant("BOOTSTRAPPED").unwrap().unwrap().refresh_token.expose(),
+        BOOTSTRAP_REFRESH
+    );
+}
+
+#[tokio::test]
+async fn steal_redeems_it_first_and_hands_the_client_a_sentinel() {
+    let dir = temp_state("bootstrap-steal");
+    let (h, provider, _r, captured) =
+        bootstrap_harness(marshal_secrets::CaptureMode::Steal, dir.clone(), 0, true).await;
+
+    let seen = agent_exchange(&h, "authorization_code").await;
+
+    // Exactly one exchange reached the provider — marshal's, not the client's forwarded one.
+    assert_eq!(provider.exchanges.lock().unwrap().len(), 1);
+    assert_eq!(seen["access_token"], "marshal-managed-token-BOOTSTRAPPED");
+    assert_ne!(seen["access_token"], BOOTSTRAP_ACCESS);
+
+    let learned = tokio::time::timeout(Duration::from_secs(2), captured).await.unwrap().unwrap();
+    assert!(learned.enrolled);
+    assert_eq!(
+        TokenStore::new(Some(dir)).grant("BOOTSTRAPPED").unwrap().unwrap().refresh_token.expose(),
+        BOOTSTRAP_REFRESH
+    );
+}
+
+#[tokio::test]
+async fn a_device_code_flow_is_captured_on_the_poll_that_succeeds_not_the_first_one() {
+    // The trap this exists for: nearly every device-code poll answers `authorization_pending`.
+    // Signalling on the first *request* that matches would end the session on poll one and
+    // never see the token, so the trigger has to be a response that actually carries one.
+    let dir = temp_state("bootstrap-device");
+    let (h, provider, _r, captured) =
+        bootstrap_harness(marshal_secrets::CaptureMode::Observe, dir.clone(), 2, true).await;
+
+    let grant = "urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code";
+    for _ in 0..2 {
+        let pending = agent_exchange(&h, grant).await;
+        assert_eq!(pending["error"], "authorization_pending");
+    }
+    assert_eq!(provider.pending_polls.load(Ordering::SeqCst), 0);
+
+    let ok = agent_exchange(&h, grant).await;
+    assert_eq!(ok["access_token"], BOOTSTRAP_ACCESS);
+
+    let learned = tokio::time::timeout(Duration::from_secs(2), captured).await.unwrap().unwrap();
+    assert!(learned.enrolled, "the successful poll should have enrolled");
+    assert_eq!(provider.exchanges.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_response_with_no_refresh_token_enrols_nothing_and_says_so() {
+    // A public client issued only an access token: nothing survives a restart, so there is
+    // nothing worth storing — but the operator has to be told, not left with a silent no-op.
+    let dir = temp_state("bootstrap-norefresh");
+    let (h, _provider, _r, captured) =
+        bootstrap_harness(marshal_secrets::CaptureMode::Observe, dir.clone(), 0, false).await;
+
+    agent_exchange(&h, "authorization_code").await;
+
+    let learned = tokio::time::timeout(Duration::from_secs(2), captured).await.unwrap().unwrap();
+    assert!(!learned.enrolled);
+    assert!(TokenStore::new(Some(dir)).grant("BOOTSTRAPPED").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_request_that_is_not_a_bootstrappable_grant_is_ignored() {
+    // `client_credentials` needs no bootstrapping, and `refresh_token` would mean capturing a
+    // client already enrolled somewhere else.
+    let dir = temp_state("bootstrap-ignored");
+    let (h, provider, _r, captured) =
+        bootstrap_harness(marshal_secrets::CaptureMode::Steal, dir, 0, true).await;
+
+    for grant in ["client_credentials", "refresh_token"] {
+        let seen = agent_exchange(&h, grant).await;
+        // Forwarded untouched — the real provider answered, marshal did not intervene.
+        assert_eq!(seen["access_token"], BOOTSTRAP_ACCESS);
+    }
+    assert_eq!(provider.exchanges.lock().unwrap().len(), 2);
+
+    let waited = tokio::time::timeout(Duration::from_millis(300), captured).await;
+    assert!(waited.is_err(), "nothing should have been captured");
+}
+
+#[tokio::test]
+async fn nothing_captured_by_bootstrap_reaches_the_audit_trail() {
+    let dir = temp_state("bootstrap-audit");
+    let (h, _provider, redactor, captured) =
+        bootstrap_harness(marshal_secrets::CaptureMode::Observe, dir, 0, true).await;
+
+    agent_exchange(&h, "authorization_code").await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), captured).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let audit = h.audit.contents();
+    assert!(!audit.is_empty(), "the audit sink recorded nothing, so this proves nothing");
+    assert!(audit.contains("\"host\""), "the audit records should still be structured");
+    for value in [BOOTSTRAP_ACCESS, BOOTSTRAP_REFRESH] {
+        assert!(!audit.contains(value), "`{value}` appears in the audit trail");
+        // Absence alone passes vacuously — assert the mechanism that would scrub it.
+        assert!(!redactor.redact(value).contains(value), "`{value}` is not in the redactor");
+    }
+}

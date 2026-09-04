@@ -180,6 +180,10 @@ enum OauthCommand {
     /// short-lived and re-minted on demand.
     Login {
         /// The `name` of the swap whose `source` is `{ type: oauth2, ... }`.
+        ///
+        /// With `--wait` or `--run` this is not a swap reference at all — bootstrap runs
+        /// precisely when no such swap exists yet — but the storage key the captured
+        /// credential is filed under, for a swap written afterwards.
         name: String,
         /// Open the authorization URL in a browser instead of only printing it.
         #[arg(long)]
@@ -187,6 +191,39 @@ enum OauthCommand {
         /// Give up if the flow is not completed in this long.
         #[arg(long, default_value = "5m", value_parser = humantime::parse_duration)]
         timeout: std::time::Duration,
+
+        /// Bootstrap: start an intercepting proxy and wait for somebody else's login.
+        ///
+        /// For a provider whose `client_id` and endpoints are not known — a vendor's own CLI
+        /// subscription login. Point that tool's `HTTPS_PROXY` at the address printed here and
+        /// log in as usual; marshal learns the credential from the token exchange the tool
+        /// itself performs. Nothing needs to be configured for it beforehand.
+        #[arg(long, conflicts_with = "run")]
+        wait: bool,
+
+        /// Bootstrap, running the command itself in a network sandbox.
+        ///
+        /// As `--wait`, but marshal launches the command with no route out except its own
+        /// proxy, so the exchange cannot avoid being seen.
+        ///
+        /// Collects arguments until the next flag, so marshal's own options can follow it. A
+        /// command that needs its own flags wants a shell: `--run sh -c "some-cli login --x"`.
+        #[arg(long, num_args = 1.., conflicts_with = "wait")]
+        run: Vec<String>,
+
+        /// What bootstrap does with the exchange it captures.
+        #[arg(long, default_value = "observe")]
+        mode: BootstrapModeArg,
+
+        /// Only capture exchanges to this host. Rarely needed — a bootstrap session usually
+        /// has exactly one thing in flight.
+        #[arg(long)]
+        host: Option<String>,
+
+        /// How `--run` confines the command. `netns` is the only one that actually prevents it
+        /// routing around the proxy; the others identify without enforcing.
+        #[arg(long, default_value = "netns")]
+        isolation: String,
     },
     /// Show which OAuth2 credentials are enrolled, and since when.
     Status {
@@ -197,6 +234,18 @@ enum OauthCommand {
     Logout { name: String },
     /// Discard the cached access token and mint a new one now, to check the credential works.
     Refresh { name: String },
+}
+
+/// What bootstrap capture does with the token exchange it observes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BootstrapModeArg {
+    /// Forward it untouched. The tool's own login succeeds and it keeps a working credential
+    /// too; marshal simply also has one. Right for a deliberate, supervised bootstrap.
+    Observe,
+    /// Redeem it out of band and answer the tool with a sentinel, so it never holds a working
+    /// credential. Consistent with the rest of this proxy's design, at the cost of the tool
+    /// reporting that the login failed — which, from its point of view, it did.
+    Steal,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1407,16 +1456,19 @@ fn find_oauth_swap(swaps: Vec<OauthSwap>, name: &str) -> anyhow::Result<OauthSwa
 
 async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyhow::Result<()> {
     let cfg = marshal_config::load(config_path)?;
-    // A throwaway redactor: nothing here writes an audit record, and the values are printed
-    // for a human on a terminal or not at all.
+    // Shared, not throwaway: bootstrap runs an audit sink, and the capture object teaches this
+    // same redactor before anything it captured can be logged (ADR-0029).
     let deps = secret_deps(config_path, &cfg, &marshal_core::Redactor::default())?;
-    let swaps = oauth_swaps(config_path, &cfg, &deps)?;
+
+    // Built lazily. Bootstrap runs when no swap is configured yet, and must not be blocked by
+    // an unrelated one elsewhere in the config failing to build.
+    let swaps = || oauth_swaps(config_path, &cfg, &deps);
 
     match cmd {
         OauthCommand::Status { name } => {
             let swaps: Vec<OauthSwap> = match name {
-                Some(n) => vec![find_oauth_swap(swaps, &n)?],
-                None => swaps,
+                Some(n) => vec![find_oauth_swap(swaps()?, &n)?],
+                None => swaps()?,
             };
             if swaps.is_empty() {
                 println!("no OAuth2 credentials are configured");
@@ -1447,7 +1499,7 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
         }
 
         OauthCommand::Logout { name } => {
-            let swap = find_oauth_swap(swaps, &name)?;
+            let swap = find_oauth_swap(swaps()?, &name)?;
             if deps.store.remove_grant(&swap.name)? {
                 println!("forgot the stored grant for `{}`", swap.name);
                 println!(
@@ -1462,7 +1514,7 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
 
         OauthCommand::Refresh { name } => {
             use marshal_core::SecretSource;
-            let swap = find_oauth_swap(swaps, &name)?;
+            let swap = find_oauth_swap(swaps()?, &name)?;
             deps.store.forget_access(&swap.name);
             // The value is deliberately not printed: the point is that it works, and putting
             // a live token on a terminal (and into a shell history, and a scrollback buffer)
@@ -1472,8 +1524,31 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
             Ok(())
         }
 
-        OauthCommand::Login { name, open, timeout } => {
-            let swap = find_oauth_swap(swaps, &name)?;
+        OauthCommand::Login { name, open, timeout, wait, run, mode, host, isolation } => {
+            // The bootstrap path forks here, before any swap lookup: it runs precisely when no
+            // swap is configured for this credential yet, so `name` is a storage key rather
+            // than a reference to anything.
+            if wait || !run.is_empty() {
+                anyhow::ensure!(
+                    deps.store.persists(),
+                    "bootstrapping `{name}` needs a top-level `state_dir` to keep the captured \
+                     refresh token in — set one before starting a login you would have to redo"
+                );
+                let opts = BootstrapOptions {
+                    name,
+                    mode: match mode {
+                        BootstrapModeArg::Observe => marshal_secrets::CaptureMode::Observe,
+                        BootstrapModeArg::Steal => marshal_secrets::CaptureMode::Steal,
+                    },
+                    host,
+                    timeout,
+                    run,
+                    isolation,
+                };
+                return bootstrap_capture(config_path, &cfg, &deps, opts).await;
+            }
+
+            let swap = find_oauth_swap(swaps()?, &name)?;
             anyhow::ensure!(
                 deps.store.persists(),
                 "enrolling `{}` needs a top-level `state_dir` to keep the refresh token in",
@@ -1505,6 +1580,326 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
             Ok(())
         }
     }
+}
+
+/// Everything `--wait`/`--run` needs, gathered so the driver signature stays readable.
+struct BootstrapOptions {
+    name: String,
+    mode: marshal_secrets::CaptureMode,
+    host: Option<String>,
+    timeout: std::time::Duration,
+    /// Empty for `--wait`; the command to sandbox for `--run`.
+    run: Vec<String>,
+    isolation: String,
+}
+
+/// An audit sink that keeps nothing.
+///
+/// `Server::new` requires a sink and there is no no-op one in the tree. A bootstrap session is
+/// a foreground diagnostic that exists for one exchange, so there is nothing worth persisting —
+/// and the one thing that must not happen is a captured credential reaching a durable record.
+/// Records still carry no body content (`mitm::emit` never writes one), but discarding removes
+/// the question entirely.
+#[derive(Debug)]
+struct DiscardingAudit;
+
+#[async_trait::async_trait]
+impl marshal_core::AuditSink for DiscardingAudit {
+    async fn emit(&self, record: marshal_core::AuditRecord) {
+        tracing::debug!(
+            host = %record.host,
+            method = %record.method,
+            action = ?record.action,
+            "bootstrap session request"
+        );
+    }
+}
+
+/// Run a bootstrap capture session: stand up an intercepting proxy, wait for somebody's token
+/// exchange to pass through it, and keep what it yields.
+async fn bootstrap_capture(
+    config_path: &std::path::Path,
+    cfg: &marshal_config::model::Config,
+    deps: &SecretDeps,
+    opts: BootstrapOptions,
+) -> anyhow::Result<()> {
+    use marshal_core::{DenyingDecider, RequestResponder, RequestTransform, ResponseTransform};
+
+    let sandboxed = !opts.run.is_empty();
+    let isolation: marshal_launch::Isolation =
+        opts.isolation.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+    if sandboxed {
+        preflight_isolation(isolation)?;
+    }
+
+    // The real CA, not a throwaway: whatever the operator already trusts for `serve` covers
+    // this too, and `proxy_env` points a sandboxed command's trust stores at the same file.
+    let (cert_path, key_path) = ca_paths(config_path)?;
+    anyhow::ensure!(
+        cert_path.exists() && key_path.exists(),
+        "bootstrap intercepts TLS, so it needs the CA at {} — run `marshal ca init` first",
+        cert_path.display()
+    );
+    let ca = marshal_tls::CertificateAuthority::from_pem(
+        &std::fs::read_to_string(&cert_path)?,
+        &std::fs::read_to_string(&key_path)?,
+    )?;
+    let minter = Arc::new(marshal_tls::LeafMinter::new(
+        Arc::new(ca),
+        cfg.tls.cert_cache_size,
+        cfg.tls.leaf_expiry_hours,
+    ));
+    let engine = Arc::new(marshal_proxy::mitm::TlsEngine::with_extra_roots(
+        minter,
+        &read_extra_roots(cfg)?,
+    )?);
+
+    let (capture, captured) = marshal_secrets::BootstrapCapture::new(
+        opts.name.clone(),
+        opts.mode,
+        opts.host.clone(),
+        Arc::clone(&deps.store),
+        Arc::clone(&deps.tls),
+        deps.guard.clone(),
+        deps.redactor.clone(),
+        opts.timeout,
+    );
+
+    // A permissive chain, deliberately. This listener is not policing an agent — it exists for
+    // one exchange, in the foreground, under a timeout, and denying the provider traffic the
+    // operator is trying to complete would defeat the point. The upstream guard still applies.
+    // See ADR-0033 on why this does not go through `default_action`'s config gate.
+    let chain = Arc::new(marshal_policy::Chain::new(
+        "bootstrap",
+        vec![],
+        marshal_core::Decision::Allow,
+        Arc::new(DenyingDecider),
+    ));
+
+    // Never derived from config or `state_dir`: `bind_unix` removes an existing path before
+    // binding, so colliding with a running daemon's socket would delete it and silently take
+    // over its traffic.
+    let socket_dir = std::env::temp_dir().join(format!("marshal-bootstrap-{}", std::process::id()));
+    std::fs::create_dir_all(&socket_dir)?;
+    let socket = socket_dir.join("proxy.sock");
+
+    let runtime = marshal_proxy::runtime::Runtime {
+        chains: HashMap::new(),
+        response_transforms: HashMap::new(),
+        responders: HashMap::new(),
+        request_transforms: HashMap::new(),
+        default_chain: chain,
+        default_response_transforms: vec![Arc::clone(&capture) as Arc<dyn ResponseTransform>],
+        default_responders: vec![Arc::clone(&capture) as Arc<dyn RequestResponder>],
+        default_request_transforms: vec![Arc::clone(&capture) as Arc<dyn RequestTransform>],
+        identities: Arc::new(build_identities(cfg, None)?),
+        passthrough: marshal_policy::HostMatcher::new(&cfg.tls.passthrough, Vec::<&str>::new())?,
+        tls: engine,
+    };
+
+    let server = marshal_proxy::Server::new(
+        marshal_proxy::ServerConfig {
+            listen: vec!["127.0.0.1:0".into()],
+            unix_socket: sandboxed.then(|| socket.clone()),
+        },
+        Arc::new(marshal_proxy::runtime::RuntimeHandle::new(runtime)),
+        Arc::new(marshal_http::UpstreamGuard::new(
+            &cfg.upstream.deny_cidrs,
+            cfg.upstream.allow_private,
+        )?),
+        Arc::new(DiscardingAudit),
+    );
+
+    let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(async move {
+        let mut tx = Some(bound_tx);
+        server
+            .run(move |addr| {
+                let _ = tx.take().unwrap().send(addr);
+            })
+            .await
+    });
+    let addr =
+        bound_rx.await.map_err(|_| anyhow::anyhow!("the bootstrap listener failed to bind"))?;
+
+    let outcome = if sandboxed {
+        run_sandboxed_bootstrap(&opts, isolation, addr, &socket, &cert_path, captured).await
+    } else {
+        println!("Bootstrapping `{}`. In another terminal, run the tool's login with:", opts.name);
+        println!("\n  export HTTPS_PROXY=http://{addr}");
+        println!("  export SSL_CERT_FILE={}\n", cert_path.display());
+        println!("then log in as you normally would. Waiting up to {:?} ...", opts.timeout);
+        tokio::time::timeout(opts.timeout, captured)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("no token exchange was captured within {:?}", opts.timeout)
+            })?
+            .map_err(|_| anyhow::anyhow!("the capture channel closed before anything was captured"))
+    };
+
+    serving.abort();
+    let _ = std::fs::remove_dir_all(&socket_dir);
+    report_bootstrap(&opts, outcome?)
+}
+
+/// Preflight exactly what `marshal run` does, with the same alternatives named.
+fn preflight_isolation(isolation: marshal_launch::Isolation) -> anyhow::Result<()> {
+    use marshal_launch::Isolation;
+    if matches!(isolation, Isolation::Cgroup | Isolation::Netns)
+        && !marshal_launch::systemd_available()
+    {
+        anyhow::bail!(
+            "`--isolation {}` needs systemd-run, which is not available here. Use \
+             `--isolation none` to launch with proxy environment variables only, accepting that \
+             the command could then route around the proxy and the exchange would never be seen.",
+            if isolation == Isolation::Netns { "netns" } else { "cgroup" }
+        );
+    }
+    if isolation == Isolation::Netns {
+        anyhow::ensure!(
+            marshal_launch::bwrap_available(),
+            "`--isolation netns` needs bubblewrap (`bwrap`), which is not installed. Install it, \
+             or use `--isolation cgroup` — which does not stop the command routing around the \
+             proxy, so the exchange may never be seen."
+        );
+        anyhow::ensure!(
+            marshal_launch::netns_available(),
+            "bwrap cannot create a network namespace here, which usually means unprivileged user \
+             namespaces are disabled (`sysctl kernel.unprivileged_userns_clone`). Use \
+             `--isolation cgroup`."
+        );
+    }
+    Ok(())
+}
+
+/// `--run`: launch the command against the ephemeral proxy and race it against the capture.
+async fn run_sandboxed_bootstrap(
+    opts: &BootstrapOptions,
+    isolation: marshal_launch::Isolation,
+    addr: std::net::SocketAddr,
+    socket: &std::path::Path,
+    cert_path: &std::path::Path,
+    captured: tokio::sync::oneshot::Receiver<marshal_secrets::Bootstrapped>,
+) -> anyhow::Result<marshal_secrets::Bootstrapped> {
+    let endpoint = marshal_launch::ProxyEndpoint {
+        url: format!("http://{addr}"),
+        ca_cert: Some(cert_path.to_path_buf()),
+        credential: None,
+    };
+    // Only `netns` reaches the proxy through the Unix socket; the other modes use the proxy
+    // environment variables and would be handed a path they never open.
+    let socket = if isolation == marshal_launch::Isolation::Netns {
+        // The listener binds asynchronously, so the file may not exist yet — and
+        // `build_command_with` rejects a path that does not, which would otherwise be a race
+        // that fails on a loaded machine and passes everywhere else.
+        for _ in 0..100 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        anyhow::ensure!(
+            socket.exists(),
+            "the bootstrap listener did not bind its Unix socket at {}",
+            socket.display()
+        );
+        Some(socket)
+    } else {
+        None
+    };
+
+    let mut cmd = marshal_launch::build_command_with(
+        isolation,
+        "bootstrap",
+        std::process::id(),
+        &endpoint,
+        &opts.run,
+        socket,
+        &[],
+    )?;
+
+    println!("Bootstrapping `{}` by running: {}", opts.name, opts.run.join(" "));
+    let mut child = tokio::process::Command::from(cmd_into_tokio(&mut cmd)).spawn()?;
+
+    tokio::select! {
+        // The capture is what matters; a command that exits afterwards is fine.
+        result = captured => result
+            .map_err(|_| anyhow::anyhow!("the capture channel closed before anything was captured")),
+        status = child.wait() => {
+            let status = status?;
+            anyhow::bail!(
+                "`{}` exited ({status}) without a token exchange being captured. If it opened a \
+                 browser, the login may simply not have finished — `--wait` lets you drive it by \
+                 hand instead. If it made no network calls through the proxy at all, check that \
+                 it honours proxy environment variables.",
+                opts.run.join(" ")
+            )
+        }
+        _ = tokio::time::sleep(opts.timeout) => {
+            let _ = child.start_kill();
+            anyhow::bail!("no token exchange was captured within {:?}", opts.timeout)
+        }
+    }
+}
+
+/// `std::process::Command` carries everything `build_command_with` configured; this moves it
+/// across without losing the program, args or environment.
+fn cmd_into_tokio(cmd: &mut std::process::Command) -> std::process::Command {
+    let mut out = std::process::Command::new(cmd.get_program());
+    out.args(cmd.get_args());
+    for (k, v) in cmd.get_envs() {
+        match v {
+            Some(v) => out.env(k, v),
+            None => out.env_remove(k),
+        };
+    }
+    if let Some(dir) = cmd.get_current_dir() {
+        out.current_dir(dir);
+    }
+    out
+}
+
+/// Report what was learned — configuration, never a credential.
+fn report_bootstrap(
+    opts: &BootstrapOptions,
+    learned: marshal_secrets::Bootstrapped,
+) -> anyhow::Result<()> {
+    if !learned.enrolled {
+        println!(
+            "\nCaptured a `{}` exchange, but the provider issued no refresh token.",
+            opts.name
+        );
+        println!(
+            "  Nothing was enrolled: an access token alone does not survive a restart. Most \n\
+             \x20 providers need `offline_access` in the requested scope (Google wants \n\
+             \x20 `access_type=offline`), which is the tool's own request to change, not \n\
+             \x20 marshal's."
+        );
+        anyhow::bail!("nothing enrolled");
+    }
+
+    println!("\n`{}` is enrolled.", opts.name);
+    if let Some(scope) = &learned.scope {
+        println!("  granted scope: {scope}");
+    }
+    println!("  the refresh token is stored under `state_dir`; nothing else was kept.\n");
+    println!("Discovered configuration — add this to a profile to use it unattended:\n");
+    println!("  - name: {}", opts.name);
+    println!("    source:");
+    println!("      type: oauth2");
+    println!("      grant: authorization_code");
+    println!("      token_endpoint: {}", learned.token_endpoint);
+    match &learned.client_id {
+        Some(id) => println!("      client_id: {id}"),
+        None => println!("      client_id: # the exchange sent none; check the provider's docs"),
+    }
+    if let Some(uri) = &learned.redirect_uri {
+        println!("      redirect_uri: {uri}");
+    }
+    println!("      client_auth: none   # adjust if the provider needs a client secret");
+    println!("    inject: {{ type: bearer }}");
+    println!("    rules: [{{ host: \"...\" }}]   # scope this to the API it authenticates");
+    Ok(())
 }
 
 fn describe_age(obtained_at: i64) -> String {

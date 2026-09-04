@@ -35,6 +35,7 @@ use marshal_core::{
     SynthesizedResponse, form_urlencode,
 };
 
+use super::form::{find, parse_pairs};
 use super::pkce::Pkce;
 use super::source::{AuthCodeFlow, Oauth2Source};
 
@@ -140,56 +141,6 @@ fn split_host_path(url: &str) -> Result<(String, String)> {
     Ok((endpoint.host, path))
 }
 
-/// Parse a query string into pairs, percent-decoding both halves.
-fn parse_query(query: &str) -> Vec<(String, String)> {
-    query
-        .split('&')
-        .filter(|p| !p.is_empty())
-        .map(|pair| match pair.split_once('=') {
-            Some((k, v)) => (percent_decode(k), percent_decode(v)),
-            None => (percent_decode(pair), String::new()),
-        })
-        .collect()
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(
-                    std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                    16,
-                ) {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn find<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
-}
-
 // -------------------------------------------------------------------------------------------
 // 1. The authorization request: substitute the challenge.
 // -------------------------------------------------------------------------------------------
@@ -205,7 +156,7 @@ impl RequestTransform for Oauth2Broker {
             return Ok(());
         }
         let query = cx.uri.query().unwrap_or("");
-        let mut params = parse_query(query);
+        let mut params = parse_pairs(query);
 
         // Only an authorization-code request. A provider's authorize endpoint also serves
         // `response_type=token` (the implicit flow) and plain GETs of its login page, and
@@ -288,10 +239,10 @@ impl ResponseTransform for Oauth2Broker {
         let Ok(location) = location.to_str() else { return Ok(()) };
         let Some((base, query)) = location.split_once('?') else { return Ok(()) };
 
-        let mut params = parse_query(query);
+        let mut params = parse_pairs(query);
         let Some(state) = find(&params, "state") else { return Ok(()) };
         let Some(flow) = self.take(state) else { return Ok(()) };
-        let Some(code) = find(&params, "code").map(str::to_owned) else {
+        let Some(code) = find(&params, "code").map(|c| c.to_owned()) else {
             // The provider refused. Nothing to capture; let the agent see its own error.
             return Ok(());
         };

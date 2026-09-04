@@ -86,7 +86,7 @@ without a network.
 | `marshal-config` | layered YAML load, the `profiles/`/`bundles/`/`transforms/` convention, the env file, validation |
 | `marshal-tls` | CA load/generate, leaf minting, cache, rustls configs |
 | `marshal-policy` | chain runner and the denylist, allowlist, rules, dlp, mcp layers |
-| `marshal-secrets` | env/file/oauth2 sources, TTL cache, token store, in-band capture, injection and redaction |
+| `marshal-secrets` | env/file/oauth2 sources, TTL cache, token store, in-band and bootstrap capture, injection and redaction |
 | `marshal-judge` | the LLM judge layer: providers, structured verdicts, cache, breaker |
 | `marshal-launch` | `marshal run`: netns and cgroup isolation, identity registration |
 | `marshal-http` | the upstream guard, and the one-shot client for calls marshal makes as itself |

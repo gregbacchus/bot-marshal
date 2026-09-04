@@ -44,6 +44,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0031](0031-a-responder-may-answer-a-request.md) | A responder may answer a request instead of forwarding it | Accepted |
 | [0032](0032-marshal-owns-the-pkce-verifier.md) | Marshal owns the PKCE verifier and terminates the authorization flow | Accepted |
 | [0033](0033-the-env-file-is-an-overlay-not-the-environment.md) | The env file is an overlay, not the environment | Accepted |
+| [0034](0034-bootstrap-capture-reads-the-token-exchange.md) | Bootstrap capture reads the token exchange, and trusts the session | Accepted |
 
 ## Writing a new one
 

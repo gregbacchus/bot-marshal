@@ -3,13 +3,16 @@
 //! See [`source`] for why this is a secret *source* rather than an injection kind, and
 //! [`store`] for why anything is written to disk at all.
 
+pub mod bootstrap;
 pub mod broker;
+pub(crate) mod form;
 pub mod jwt;
 pub mod pkce;
 pub mod source;
 pub mod store;
 pub mod token;
 
+pub use bootstrap::{BootstrapCapture, Bootstrapped, CaptureMode};
 pub use broker::Oauth2Broker;
 pub use jwt::{Algorithm, Claims};
 pub use pkce::{Pkce, challenge_s256};

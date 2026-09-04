@@ -84,6 +84,57 @@ Two things that commonly go wrong the first time, and what they look like:
   address itself; a redirect anywhere else hands the authorization code to something that is
   not marshal, which is the one thing the flow exists to prevent.
 
+### `marshal secrets oauth login <name> --wait` / `--run <cmd>`
+
+Bootstrap a credential whose OAuth application you do **not** control — a vendor's own CLI
+subscription login, where the `client_id` and endpoints belong to them and are not published.
+
+Instead of driving a flow it already knows, marshal starts an intercepting proxy and learns the
+credential from the token exchange the tool itself performs. Nothing needs to be configured
+beforehand: here `<name>` is only the storage key the result is filed under, not a reference to
+a swap. On success marshal prints the configuration it discovered, ready to paste into a
+profile.
+
+```bash
+marshal secrets oauth login CLAUDE_SUBSCRIPTION --wait
+```
+
+prints a proxy address and a CA path; export them in the terminal where you run the tool's own
+login, and log in as you normally would. The browser never has to be proxied — only the tool's
+own network calls, which is where the exchange happens.
+
+```bash
+marshal secrets oauth login CLAUDE_SUBSCRIPTION --run some-vendor-cli login
+```
+
+does the same but launches the command itself, confined so its egress cannot avoid the proxy.
+`--isolation` takes the same values as [`marshal run`](#marshal-run---profile-name---isolation-netnscgroupnone---proxy-url---bind-path---dry-run----command)
+and has the same prerequisites — `netns` is the only one that actually prevents the command
+routing around the proxy.
+
+`--mode` decides what happens to the exchange:
+
+| | |
+|---|---|
+| `observe` (default) | forward it untouched. The tool's own login succeeds and it keeps a working credential too; marshal simply also has one. |
+| `steal` | redeem it out of band and answer the tool with a sentinel, so it never holds a working credential — at the cost of its login reporting failure, which from its point of view is what happened. |
+
+`--host` narrows capture to one hostname, for the rare session with more than one flow in
+flight. `--timeout` bounds the wait (default `5m`).
+
+Two things worth knowing:
+
+* **`state_dir` must be set**, and is checked before anything starts — discovering it missing
+  after you have completed a vendor login is the worst possible moment.
+* **A provider that issues no refresh token enrols nothing**, and says so. An access token alone
+  does not survive a restart. Most providers need `offline_access` in the requested scope, which
+  is the tool's request to change, not marshal's.
+
+This is a different mechanism from
+[`capture: in_band`](configuration/transforms.md#in-band-capture), with a different threat
+model — it trusts the session rather than excluding the client. See
+[ADR-0034](adr/0034-bootstrap-capture-reads-the-token-exchange.md).
+
 ### `marshal secrets oauth status [<name>]`
 
 One line per OAuth2 swap: its name, the profile it belongs to, its grant, and whether it is
