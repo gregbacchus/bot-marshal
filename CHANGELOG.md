@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.1.2](https://github.com/gregbacchus/bot-marshal/compare/e0be6421e4250c1e9600c251e945a067c3069a15..v0.1.2) - 2026-09-04
+#### Bug Fixes
+- push the prefixed tag, not the bare version, in cog's post-bump hook - ([e0be642](https://github.com/gregbacchus/bot-marshal/commit/e0be6421e4250c1e9600c251e945a067c3069a15)) - test, Claude Sonnet 5
+
+- - -
+
 ## [v0.1.1](https://github.com/gregbacchus/bot-marshal/compare/6443d1ef2c5ecb0ee9ffdd91d71103e75a8a9619..v0.1.1) - 2026-09-04
 #### Bug Fixes
 - ![BREAKING](https://img.shields.io/badge/BREAKING-red) replace release-plz with cocogitto for version automation - ([3089110](https://github.com/gregbacchus/bot-marshal/commit/3089110d47dcd84b649cc33ce1628681ace570e6)) - test, Claude Sonnet 5
