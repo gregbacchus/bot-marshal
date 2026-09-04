@@ -9,12 +9,18 @@ git_tag_enable = false
 release = false
 release_always = false
 pr_labels = ["release"]
+# No crate is published, and only marshal-cli is independently released — the rest exist
+# only as changelog_include entries. Defaulting these here, not just on marshal-cli, is what
+# actually matters: release-plz runs `cargo package` to compute a semver diff regardless of
+# `release`/Cargo.toml's `publish`, and that fails on any crate whose path dependencies (all
+# of them, workspace-wide) lack a version requirement. See docs/adr/0002 on why marshal-core
+# has no marshal-* dependency to avoid this for at least the base of the graph.
+publish = false
+semver_check = false
 
 [[package]]
 name = "marshal-cli"
 release = true
-publish = false
-semver_check = false
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 changelog_path = "CHANGELOG.md"
