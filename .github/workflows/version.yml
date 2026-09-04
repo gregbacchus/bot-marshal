@@ -35,7 +35,7 @@ jobs:
           command: release
           version: 0.3.161
         env:
-          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Dispatch artifact release
         if: steps.release.outputs.releases_created == 'true'
         env:
@@ -69,4 +69,4 @@ jobs:
           command: release-pr
           version: 0.3.161
         env:
-          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}

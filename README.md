@@ -129,10 +129,15 @@ version tag, and dispatches [the release workflow](.github/workflows/release.yml
 publishes prebuilt macOS and Linux archives to GitHub and updates
 `gregbacchus/homebrew-tap`.
 
-The tap repository must exist, and this repository must have a `HOMEBREW_TAP_TOKEN` Actions
-secret. The token needs Contents and Pull requests write access to this repository, plus
-Contents write access to `gregbacchus/homebrew-tap`. Using this token for the release pull
-request ensures its normal CI workflows run once without separate manual dispatches. To change
-the generated release workflow, edit `dist-workspace.toml` and run `dist generate`; do not edit
-the workflow directly. Pull requests build all configured release targets, while only a merged
-release pull request publishes artifacts and updates the tap.
+The tap repository must exist, and this repository needs two fine-grained personal access token
+Actions secrets:
+
+* `RELEASE_PLZ_TOKEN`: Contents and Pull requests write access to this repository. Without it,
+  release-plz falls back to `GITHUB_TOKEN`, and GitHub requires approval before running checks on
+  the generated release pull request.
+* `HOMEBREW_TAP_TOKEN`: Contents write access to `gregbacchus/homebrew-tap`.
+
+Keeping these tokens separate limits each one to a single repository. To change the generated
+release workflow, edit `dist-workspace.toml` and run `dist generate`; do not edit the workflow
+directly. Pull requests build all configured release targets, while only a merged release pull
+request publishes artifacts and updates the tap.
