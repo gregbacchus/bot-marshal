@@ -140,7 +140,9 @@ TCP.
 
 ## Launching an agent
 
-None of the above gets adopted if it has to be assembled by hand, so `marshal run` does it:
+None of the above gets adopted if it has to be assembled by hand, so `marshal run` does it.
+**`run` prepares the agent, it does not start the proxy** — a `marshal serve` on the same
+config has to already be running before `run` is invoked, or the agent has nothing to talk to.
 
 ```bash
 marshal run --profile coding-agent -- claude
@@ -174,6 +176,39 @@ That is what separates it from every other mode. An unprivileged namespace has l
 nothing else; the proxy is reached over a Unix socket, which is a filesystem object and so
 crosses the namespace boundary untouched. A small forwarder inside bridges loopback to it. No
 `CAP_NET_ADMIN`, no veth, no slirp4netns.
+
+That Unix socket is not optional plumbing — it is the only route out of the namespace, so
+`listeners.explicit.unix_socket` (see [`SO_PEERCRED` and the Unix
+listener](#so_peercred-and-the-unix-listener) above) must be set in the config `marshal run`
+and `marshal serve` share. Without it, `marshal run --isolation netns` refuses to start rather
+than silently falling back to TCP, which would put the agent's egress route back outside the
+namespace:
+
+```
+error: netns isolation reaches the proxy through a Unix socket, so
+`listeners.explicit.unix_socket` must be set in the config
+```
+
+`--isolation cgroup` and `--isolation none` have no such requirement — they reach the proxy
+over TCP like anything else, so `unix_socket` is only mandatory when `--isolation netns` (the
+default) is in play.
+
+Setting `unix_socket` in the config is necessary but not sufficient: the socket file itself is
+created by `marshal serve` at startup, not by `marshal run`. `marshal run --isolation netns`
+only checks that the path already exists and refuses to start otherwise:
+
+```
+error: /run/user/1000/marshal.sock does not exist. netns isolation reaches the proxy through
+this socket, so the proxy must be running with `listeners.explicit.unix_socket` configured.
+```
+
+So `marshal serve` (using a config with `unix_socket` set) has to already be running before
+`marshal run --isolation netns` is invoked against the same config:
+
+```bash
+marshal --config config/marshal.yaml serve &
+marshal --config config/marshal.yaml run --profile coding-agent -- claude
+```
 
 The difference is not theoretical. The same agent, told to unset its proxy variables and
 connect directly to a host its profile denies:

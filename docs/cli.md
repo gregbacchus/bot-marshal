@@ -194,6 +194,14 @@ Launches an agent under a profile. See
 [Identity › Launching an agent](configuration/identity.md#launching-an-agent) for what each
 isolation mode actually buys.
 
+**`run` is not standalone — a `marshal serve` for the same config must already be running
+before you invoke it.** `run` only prepares the agent's environment (and, under `--isolation
+netns`, its sandbox); it does not start the proxy itself. Skip this and the agent gets pointed
+at a proxy that isn't there — for `--isolation netns` that's an immediate hard failure, since
+the socket `serve` creates doesn't exist yet (see below); for `--isolation cgroup`/`none` it
+surfaces later, as connection errors from the agent itself when it tries to talk to a proxy
+nothing is listening on.
+
 | flag | default | |
 |---|---|---|
 | `--profile <name>` | none | a *named* profile, from `profiles/`; omit to run under the embedded `profile:` instead — the same one unattributed traffic falls back to |
@@ -212,7 +220,17 @@ the agent working and failing.
 
 `--isolation netns` gives the agent only the workspace, the standard system directories, the
 CA certificate, and the marshal socket — not the whole filesystem (see
-[Identity](configuration/identity.md#netns-enforces-rather-than-identifies)). A tool that
+[Identity](configuration/identity.md#netns-enforces-rather-than-identifies)). It also requires
+`listeners.explicit.unix_socket` to be set in the config, since the Unix socket is the only
+route out of the namespace; without it, `marshal run` fails fast with `netns isolation reaches
+the proxy through a Unix socket, so listeners.explicit.unix_socket must be set in the config`
+rather than starting (see [Identity › `netns` enforces rather than
+identifies](configuration/identity.md#netns-enforces-rather-than-identifies)). Setting
+`unix_socket` in the config is not enough on its own: the socket file is created by `marshal
+serve`, so `marshal serve` must already be running against a config with `unix_socket` set
+before `marshal run --isolation netns` is invoked, or it fails fast with `<path> does not
+exist. netns isolation reaches the proxy through this socket, so the proxy must be running
+with listeners.explicit.unix_socket configured`. A tool that
 needs something else, such as a package manager cache kept outside the workspace, needs
 `--bind` for it explicitly:
 
