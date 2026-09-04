@@ -9,6 +9,13 @@ repository.workspace = true
 publish.workspace = true
 homepage = "https://gregbacchus.github.io/bot-marshal/"
 
+# `publish = false` (set workspace-wide so crates.io release-pr checks don't fail on
+# version-less path deps) also reads as "not distable" to `dist`, which otherwise infers
+# distability from `publish`. This is the CLI dist actually ships as GitHub/Homebrew
+# binaries, so tell it explicitly.
+[package.metadata.dist]
+dist = true
+
 [lints]
 workspace = true
 
