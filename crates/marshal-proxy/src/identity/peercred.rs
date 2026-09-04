@@ -238,7 +238,7 @@ fn resolve_id<T: Copy>(
     let mut entry: T = unsafe { std::mem::zeroed() };
     let mut buf_len = 1024usize;
     loop {
-        let mut buf = vec![0i8; buf_len];
+        let mut buf = vec![0 as libc::c_char; buf_len];
         let mut result: *mut T = std::ptr::null_mut();
         #[allow(unsafe_code)]
         let rc = unsafe {
