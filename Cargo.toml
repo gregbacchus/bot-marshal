@@ -8,6 +8,9 @@ edition = "2024"
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gregbacchus/bot-marshal"
+# No crate is published to crates.io yet; without this, release-plz `cargo package`s
+# every crate to determine versions and fails on the version-less path dependencies.
+publish = false
 
 [workspace.dependencies]
 # internal
