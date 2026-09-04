@@ -90,3 +90,8 @@ missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 todo = "allow"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

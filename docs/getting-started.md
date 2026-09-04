@@ -3,12 +3,15 @@
 This walks from an empty machine to a request that the proxy actually judged. It uses a
 deliberately minimal config — see [Configuration](configuration/) once it works.
 
-## Build
+## Install
+
+Homebrew installs the appropriate prebuilt binary on macOS or Linux:
 
 ```bash
-cargo build --release
-alias marshal=./target/release/marshal   # or install it onto PATH
+brew install gregbacchus/tap/bot-marshal
 ```
+
+To build from source instead, see [Developing](https://github.com/gregbacchus/bot-marshal#developing).
 
 ## Write a config
 

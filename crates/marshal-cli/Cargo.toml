@@ -1,11 +1,12 @@
 [package]
 name = "marshal-cli"
-description = "bot-marshal command line interface"
+description = "Egress firewall for AI agents"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage = "https://gregbacchus.github.io/bot-marshal/"
 
 [lints]
 workspace = true

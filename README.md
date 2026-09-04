@@ -18,8 +18,7 @@ independent Rust implementation rather than a port.
 ## Try it
 
 ```bash
-cargo build --release
-alias marshal=./target/release/marshal
+brew install gregbacchus/tap/bot-marshal
 
 mkdir -p ~/.config/bot-marshal
 cat > ~/.config/bot-marshal/config.yaml <<'CFG'
@@ -108,3 +107,17 @@ site/            the published documentation site, built from docs/
 ```
 
 `AGENTS.md` covers working on this codebase.
+
+## Developing
+
+Build the binary from the repository and give it a shell-local alias:
+
+```bash
+cargo build --release
+alias marshal=./target/release/marshal
+```
+
+Releases are produced by [the release workflow](.github/workflows/release.yml) when a version
+tag such as `v0.1.0` is pushed. It publishes prebuilt macOS and Linux archives to GitHub and
+updates `gregbacchus/homebrew-tap`. The tap repository must exist, and this repository must
+have a `HOMEBREW_TAP_TOKEN` Actions secret with write access to it.
