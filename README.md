@@ -123,7 +123,12 @@ cargo build --release
 alias marshal=./target/release/marshal
 ```
 
-Releases are produced by [the release workflow](.github/workflows/release.yml) when a version
-tag such as `v0.1.0` is pushed. It publishes prebuilt macOS and Linux archives to GitHub and
-updates `gregbacchus/homebrew-tap`. The tap repository must exist, and this repository must
-have a `HOMEBREW_TAP_TOKEN` Actions secret with write access to it.
+Merges to `main` with a release-worthy Conventional Commit create or update a release pull
+request. Merging that pull request updates the workspace version and changelog, creates the
+version tag, and dispatches [the release workflow](.github/workflows/release.yml). The workflow
+publishes prebuilt macOS and Linux archives to GitHub and updates
+`gregbacchus/homebrew-tap`.
+
+The tap repository must exist, and this repository must have a `HOMEBREW_TAP_TOKEN` Actions
+secret with write access to it. To change the generated release workflow, edit
+`dist-workspace.toml` and run `dist generate`; do not edit the workflow directly.
