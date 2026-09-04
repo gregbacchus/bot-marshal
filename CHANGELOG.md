@@ -2,6 +2,19 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.1.1](https://github.com/gregbacchus/bot-marshal/compare/6443d1ef2c5ecb0ee9ffdd91d71103e75a8a9619..v0.1.1) - 2026-09-04
+#### Bug Fixes
+- ![BREAKING](https://img.shields.io/badge/BREAKING-red) replace release-plz with cocogitto for version automation - ([3089110](https://github.com/gregbacchus/bot-marshal/commit/3089110d47dcd84b649cc33ce1628681ace570e6)) - test, Claude Sonnet 5
+- skip cargo package for unpublished workspace crates in release-plz - ([d5de0de](https://github.com/gregbacchus/bot-marshal/commit/d5de0de9ab19babd2d7d5890daf5e07d0fd02878)) - Greg Bacchus, Claude Sonnet 5
+- keep marshal-cli distable after publish = false - ([0f37468](https://github.com/gregbacchus/bot-marshal/commit/0f3746878b07bb961f37f22e51e1ac286f6b9275)) - Greg Bacchus, Claude Sonnet 5
+- mark every crate as not published - ([ddb5e38](https://github.com/gregbacchus/bot-marshal/commit/ddb5e3804f4f7f5219884fc1fb2f9349f2edc1b4)) - Greg Bacchus, Claude Opus 5
+#### Continuous Integration
+- build only x86_64-linux on pull requests, every target on release - ([d0f9ccd](https://github.com/gregbacchus/bot-marshal/commit/d0f9ccdb08378aa53027fd3914b94cd4383850f1)) - test, Claude Sonnet 5
+- allow the plan job's workflow hand-edit through dist's drift check - ([d52d6c0](https://github.com/gregbacchus/bot-marshal/commit/d52d6c0060c375cb431538eb76a0122424db9185)) - Greg Bacchus, Claude Sonnet 5
+- skip the release build on release pull requests - ([e76faf6](https://github.com/gregbacchus/bot-marshal/commit/e76faf6413a4935c92db86f89382a7b2e3ad945a)) - Greg Bacchus, Claude Opus 5
+
+- - -
+
 ## [0.1.0](https://github.com/gregbacchus/bot-marshal/releases/tag/v0.1.0) - 2026-09-04
 
 ### Added
