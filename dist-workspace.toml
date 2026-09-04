@@ -11,6 +11,8 @@ packages = ["marshal-cli"]
 ci = "github"
 # Releases are dispatched by release-plz after it creates the version tag.
 dispatch-releases = true
+# Build every target on pull requests so platform failures cannot reach a release tag.
+pr-run-mode = "upload"
 # The installers to generate for each app
 installers = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
