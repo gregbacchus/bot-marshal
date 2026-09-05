@@ -2779,16 +2779,23 @@ fn build_oauth2_source(
             }
         }
         GrantSpec::AuthorizationCode => {
+            // Both fields exist only to let `marshal secrets oauth login <name>` know where
+            // to send the browser and where to receive it back. A swap that is already
+            // enrolled never drives that flow again — and bootstrap capture writes exactly
+            // this shape: it enrols the refresh token itself, from a token exchange it
+            // observed, and never learns the authorization endpoint at all, since it only
+            // ever watches the redemption, not the authorization request that preceded it.
+            let already_enrolled = deps.store.persists() && deps.store.grant(swap_label)?.is_some();
             anyhow::ensure!(
-                spec.authorization_endpoint.is_some(),
-                "source.authorization_endpoint is required for `grant: authorization_code`"
+                spec.authorization_endpoint.is_some() || already_enrolled,
+                "source.authorization_endpoint is required for `grant: authorization_code` \
+                 until `{swap_label}` is enrolled — run `marshal secrets oauth login \
+                 {swap_label}` first, or add it now"
             );
-            // Not required under `capture: in_band`: there the redirect URI is the agent's,
-            // taken from the request marshal is intercepting, and marshal binds nothing. It
-            // is still required for `marshal secrets oauth login`, which does bind it — and
-            // that command says so itself if it is missing.
             anyhow::ensure!(
-                spec.redirect_uri.is_some() || spec.capture == CaptureSpec::InBand,
+                spec.redirect_uri.is_some()
+                    || spec.capture == CaptureSpec::InBand
+                    || already_enrolled,
                 "source.redirect_uri is required for `grant: authorization_code`, so that \
                  `marshal secrets oauth login` has a loopback address to receive the code on"
             );
@@ -3477,6 +3484,55 @@ request_transforms:
         let err = build_injector(&p, &marshal_config::model::Config::default(), &test_deps())
             .unwrap_err();
         assert!(err.to_string().contains("state_dir"), "{err}");
+    }
+
+    #[test]
+    fn an_already_enrolled_authorization_code_swap_needs_neither_endpoint_nor_redirect_uri() {
+        // Exactly the shape `write_discovered_swap` writes after a bootstrap capture: the
+        // refresh token is already enrolled, and marshal never learned (and will never need)
+        // the authorization endpoint, since it only ever observed the token redemption.
+        let dir = std::env::temp_dir()
+            .join(format!("marshal-cli-test-already-enrolled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(marshal_secrets::TokenStore::new(Some(dir.clone())));
+        store
+            .put_grant(
+                "SERVICE",
+                marshal_secrets::StoredGrant {
+                    refresh_token: marshal_core::SecretValue::new("rt".to_owned()),
+                    obtained_at: 0,
+                    scope: None,
+                },
+            )
+            .unwrap();
+        let deps = SecretDeps {
+            store,
+            tls: marshal_http::default_tls_config(),
+            guard: None,
+            redactor: marshal_core::Redactor::default(),
+        };
+
+        let p = profile(
+            r#"
+default_action: deny
+request_transforms:
+  secrets:
+    - name: SERVICE
+      source:
+        type: oauth2
+        grant: authorization_code
+        token_endpoint: https://auth.example.com/oauth2/token
+        client_id: marshal
+        client_auth: none
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+"#,
+        );
+        let result = build_injector(&p, &marshal_config::model::Config::default(), &deps);
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

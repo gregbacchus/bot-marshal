@@ -159,9 +159,19 @@ rather than failing obscurely.
 
 | field | |
 |---|---|
-| `authorization_endpoint` | required by `authorization_code` |
-| `redirect_uri` | required by `authorization_code`. **Loopback only** — `marshal secrets oauth login` binds it to receive the code, and a redirect anywhere else would deliver the code to something that is not marshal |
+| `authorization_endpoint` | required by `authorization_code`, unless the swap is already enrolled — see below |
+| `redirect_uri` | required by `authorization_code`, unless already enrolled. **Loopback only** — `marshal secrets oauth login` binds it to receive the code, and a redirect anywhere else would deliver the code to something that is not marshal |
 | `device_authorization_endpoint` | required by `device_code` |
+
+**Both endpoint fields exist only to let `marshal secrets oauth login <name>` know where to
+send the browser and where to receive it back** — once a swap is enrolled, minting a fresh
+access token only ever needs `token_endpoint`, `client_id`, and the stored refresh token,
+never the authorization endpoint. So a swap that is *already* enrolled when `config check`
+first sees it does not need either field. This is exactly the shape
+[bootstrap capture](#bootstrap-capture) writes: it enrols the refresh token itself, from a
+token exchange it observed, and never learns the authorization endpoint at all, since it only
+ever watches the redemption, not the authorization request that came before it. Add either
+field later and it takes effect the ordinary way; nothing about omitting it is permanent.
 
 `scope` almost certainly needs `offline_access` (or Google's `access_type: offline` in
 `extra_params`): without it most providers complete the flow and issue no refresh token, and
