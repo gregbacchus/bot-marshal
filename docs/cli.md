@@ -141,17 +141,20 @@ Two things worth knowing:
   does not survive a restart. Most providers need `offline_access` in the requested scope, which
   is the tool's request to change, not marshal's.
 
-**If nothing gets captured, this is what to watch.** There is no `--audit-log` here — it is
-scoped to `serve` on purpose, since a durable copy on disk is exactly what a foreground,
-one-shot capture session should never leave behind. The global `--log-detail`/`--log` flags
-work here exactly as they do for `serve`, though: `--log-detail access` shows every request the
-session sees, and `--log debug` adds *why* a given POST wasn't treated as a login exchange (the
-wrong `grant_type`, no body, filtered out by `--host`) rather than leaving you to guess.
+**If nothing gets captured, this is what to watch.** The global `--log-detail`/`--log` flags
+work here exactly as they do for `serve`: `--log-detail access` shows every request the session
+sees, and `--log debug` adds *why* a given POST wasn't treated as a login exchange (the wrong
+`grant_type`, no body, filtered out by `--host`) rather than leaving you to guess. `--audit-log
+<path>` is also available, appending the full structured JSON record for every request the
+same way `serve --audit-log` does — like every audit record it never carries a body or a
+captured secret's value, since the redactor already knows any credential this session captures
+before logging anything about that request (ADR-0029), and it's meaningless without
+`--wait`/`--run` since there's no bootstrap session to log otherwise.
 
-Where that output should go depends on which of `--wait`/`--run` you used, because `--run`'s
-sandboxed command inherits marshal's own stdout and stderr directly — nothing separates the two
-streams. For `--wait`, marshal is the only thing on this terminal (you drive the tool's login
-in a different one), so pointing logs at it is fine:
+Where per-request *console* output should go depends on which of `--wait`/`--run` you used,
+because `--run`'s sandboxed command inherits marshal's own stdout and stderr directly —
+nothing separates the two streams. For `--wait`, marshal is the only thing on this terminal
+(you drive the tool's login in a different one), so pointing logs at it is fine:
 
 ```bash
 marshal --log debug --log-detail access --log-sink stdout \
@@ -161,7 +164,16 @@ marshal --log debug --log-detail access --log-sink stdout \
 For `--run`, that same flag would interleave marshal's own log lines with whatever the
 sandboxed tool renders on the same terminal — corrupting anything that draws with absolute
 cursor positioning or an alternate screen buffer, which is most TUIs, including an interactive
-login prompt. Send logs to journald instead and tail them from a second terminal or pane:
+login prompt. `--audit-log` sidesteps this entirely — a file, not the shared terminal — and is
+the more reliable choice for `--run` for exactly that reason, and unlike journald it's a file
+you named yourself and can delete once you're done with it:
+
+```bash
+marshal --audit-log /tmp/bootstrap-debug.jsonl \
+  secrets oauth login CLAUDE_SUBSCRIPTION --run -- some-vendor-cli login
+```
+
+If you'd rather watch live instead, journald works too, tailed from a second terminal or pane:
 
 ```bash
 marshal --log debug --log-detail access --log-sink journald \

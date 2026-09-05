@@ -246,6 +246,16 @@ enum OauthCommand {
         #[arg(long = "bind-group", requires = "run")]
         bind_groups: Vec<String>,
 
+        /// Also write the full structured JSON audit record for every request the bootstrap
+        /// session sees to this file, in addition to whatever `--log-detail` shows. Append
+        /// mode, created `0600` if missing. Meaningless without `--wait`/`--run`. Like every
+        /// audit record, this never carries a body or a captured secret's value — the
+        /// redactor learns any credential this session captures before logging anything about
+        /// that request (ADR-0029) — so this is exactly as safe as `serve --audit-log` is.
+        /// Unlike journald, a file you named yourself is one you can also delete yourself.
+        #[arg(long)]
+        audit_log: Option<PathBuf>,
+
         /// The command `--run` launches. Everything after `--` reaches it untouched.
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
@@ -1638,6 +1648,7 @@ async fn oauth_command(
             isolation,
             binds,
             bind_groups,
+            audit_log,
             command,
         } => {
             anyhow::ensure!(
@@ -1651,6 +1662,11 @@ async fn oauth_command(
                 !run || !command.is_empty(),
                 "`--run` needs a command to launch: \
                  `marshal secrets oauth login {name} --run -- <cmd> [args...]`"
+            );
+            anyhow::ensure!(
+                audit_log.is_none() || wait || run,
+                "--audit-log needs --wait or --run — there is no bootstrap session to log \
+                 without one"
             );
 
             // The bootstrap path forks here, before any swap lookup: it runs precisely when no
@@ -1689,6 +1705,7 @@ async fn oauth_command(
                     run: command,
                     isolation,
                     extra_binds: resolved_binds,
+                    audit_log,
                 };
                 return bootstrap_capture(config_path, &cfg, &deps, opts, log_detail).await;
             }
@@ -1738,15 +1755,16 @@ struct BootstrapOptions {
     isolation: String,
     /// Resolved `--bind`/`--bind-group` paths. Empty for `--wait`, which sandboxes nothing.
     extra_binds: Vec<PathBuf>,
+    audit_log: Option<PathBuf>,
 }
 
-/// An audit sink that keeps nothing.
+/// The always-on floor under whatever `--log-detail`/`--audit-log` add: one debug-level line
+/// per request, so `--log debug` alone shows *something* even with neither flag set.
 ///
-/// `Server::new` requires a sink and there is no no-op one in the tree. A bootstrap session is
-/// a foreground diagnostic that exists for one exchange, so there is nothing worth persisting —
-/// and the one thing that must not happen is a captured credential reaching a durable record.
-/// Records still carry no body content (`mitm::emit` never writes one), but discarding removes
-/// the question entirely.
+/// `Server::new` requires a sink and there is no no-op one in the tree; this is that sink,
+/// not a safety mechanism — records carry no body content and the redactor already knows any
+/// secret this session captures before anything is logged about that request (ADR-0029), so
+/// `--audit-log`/`--log-detail` here are exactly as safe as they are for `serve`.
 #[derive(Debug)]
 struct DiscardingAudit;
 
@@ -1846,12 +1864,10 @@ async fn bootstrap_capture(
     };
 
     // `DiscardingAudit` always runs — its own debug-level line is what `--log debug` has
-    // always shown for a bootstrap session. On top of that, honour `--log-detail` exactly as
-    // `serve` does: the same `RequestTracingSink`, redacted through the same redactor bootstrap
-    // already teaches before returning anything captured (ADR-0029), so nothing here is any
-    // less safe than what `serve --log-detail access` already prints for ordinary traffic.
-    // What stays unavailable on purpose is `--audit-log` — a *durable* copy on disk, which is
-    // exactly the thing a foreground, one-shot capture session should never leave behind.
+    // always shown for a bootstrap session. On top of that, honour `--log-detail` and
+    // `--audit-log` exactly as `serve` does: the same sinks, redacted through the same
+    // redactor bootstrap already teaches before returning anything captured (ADR-0029), so
+    // neither is any less safe here than for ordinary `serve` traffic.
     let mut sinks: Vec<Arc<dyn AuditSink>> = vec![Arc::new(DiscardingAudit)];
     match log_detail {
         LogDetail::Log => {}
@@ -1867,6 +1883,18 @@ async fn bootstrap_capture(
                 deps.redactor.clone(),
             )));
         }
+    }
+    if let Some(path) = &opts.audit_log {
+        // Mode 0600 on creation, same as `serve --audit-log` — an existing file keeps
+        // whatever permissions it already had.
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("opening audit log {}: {e}", path.display()))?;
+        sinks.push(Arc::new(JsonSink::new(file).redacting(deps.redactor.clone())));
     }
 
     let server = marshal_proxy::Server::new(
