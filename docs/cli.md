@@ -148,15 +148,35 @@ work here exactly as they do for `serve`, though: `--log-detail access` shows ev
 session sees, and `--log debug` adds *why* a given POST wasn't treated as a login exchange (the
 wrong `grant_type`, no body, filtered out by `--host`) rather than leaving you to guess.
 
+Where that output should go depends on which of `--wait`/`--run` you used, because `--run`'s
+sandboxed command inherits marshal's own stdout and stderr directly — nothing separates the two
+streams. For `--wait`, marshal is the only thing on this terminal (you drive the tool's login
+in a different one), so pointing logs at it is fine:
+
 ```bash
 marshal --log debug --log-detail access --log-sink stdout \
-  secrets oauth login CLAUDE_SUBSCRIPTION --run -- some-vendor-cli login
+  secrets oauth login CLAUDE_SUBSCRIPTION --wait
 ```
 
-`--log-sink stdout` matters here specifically: `auto` (the default) prefers journald when it's
-reachable, which most systems' interactive sessions have running, so debug output can vanish
-into the journal instead of your terminal with no error to say so. Force `stdout` while
-debugging a capture session, or check `journalctl` if you'd rather not.
+For `--run`, that same flag would interleave marshal's own log lines with whatever the
+sandboxed tool renders on the same terminal — corrupting anything that draws with absolute
+cursor positioning or an alternate screen buffer, which is most TUIs, including an interactive
+login prompt. Send logs to journald instead and tail them from a second terminal or pane:
+
+```bash
+marshal --log debug --log-detail access --log-sink journald \
+  secrets oauth login CLAUDE_SUBSCRIPTION --run -- some-vendor-cli login
+# in another terminal:
+journalctl -t marshal -f
+```
+
+(`journalctl --user -t marshal -f` if the plain form shows nothing or needs permissions you
+don't have.)
+
+`--log-sink auto` (the default) already prefers journald when it's reachable, which is most
+interactive sessions — so in practice you may already be looking in the wrong place rather
+than needing to change anything, and `journalctl` is where to look first regardless of which
+sink you asked for.
 
 This is a different mechanism from
 [`capture: in_band`](configuration/oauth2.md#in-band-capture), with a different threat
