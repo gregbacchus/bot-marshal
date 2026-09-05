@@ -1939,7 +1939,49 @@ async fn bootstrap_capture(
 
     serving.abort();
     let _ = std::fs::remove_dir_all(&socket_dir);
-    report_bootstrap(&opts, outcome?)
+    report_bootstrap(config_path, cfg, &opts, outcome?)
+}
+
+/// Persist the discovered swap as a named transform bundle under `transforms_path`, so using
+/// it is `transforms: <name>` on a profile rather than hand-copying a multi-line block.
+/// Filename is the swap name, matching the "filename is the key" convention every other
+/// `*_path` directory already uses (see `marshal_config::load`). Never overwrites an existing
+/// file — running bootstrap again is not licence to clobber something a human already edited.
+fn write_discovered_swap(
+    config_path: &std::path::Path,
+    cfg: &marshal_config::model::Config,
+    name: &str,
+    learned: &marshal_secrets::Bootstrapped,
+) -> anyhow::Result<Option<PathBuf>> {
+    let dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let transforms_dir = marshal_config::resolve_dir(dir, &cfg.transforms_path);
+    std::fs::create_dir_all(&transforms_dir)?;
+    let path = transforms_dir.join(format!("{name}.yaml"));
+    if path.exists() {
+        return Ok(None);
+    }
+
+    let client_id = learned
+        .client_id
+        .as_deref()
+        .unwrap_or("# the exchange sent none; check the provider's docs");
+    let mut yaml = String::new();
+    yaml.push_str("request_transforms:\n  secrets:\n");
+    yaml.push_str(&format!("    - name: {name}\n"));
+    yaml.push_str("      source:\n");
+    yaml.push_str("        type: oauth2\n");
+    yaml.push_str("        grant: authorization_code\n");
+    yaml.push_str(&format!("        token_endpoint: {}\n", learned.token_endpoint));
+    yaml.push_str(&format!("        client_id: {client_id}\n"));
+    if let Some(uri) = &learned.redirect_uri {
+        yaml.push_str(&format!("        redirect_uri: {uri}\n"));
+    }
+    yaml.push_str("        client_auth: none   # adjust if the provider needs a client secret\n");
+    yaml.push_str("      inject: { type: bearer }\n");
+    yaml.push_str("      rules: [{ host: \"...\" }]   # scope this to the API it authenticates\n");
+
+    std::fs::write(&path, yaml)?;
+    Ok(Some(path))
 }
 
 /// Preflight exactly what `marshal run` does, with the same alternatives named.
@@ -2022,9 +2064,26 @@ async fn run_sandboxed_bootstrap(
     let mut child = tokio::process::Command::from(cmd_into_tokio(&mut cmd)).spawn()?;
 
     tokio::select! {
-        // The capture is what matters; a command that exits afterwards is fine.
-        result = captured => result
-            .map_err(|_| anyhow::anyhow!("the capture channel closed before anything was captured")),
+        // The capture is what matters; a command that exits afterwards is fine. But the proxy
+        // and the child both stay alive past this point rather than tearing down immediately:
+        // the tool likely still has more requests to make (telemetry, its own follow-up calls,
+        // or it simply becomes a long-lived interactive session once login succeeds), and
+        // killing the proxy out from under it here is exactly what used to make it fail loudly
+        // with its own proxy error moments after capture had already succeeded. The full report
+        // is deferred to the caller, which only prints it once this function returns — so it
+        // never lands mid-render of whatever the tool is still putting on the same terminal.
+        result = captured => {
+            let bootstrapped = result.map_err(|_| {
+                anyhow::anyhow!("the capture channel closed before anything was captured")
+            })?;
+            println!(
+                "\n`{}` captured. Exit `{}` when you're ready.",
+                opts.name,
+                opts.run.join(" ")
+            );
+            let _ = child.wait().await;
+            Ok(bootstrapped)
+        }
         status = child.wait() => {
             let status = status?;
             anyhow::bail!(
@@ -2061,6 +2120,8 @@ fn cmd_into_tokio(cmd: &mut std::process::Command) -> std::process::Command {
 
 /// Report what was learned — configuration, never a credential.
 fn report_bootstrap(
+    config_path: &std::path::Path,
+    cfg: &marshal_config::model::Config,
     opts: &BootstrapOptions,
     learned: marshal_secrets::Bootstrapped,
 ) -> anyhow::Result<()> {
@@ -2083,7 +2144,35 @@ fn report_bootstrap(
         println!("  granted scope: {scope}");
     }
     println!("  the refresh token is stored under `state_dir`; nothing else was kept.\n");
-    println!("Discovered configuration — add this to a profile to use it unattended:\n");
+
+    match write_discovered_swap(config_path, cfg, &opts.name, &learned) {
+        Ok(Some(path)) => {
+            println!("Discovered configuration written to {}.", path.display());
+            println!(
+                "Add `transforms: {}` to a profile to use it unattended — it still needs the \
+                 `rules` host filled in, since bootstrap only learns the token endpoint, not \
+                 which API the credential is for.",
+                opts.name
+            );
+        }
+        Ok(None) => {
+            println!(
+                "A file already exists where this would have written the discovered \
+                 configuration, so nothing was overwritten. Add it by hand instead:\n"
+            );
+            print_discovered_yaml(opts, &learned);
+        }
+        Err(e) => {
+            println!(
+                "Could not write the discovered configuration ({e}). Add it by hand instead:\n"
+            );
+            print_discovered_yaml(opts, &learned);
+        }
+    }
+    Ok(())
+}
+
+fn print_discovered_yaml(opts: &BootstrapOptions, learned: &marshal_secrets::Bootstrapped) {
     println!("  - name: {}", opts.name);
     println!("    source:");
     println!("      type: oauth2");
@@ -2099,7 +2188,6 @@ fn report_bootstrap(
     println!("      client_auth: none   # adjust if the provider needs a client secret");
     println!("    inject: {{ type: bearer }}");
     println!("    rules: [{{ host: \"...\" }}]   # scope this to the API it authenticates");
-    Ok(())
 }
 
 fn describe_age(obtained_at: i64) -> String {
@@ -3000,6 +3088,70 @@ struct HostRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bootstrapped(client_id: Option<&str>) -> marshal_secrets::Bootstrapped {
+        marshal_secrets::Bootstrapped {
+            token_endpoint: "https://example.com/token".to_owned(),
+            grant_type: "authorization_code".to_owned(),
+            client_id: client_id.map(str::to_owned),
+            redirect_uri: Some("https://example.com/callback".to_owned()),
+            scope: Some("offline_access".to_owned()),
+            enrolled: true,
+        }
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("marshal-cli-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_discovered_swap_writes_a_named_transform_bundle() {
+        let dir = scratch_dir("write-swap");
+        let config_path = dir.join("marshal.yaml");
+        let cfg = marshal_config::model::Config {
+            transforms_path: "transforms".into(),
+            ..Default::default()
+        };
+
+        let path =
+            write_discovered_swap(&config_path, &cfg, "MY_SWAP", &bootstrapped(Some("abc-123")))
+                .unwrap()
+                .expect("should write, nothing there yet");
+        assert_eq!(path, dir.join("transforms/MY_SWAP.yaml"));
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("name: MY_SWAP"));
+        assert!(written.contains("client_id: abc-123"));
+        assert!(written.contains("token_endpoint: https://example.com/token"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_discovered_swap_never_overwrites_an_existing_file() {
+        let dir = scratch_dir("no-overwrite");
+        let config_path = dir.join("marshal.yaml");
+        let cfg = marshal_config::model::Config {
+            transforms_path: "transforms".into(),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(dir.join("transforms")).unwrap();
+        std::fs::write(dir.join("transforms/MY_SWAP.yaml"), "hand-edited: true\n").unwrap();
+
+        let result =
+            write_discovered_swap(&config_path, &cfg, "MY_SWAP", &bootstrapped(None)).unwrap();
+        assert!(result.is_none(), "must decline to write over an existing file");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("transforms/MY_SWAP.yaml")).unwrap(),
+            "hand-edited: true\n",
+            "the existing file's content must be untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Deps with no state directory and no guard: enough to build any source, and the
     /// oauth2-specific paths that need more say so themselves.

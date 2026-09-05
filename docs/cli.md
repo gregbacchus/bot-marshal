@@ -92,10 +92,25 @@ subscription login, where the `client_id` and endpoints belong to them and are n
 Instead of driving a flow it already knows, marshal starts an intercepting proxy and learns the
 credential from the token exchange the tool itself performs. Nothing needs to be configured
 beforehand: here `<name>` is only the storage key the result is filed under, not a reference to
-a swap. On success marshal prints the configuration it discovered, ready to paste into a
-profile. For what this proxy actually matches on, and why matching on shape alone is safe here
+a swap. For what this proxy actually matches on, and why matching on shape alone is safe here
 but would not be as a standing part of `serve`, see
 [OAuth2 credentials § Bootstrap capture](configuration/oauth2.md#bootstrap-capture).
+
+**With `--run`, capture and reporting are two separate moments.** The moment the exchange is
+captured, marshal prints one short line and nothing else — the sandboxed command keeps running
+(and, for a login flow, usually keeps making its own requests, or becomes the tool's ordinary
+interactive session) sharing the same terminal, so anything longer would print into whatever it
+is still rendering. The full report — enrolled, granted scope, discovered configuration — is
+held back until the command actually exits, however long that takes; there is no timeout on
+this part, only on waiting for the capture itself.
+
+**The discovered configuration is written to a file, not just printed.** On success, a named
+transform bundle is written to `transforms_path` (default `transforms/`) as `<name>.yaml` —
+`token_endpoint`, `client_id`, `redirect_uri`, everything but the `rules` host, which bootstrap
+has no way to know: it learns where the *token* endpoint is, not which API the credential is
+for. Add `transforms: <name>` to whichever profile needs it, fill in that one field, and it's
+live — no copying a multi-line block by hand. An existing file at that path is never
+overwritten; the full block is printed instead, exactly as before this existed.
 
 ```bash
 marshal secrets oauth login CLAUDE_SUBSCRIPTION --wait

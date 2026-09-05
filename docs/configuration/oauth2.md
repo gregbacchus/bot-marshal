@@ -291,10 +291,12 @@ foreground, under a timeout, with somebody watching — not as a standing part o
   the tool never ends up holding a working credential — at the cost of its login reporting
   failure, which from its point of view is exactly what happened.
 
-Either way, a refresh token the exchange produced is written under `state_dir`, and marshal
-prints the configuration it discovered — endpoint, `client_id`, scope — ready to paste into a
-profile if you want an ongoing declared swap afterward. Bootstrap capture only seeds a
-credential once; it is not itself a standing part of the runtime.
+Either way, a refresh token the exchange produced is written under `state_dir`, and the
+configuration it discovered — endpoint, `client_id`, scope — is written as a named transform
+bundle under `transforms_path` (see [`marshal secrets oauth login --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd)
+for exactly what), ready to attach to a profile with `transforms: <name>` if you want an
+ongoing declared swap afterward. Bootstrap capture only seeds a credential once; it is not
+itself a standing part of the runtime.
 
 Full command reference, flags, and the sandboxing `--run` applies:
 [`marshal secrets oauth login <name> --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd).
