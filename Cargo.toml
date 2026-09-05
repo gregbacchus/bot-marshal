@@ -76,6 +76,10 @@ moka = { version = "0.12", features = ["future", "sync"] }
 socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2.189"
 
+# body decoding (decode-only: nothing here ever compresses)
+flate2 = "1"
+brotli-decompressor = "5"
+
 # observability + errors
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

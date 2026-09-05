@@ -280,7 +280,11 @@ foreground, under a timeout, with somebody watching — not as a standing part o
 `--mode` decides what happens to the exchange it matches:
 
 * **`observe`** (default) — forwards it untouched. The tool's own login succeeds normally and
-  keeps its own working credential; marshal simply also learns one.
+  keeps its own working credential; marshal simply also learns one. It reads the response
+  whatever `Content-Encoding` the real provider used (gzip and deflate; `br`, since a modern
+  client usually advertises it too) — the mitm layer itself never decodes bodies, so this is
+  the one place in this crate that does, because it is inspecting somebody else's exchange
+  rather than making its own.
 * **`steal`** — redeems the code out of band itself and answers the tool with a sentinel, so
   the tool never ends up holding a working credential — at the cost of its login reporting
   failure, which from its point of view is exactly what happened.

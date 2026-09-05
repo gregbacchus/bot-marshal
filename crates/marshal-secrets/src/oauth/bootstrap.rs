@@ -58,6 +58,50 @@ const BODY_CAP: usize = 64 * 1024;
 const BOOTSTRAPPABLE: [&str; 2] =
     ["authorization_code", "urn:ietf:params:oauth:grant-type:device_code"];
 
+/// Decode a response body per its `Content-Encoding`, or return it unchanged.
+///
+/// The mitm layer forwards bodies exactly as the upstream sent them — decoding is left to
+/// whoever actually needs to read one, and observe mode is the one place in this crate that
+/// does: it is sniffing a client's real exchange with a real provider, not making its own call
+/// where it could simply not ask for compression. Any encoding this does not recognise, or
+/// fails to decode, is returned as-is — the JSON parse that follows fails cleanly on it either
+/// way, exactly as it always has for an encoding this cannot handle.
+fn decode_body(headers: &http::HeaderMap, body: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+
+    let Some(encoding) = headers.get(http::header::CONTENT_ENCODING).and_then(|v| v.to_str().ok())
+    else {
+        return body.to_vec();
+    };
+
+    match encoding.trim() {
+        "gzip" | "x-gzip" => {
+            let mut out = Vec::new();
+            match flate2::read::GzDecoder::new(body).read_to_end(&mut out) {
+                Ok(_) => out,
+                Err(_) => body.to_vec(),
+            }
+        }
+        "deflate" => {
+            let mut out = Vec::new();
+            match flate2::read::ZlibDecoder::new(body).read_to_end(&mut out) {
+                Ok(_) => out,
+                Err(_) => body.to_vec(),
+            }
+        }
+        "br" => {
+            let mut out = Vec::new();
+            match brotli_decompressor::Decompressor::new(body, body.len().max(4096))
+                .read_to_end(&mut out)
+            {
+                Ok(_) => out,
+                Err(_) => body.to_vec(),
+            }
+        }
+        _ => body.to_vec(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureMode {
     /// Forward the request untouched and keep a copy of what comes back. The client's own
@@ -302,7 +346,22 @@ impl ResponseTransform for BootstrapCapture {
         }
         let Some(params) = self.interesting(cx) else { return Ok(()) };
         let Some(body) = resp.body.as_bytes() else { return Ok(()) };
-        let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else { return Ok(()) };
+        // The mitm layer never decodes `Content-Encoding` — see `marshal_proxy::mitm` — so
+        // whatever the real client and provider negotiated (virtually always gzip or br in
+        // practice, since every real HTTP client advertises support) is what arrives here.
+        // Observe mode is watching somebody else's exchange, not making its own, so unlike
+        // marshal's own outbound calls there is no way to just not ask for compression.
+        let decoded = decode_body(&resp.headers, body);
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&decoded) else {
+            tracing::debug!(
+                secret = %self.name,
+                host = %cx.authority.host,
+                content_encoding = ?resp.headers.get(http::header::CONTENT_ENCODING),
+                "a token response matched the exchange shape but its body did not parse as \
+                 JSON after decoding"
+            );
+            return Ok(());
+        };
 
         // A device-code flow polls, and almost every poll answers `authorization_pending`
         // rather than a token. Signalling on the *request* would end the session on the first
@@ -427,5 +486,56 @@ impl RequestResponder for BootstrapCapture {
                 self.name
             ),
         }))
+    }
+}
+
+#[cfg(test)]
+mod decode_body_tests {
+    use super::*;
+
+    fn headers(encoding: &str) -> http::HeaderMap {
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::CONTENT_ENCODING, encoding.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn passes_through_with_no_content_encoding_header() {
+        let body = br#"{"access_token":"abc"}"#;
+        assert_eq!(decode_body(&http::HeaderMap::new(), body), body);
+    }
+
+    #[test]
+    fn passes_through_an_unrecognised_encoding_unchanged() {
+        let body = b"whatever-this-is";
+        assert_eq!(decode_body(&headers("zstd"), body), body);
+    }
+
+    #[test]
+    fn decodes_gzip() {
+        use std::io::Write;
+        let json = br#"{"access_token":"real-token","token_type":"Bearer"}"#;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json).unwrap();
+        let compressed = enc.finish().unwrap();
+
+        assert_eq!(decode_body(&headers("gzip"), &compressed), json);
+    }
+
+    #[test]
+    fn decodes_deflate() {
+        use std::io::Write;
+        let json = br#"{"access_token":"real-token"}"#;
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json).unwrap();
+        let compressed = enc.finish().unwrap();
+
+        assert_eq!(decode_body(&headers("deflate"), &compressed), json);
+    }
+
+    #[test]
+    fn falls_back_to_the_raw_body_on_a_corrupt_gzip_stream() {
+        let garbage = b"not actually gzip";
+        assert_eq!(decode_body(&headers("gzip"), garbage), garbage);
     }
 }

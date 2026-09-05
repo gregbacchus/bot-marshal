@@ -29,6 +29,8 @@ getrandom.workspace = true
 ring.workspace = true
 hmac.workspace = true
 time.workspace = true
+flate2.workspace = true
+brotli-decompressor.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
