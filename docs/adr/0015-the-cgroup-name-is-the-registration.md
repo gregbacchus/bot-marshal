@@ -1,6 +1,6 @@
 # ADR 0015: The cgroup naming convention *is* the identity registration
 
-* **Status:** Accepted
+* **Status:** Accepted — the scope-name encoding is amended by [ADR-0037](0037-identity-and-profile-are-independent.md)
 * **Date:** 2026-09-02
 
 ## Context

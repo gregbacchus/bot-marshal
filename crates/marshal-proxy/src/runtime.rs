@@ -34,8 +34,9 @@ pub struct Runtime {
     /// behalf is as profile-specific as the credential it is answering about.
     pub responders: HashMap<Arc<str>, Vec<Arc<dyn RequestResponder>>>,
     /// The chain for the base config's embedded, unnamed `profile:` — used whenever a
-    /// connection is unattributed and `identities.unidentified.profile` did not name a
-    /// different, real profile instead. See [`crate::identity::IdentityRegistry::uses_default_fallback`].
+    /// resolution names no profile: an unattributed connection where
+    /// `identities.unidentified.profile` did not name a different, real profile, or an agent
+    /// started by `marshal run` without `--profile`.
     pub default_chain: Arc<Chain>,
     pub default_response_transforms: Vec<Arc<dyn ResponseTransform>>,
     pub default_request_transforms: Vec<Arc<dyn RequestTransform>>,

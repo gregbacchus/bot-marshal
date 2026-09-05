@@ -209,7 +209,7 @@ audit log. See [Identity](configuration/identity.md#configuration).
 
 | flag | default | |
 |---|---|---|
-| `--profile <name>` | none | a *named* profile, from `profiles/`; omit to run under the embedded `profile:` instead — the same one unattributed traffic falls back to |
+| `--profile <name>` | none | a *named* profile, from `profiles/`; omit to run under the embedded `profile:` instead — the agent is still identified, it just names no profile |
 | `--isolation` | `netns` | `netns` enforces, `cgroup` identifies, `none` sets env vars only |
 | `--proxy <url>` | `http://127.0.0.1:8080` | the address the agent is told to use |
 | `--bind <path>` | none, repeatable | extra path bound read-write inside `--isolation netns`; ignored by other modes |
@@ -251,7 +251,7 @@ marshal run --profile coding-agent --bind ~/.cache/uv -- uv sync
 
 ```bash
 marshal run --profile llm-agent --isolation cgroup -- python agent.py
-marshal run -- claude   # no --profile: the embedded profile applies, unattributed-style
+marshal run -- claude   # no --profile: still identified as pid-<pid>, governed by the embedded profile
 ```
 
 **The agent binary itself is not exempt.** If `<command...>` is installed anywhere outside the

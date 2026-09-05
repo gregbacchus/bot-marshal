@@ -86,12 +86,26 @@ impl std::fmt::Debug for Credential {
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub identity: Identity,
-    pub profile: Arc<str>,
+    /// `None` means the base config's embedded, unnamed `profile:` — it has no name to key a
+    /// lookup by, so the runtime holds its chain separately. See ADR-0017.
+    pub profile: Option<Arc<str>>,
     /// `false` when no resolver matched. The audit record says so, and the most restrictive
     /// profile applies — an unattributed request never silently inherits a permissive one.
     pub attributed: bool,
     /// Which resolver matched, for audit.
     pub resolver: Option<String>,
+}
+
+/// The label the embedded `profile:` is displayed under in logs and audit records. It is a
+/// display name only — it never keys a lookup, so a named profile is still free to call
+/// itself `default` — and [`Resolved::profile_label`] is the only thing that reads it.
+const DEFAULT_PROFILE_LABEL: &str = "default";
+
+impl Resolved {
+    /// The profile name for logs and audit, naming the embedded profile when there is none.
+    pub fn profile_label(&self) -> Arc<str> {
+        self.profile.clone().unwrap_or_else(|| Arc::from(DEFAULT_PROFILE_LABEL))
+    }
 }
 
 /// Resolvers are tried in order; first match wins.

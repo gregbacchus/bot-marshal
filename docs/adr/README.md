@@ -25,7 +25,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0012](0012-the-judge-sees-data-never-instructions.md) | The judge sees a reduced request as data, never as instruction | Accepted |
 | [0013](0013-mcp-denials-are-protocol-errors.md) | MCP denials are protocol errors, and `tools/list` is filtered | Accepted |
 | [0014](0014-netns-isolation-without-cap-net-admin.md) | Network-namespace isolation without `CAP_NET_ADMIN` | Accepted |
-| [0015](0015-the-cgroup-name-is-the-registration.md) | The cgroup naming convention *is* the identity registration | Accepted |
+| [0015](0015-the-cgroup-name-is-the-registration.md) | The cgroup naming convention *is* the identity registration | Accepted (amended by [0037](0037-identity-and-profile-are-independent.md)) |
 | [0016](0016-config-splits-by-convention.md) | Config splits by fixed directory convention, not include globs | Accepted |
 | [0017](0017-the-fallback-profile-is-embedded.md) | The fallback profile is embedded, unnamed, and unreferenceable | Accepted |
 | [0018](0018-profiles-do-not-inherit.md) | Profiles do not inherit | Accepted |
@@ -47,6 +47,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0034](0034-bootstrap-capture-reads-the-token-exchange.md) | Bootstrap capture reads the token exchange, and trusts the session | Accepted |
 | [0035](0035-release-versioning-uses-cocogitto-not-release-plz.md) | Release versioning uses cocogitto, not release-plz | Accepted |
 | [0036](0036-bind-groups-are-named-and-shared-like-bundles.md) | Bind groups are named and shared, the same way bundles are | Accepted |
+| [0037](0037-identity-and-profile-are-independent.md) | Identity and profile are independent axes of the scope name | Accepted |
 
 ## Writing a new one
 

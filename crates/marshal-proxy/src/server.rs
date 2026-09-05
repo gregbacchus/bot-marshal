@@ -68,7 +68,7 @@ impl std::fmt::Debug for Attribution {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Attribution")
             .field("identity", &self.resolved.identity)
-            .field("profile", &self.resolved.profile)
+            .field("profile", &self.resolved.profile_label())
             .field("attributed", &self.resolved.attributed)
             .finish()
     }
@@ -116,9 +116,10 @@ impl Server {
     async fn resolve_attribution(&self, conn: &ConnInfo, runtime: &Runtime) -> Option<Attribution> {
         let resolved = runtime.identities.resolve(conn).await;
 
-        // Unattributed, with no `identities.unidentified.profile` override: the embedded
-        // `profile:` applies, which has no name and so isn't in `chains` at all.
-        if !resolved.attributed && runtime.identities.uses_default_fallback() {
+        // No profile named — an unattributed connection with no `identities.unidentified.
+        // profile` override, or `marshal run` without `--profile`. The embedded `profile:`
+        // applies, which has no name and so isn't in `chains` at all.
+        if resolved.profile.is_none() {
             return Some(Attribution {
                 resolved,
                 chain: Arc::clone(&runtime.default_chain),
@@ -128,14 +129,14 @@ impl Server {
             });
         }
 
-        match runtime.chains.get(&resolved.profile) {
+        let name = resolved.profile.clone().expect("the unnamed profile is handled above");
+        match runtime.chains.get(&name) {
             Some(chain) => {
                 let response_transforms =
-                    runtime.response_transforms.get(&resolved.profile).cloned().unwrap_or_default();
+                    runtime.response_transforms.get(&name).cloned().unwrap_or_default();
                 let request_transforms =
-                    runtime.request_transforms.get(&resolved.profile).cloned().unwrap_or_default();
-                let responders =
-                    runtime.responders.get(&resolved.profile).cloned().unwrap_or_default();
+                    runtime.request_transforms.get(&name).cloned().unwrap_or_default();
+                let responders = runtime.responders.get(&name).cloned().unwrap_or_default();
                 Some(Attribution {
                     resolved,
                     chain: Arc::clone(chain),
@@ -146,7 +147,7 @@ impl Server {
             }
             None => {
                 tracing::error!(
-                    profile = %resolved.profile,
+                    profile = %name,
                     "an identity resolver named a profile with no chain; refusing the connection"
                 );
                 None
@@ -423,7 +424,7 @@ impl Server {
                 authority: authority.clone(),
                 ingress: cx.ingress,
                 identity: cx.identity.clone(),
-                profile: Arc::clone(&attribution.resolved.profile),
+                profile: attribution.resolved.profile_label(),
                 client_addr: peer,
                 request_transforms: attribution.request_transforms.clone(),
                 responders: attribution.responders.clone(),
@@ -557,7 +558,7 @@ impl Server {
                 &mut client,
                 &reason,
                 &attribution.resolved.identity.to_string(),
-                &attribution.resolved.profile,
+                &attribution.resolved.profile_label(),
             )
             .await;
             return Ok(());
@@ -621,7 +622,7 @@ impl Server {
                 &mut client,
                 &outcome.reason,
                 &cx.identity.to_string(),
-                &attribution.resolved.profile,
+                &attribution.resolved.profile_label(),
             )
             .await;
             self.emit_audit(
@@ -646,7 +647,7 @@ impl Server {
                         &mut client,
                         &reason,
                         &cx.identity.to_string(),
-                        &attribution.resolved.profile,
+                        &attribution.resolved.profile_label(),
                     )
                     .await;
                     self.emit_audit(
@@ -716,7 +717,7 @@ impl Server {
                     authority: authority.clone(),
                     ingress: cx.ingress,
                     identity: cx.identity.clone(),
-                    profile: Arc::clone(&attribution.resolved.profile),
+                    profile: attribution.resolved.profile_label(),
                     client_addr: peer,
                     request_transforms: attribution.request_transforms.clone(),
                     responders: attribution.responders.clone(),
@@ -831,7 +832,7 @@ impl Server {
     ) -> RequestContext {
         RequestContext {
             identity: attribution.resolved.identity.clone(),
-            profile: Arc::clone(&attribution.resolved.profile),
+            profile: attribution.resolved.profile_label(),
             ingress,
             phase,
             client_addr: peer,

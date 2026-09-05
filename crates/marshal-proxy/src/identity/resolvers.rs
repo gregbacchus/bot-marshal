@@ -38,7 +38,7 @@ impl IdentityResolver for SourceIpResolver {
         self.entries.iter().find(|(net, _, _)| net.contains(&ip)).map(|(_, identity, profile)| {
             Resolved {
                 identity: identity.clone(),
-                profile: Arc::clone(profile),
+                profile: Some(Arc::clone(profile)),
                 attributed: true,
                 resolver: Some("source_ip".into()),
             }
@@ -106,7 +106,7 @@ impl IdentityResolver for PeerCredResolver {
         {
             return Some(Resolved {
                 identity: identity.clone(),
-                profile: Arc::clone(profile),
+                profile: Some(Arc::clone(profile)),
                 attributed: true,
                 resolver: Some("peer_cred:uid".into()),
             });
@@ -117,7 +117,7 @@ impl IdentityResolver for PeerCredResolver {
         {
             return Some(Resolved {
                 identity: identity.clone(),
-                profile: Arc::clone(profile),
+                profile: Some(Arc::clone(profile)),
                 attributed: true,
                 resolver: Some("peer_cred:gid".into()),
             });
@@ -129,7 +129,7 @@ impl IdentityResolver for PeerCredResolver {
         {
             return Some(Resolved {
                 identity: identity.clone(),
-                profile: Arc::clone(profile),
+                profile: Some(Arc::clone(profile)),
                 attributed: true,
                 resolver: Some("peer_cred:cgroup".into()),
             });
@@ -174,7 +174,7 @@ impl IdentityResolver for ListenerPortResolver {
         let port = conn.local_addr.port();
         self.entries.iter().find(|(p, _, _)| *p == port).map(|(_, identity, profile)| Resolved {
             identity: identity.clone(),
-            profile: Arc::clone(profile),
+            profile: Some(Arc::clone(profile)),
             attributed: true,
             resolver: Some("listener_port".into()),
         })
@@ -225,7 +225,7 @@ impl IdentityResolver for ProxyAuthResolver {
             .find(|(u, p, _, _)| *u == cred.user && constant_time_eq(p, &cred.password))
             .map(|(_, _, identity, profile)| Resolved {
                 identity: identity.clone(),
-                profile: Arc::clone(profile),
+                profile: Some(Arc::clone(profile)),
                 attributed: true,
                 resolver: Some("proxy_auth".into()),
             })
@@ -238,11 +238,6 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     }
     a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
-
-/// The `Resolved.profile` label used for audit/display when the fallback is the base
-/// config's embedded `profile:` rather than a named override — it has no real name, and this
-/// is never used as a lookup key (see [`IdentityRegistry::uses_default_fallback`]).
-pub const DEFAULT_PROFILE_LABEL: &str = "default";
 
 /// Runs resolvers in order and falls back to an explicitly unattributed identity.
 pub struct IdentityRegistry {
@@ -286,12 +281,6 @@ impl IdentityRegistry {
         self.deny_unidentified
     }
 
-    /// Whether an unattributed connection should use the runtime's embedded default chain
-    /// rather than a named one in `runtime.chains`.
-    pub fn uses_default_fallback(&self) -> bool {
-        self.fallback_profile.is_none()
-    }
-
     pub fn resolver_names(&self) -> Vec<&str> {
         self.resolvers.iter().map(|r| r.name()).collect()
     }
@@ -313,10 +302,7 @@ impl IdentityRegistry {
         }
         Resolved {
             identity: Identity::unidentified(),
-            profile: self
-                .fallback_profile
-                .clone()
-                .unwrap_or_else(|| Arc::from(DEFAULT_PROFILE_LABEL)),
+            profile: self.fallback_profile.clone(),
             // Saying so is the point: an unattributed request must never look like an
             // attributed one in the audit trail.
             attributed: false,
@@ -353,7 +339,7 @@ mod tests {
         c.client_addr = "172.20.0.7:1234".parse().unwrap();
         let got = r.resolve(&c).await.unwrap();
         assert_eq!(got.identity.to_string(), "agent-a");
-        assert_eq!(&*got.profile, "coding");
+        assert_eq!(got.profile.as_deref(), Some("coding"));
 
         c.client_addr = "10.0.0.1:1234".parse().unwrap();
         assert!(r.resolve(&c).await.is_none());
@@ -436,7 +422,7 @@ mod tests {
         let got = registry.resolve(&conn()).await;
         assert!(!got.attributed, "an unmatched connection must not look attributed");
         assert_eq!(got.identity.to_string(), "unidentified");
-        assert_eq!(&*got.profile, "restricted");
+        assert_eq!(got.profile.as_deref(), Some("restricted"));
         assert!(got.resolver.is_none());
     }
 

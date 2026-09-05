@@ -149,9 +149,11 @@ marshal run --profile coding-agent -- claude
 ```
 
 The agent goes into a network namespace with no route out, inside a transient systemd scope
-named `marshal-coding-agent-<id>.scope`. The scope supplies identity — the naming convention
-*is* the registration, so the `run` resolver reads the profile back out of the cgroup and
-there is no control socket to get out of sync.
+named `marshal-coding-agent-<pid>.scope`, where `<pid>` is the `marshal run` process. The scope
+supplies identity — the naming convention *is* the registration, so the `run` resolver reads
+the identity and the profile back out of the cgroup and there is no control socket to get out
+of sync. The identity is the pid (`pid-4821`); the profile is a separate segment of the name,
+because which profile governs an agent is a different question from which agent it is.
 
 Because cgroups are inherited, the `git`, `npm` and `curl` processes the agent spawns — where
 most of its egress actually comes from — are identified too. That gives distinct identities
@@ -163,12 +165,10 @@ for agents running as the *same* uid, which uid alone cannot do.
 marshal run -- claude
 ```
 
-The scope is then named `marshal-<id>.scope`, with no profile segment — a shape the `run`
-resolver does not recognise, so it declines to match, exactly as it does for any cgroup that
-isn't its naming convention at all. The connection falls through to the ordinary unattributed
-path and gets the embedded `profile:`, same as any other unattributed traffic. Isolation is
-unaffected either way — `netns` still removes the agent's route out regardless of whether it
-ends up identified.
+The scope is then named `marshal-<pid>.scope`, with no profile segment. The agent is still
+identified — `identity: pid-4821`, `resolver: run`, `attributed: true` — it simply named no
+profile, so the embedded `profile:` governs it, which is what "default" means. Isolation is
+unaffected either way.
 
 ### `netns` enforces rather than identifies
 

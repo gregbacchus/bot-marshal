@@ -95,8 +95,8 @@ enum Command {
     /// Launch an agent so the proxy can identify it.
     Run {
         /// Profile the agent runs under. Omit to run under the embedded `profile:` — the
-        /// agent is launched and isolated exactly the same, it just isn't tagged with a named
-        /// profile, so it gets the same fallback unattributed traffic already gets.
+        /// agent is still launched, isolated and identified exactly the same, it just isn't
+        /// tagged with a named profile, so the default one governs it.
         #[arg(long)]
         profile: Option<String>,
 

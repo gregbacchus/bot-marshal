@@ -83,11 +83,11 @@ pub struct ProxyEndpoint {
 /// Build the scope name the `run` resolver reads identity back out of.
 ///
 /// The naming convention *is* the registration: no control socket, and nothing to get out of
-/// sync if the proxy restarts. `profile: None` (no `--profile`) omits the profile segment
-/// entirely, producing a shape (`marshal-<id>.scope`) `parse_scope` does not recognise — the
-/// same "no opinion" outcome as a cgroup naming nothing marshal-related at all, so the
-/// connection falls through to the ordinary unattributed path and gets the embedded `profile:`
-/// exactly as unattributed traffic already does. No sentinel, no reserved name.
+/// sync if the proxy restarts. The pid is the identity, and the profile segment is separate
+/// from it: `profile: None` (no `--profile`) omits that segment entirely, giving
+/// `marshal-<pid>.scope`. The agent is still attributed — it is governed by the embedded
+/// `profile:` because no profile was named, not because it went unrecognised. No sentinel, no
+/// reserved name for the default.
 pub fn scope_name(profile: Option<&str>, id: u32) -> String {
     match profile {
         Some(profile) => format!("marshal-{profile}-{id}.scope"),
@@ -391,22 +391,23 @@ mod tests {
         let name = scope_name(Some("coding-agent"), 4821);
         assert_eq!(name, "marshal-coding-agent-4821.scope");
         // The launcher and the resolver must agree, or identity silently stops working.
-        let (profile, identity) =
+        let (identity, profile) =
             marshal_proxy::identity::run::parse_scope(&format!("0::/user.slice/{name}")).unwrap();
-        assert_eq!(profile, "coding-agent");
-        assert_eq!(identity, "coding-agent-4821");
+        assert_eq!(profile.as_deref(), Some("coding-agent"));
+        assert_eq!(identity, "pid-4821");
     }
 
     #[test]
-    fn no_profile_names_a_scope_the_resolver_does_not_recognise() {
-        // `marshal run` with no `--profile` must not register any identity — the connection
-        // is meant to fall through to the same unattributed/default path `marshal serve`
-        // already uses, not conjure up a magic name that means "default".
+    fn a_scope_without_a_profile_still_carries_the_identity() {
+        // `marshal run` with no `--profile` is still a launched agent, so it still gets an
+        // identity. Omitting the profile segment says only that no profile was named, which
+        // is what leaves the embedded `profile:` governing it.
         let name = scope_name(None, 4821);
         assert_eq!(name, "marshal-4821.scope");
-        assert!(
-            marshal_proxy::identity::run::parse_scope(&format!("0::/user.slice/{name}")).is_none()
-        );
+        let (identity, profile) =
+            marshal_proxy::identity::run::parse_scope(&format!("0::/user.slice/{name}")).unwrap();
+        assert_eq!(identity, "pid-4821");
+        assert_eq!(profile, None);
     }
 
     #[test]
