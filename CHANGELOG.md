@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.3.0](https://github.com/gregbacchus/bot-marshal/compare/c5a6e5a7a126ed64b2f59977d771a6aaa032865f..v0.3.0) - 2026-09-05
+#### Features
+- (**identity**) identify marshal run agents without --profile - ([8f24b3b](https://github.com/gregbacchus/bot-marshal/commit/8f24b3bb4f589e34bd2d8fe536764f1056b8a5c4)) - test, Claude Sonnet 5
+- rename 'launched' to 'run' in identity resolvers and related documentation - ([6b8562a](https://github.com/gregbacchus/bot-marshal/commit/6b8562a128271b86b4eeadbe62d711c7684343f7)) - test
+#### Bug Fixes
+- remove redundant warn-mode summary at serve startup - ([c5a6e5a](https://github.com/gregbacchus/bot-marshal/commit/c5a6e5a7a126ed64b2f59977d771a6aaa032865f)) - test, Claude Sonnet 5
+
+- - -
+
 ## [v0.2.0](https://github.com/gregbacchus/bot-marshal/compare/f100e985a57189756f2b14548b0715af0d7ea7ff..v0.2.0) - 2026-09-04
 #### Features
 - allow marshal run to launch under the default profile - ([f100e98](https://github.com/gregbacchus/bot-marshal/commit/f100e985a57189756f2b14548b0715af0d7ea7ff)) - test, Claude Sonnet 5
