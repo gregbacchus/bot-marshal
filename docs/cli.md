@@ -115,6 +115,13 @@ Everything after `--` reaches the command untouched, its own flags included.
 and has the same prerequisites — `netns` is the only one that actually prevents the command
 routing around the proxy.
 
+`--bind <path>`/`--bind-group <name>` work exactly as they do for `marshal run`, for whatever
+the tool's login needs beyond the workspace and standard system paths — a package manager
+cache, a config directory it reads from outside the workspace. Both are meaningless without
+`--run` (`--wait` sandboxes nothing to bind into) and, unlike `marshal run`, there is no
+profile here to already name a `sandbox.bind_groups`/`extra_binds` default — bootstrap has no
+profile, so whatever you pass here is the whole list.
+
 `--mode` decides what happens to the exchange:
 
 | | |

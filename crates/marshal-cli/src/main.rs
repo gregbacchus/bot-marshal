@@ -233,6 +233,19 @@ enum OauthCommand {
         #[arg(long, default_value = "netns")]
         isolation: String,
 
+        /// Extra path to bind read-write inside `--run`'s `--isolation netns` namespace, beyond
+        /// the workspace and the standard system directories — a package manager cache the
+        /// tool's login needs outside the workspace, for instance. Repeatable. Meaningless
+        /// without `--run`, and ignored by every isolation mode but `netns`.
+        #[arg(long = "bind", requires = "run")]
+        binds: Vec<PathBuf>,
+
+        /// A named bind group (`bind_groups`/`bind_groups_path` in the config) to bind
+        /// read-write inside `--run`'s `--isolation netns` namespace. Repeatable. Meaningless
+        /// without `--run`, and ignored by every isolation mode but `netns`.
+        #[arg(long = "bind-group", requires = "run")]
+        bind_groups: Vec<String>,
+
         /// The command `--run` launches. Everything after `--` reaches it untouched.
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
@@ -1610,7 +1623,19 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
             Ok(())
         }
 
-        OauthCommand::Login { name, open, timeout, wait, run, mode, host, isolation, command } => {
+        OauthCommand::Login {
+            name,
+            open,
+            timeout,
+            wait,
+            run,
+            mode,
+            host,
+            isolation,
+            binds,
+            bind_groups,
+            command,
+        } => {
             anyhow::ensure!(
                 run || command.is_empty(),
                 "`{}` was given as a command but there is no `--run` to launch it. Did you mean \
@@ -1633,6 +1658,22 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
                     "bootstrapping `{name}` needs a top-level `state_dir` to keep the captured \
                      refresh token in — set one before starting a login you would have to redo"
                 );
+                // No profile applies here — bootstrap runs under its own throwaway chain, not
+                // a configured one — so unlike `marshal run` there is no `sandbox.bind_groups`
+                // to merge with; `--bind-group` is resolved against `cfg.bind_groups` alone.
+                let mut resolved_binds: Vec<PathBuf> = Vec::new();
+                for name in &bind_groups {
+                    let Some(group) = cfg.bind_groups.get(name) else {
+                        anyhow::bail!(
+                            "unknown bind group `{name}`; {} is configured with: {}",
+                            config_path.display(),
+                            cfg.bind_groups.keys().cloned().collect::<Vec<_>>().join(", ")
+                        );
+                    };
+                    resolved_binds.extend(group.paths.iter().map(|p| expand_tilde(p)));
+                }
+                resolved_binds.extend(binds);
+
                 let opts = BootstrapOptions {
                     name,
                     mode: match mode {
@@ -1643,6 +1684,7 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
                     timeout,
                     run: command,
                     isolation,
+                    extra_binds: resolved_binds,
                 };
                 return bootstrap_capture(config_path, &cfg, &deps, opts).await;
             }
@@ -1690,6 +1732,8 @@ struct BootstrapOptions {
     /// Empty for `--wait`; the command to sandbox for `--run`.
     run: Vec<String>,
     isolation: String,
+    /// Resolved `--bind`/`--bind-group` paths. Empty for `--wait`, which sandboxes nothing.
+    extra_binds: Vec<PathBuf>,
 }
 
 /// An audit sink that keeps nothing.
@@ -1914,7 +1958,7 @@ async fn run_sandboxed_bootstrap(
         &endpoint,
         &opts.run,
         socket,
-        &[],
+        &opts.extra_binds,
     )?;
 
     println!("Bootstrapping `{}` by running: {}", opts.name, opts.run.join(" "));
