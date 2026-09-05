@@ -22,7 +22,7 @@ directory` with no indication that the fix is `--bind`, twice, for two different
 `--bind` on its own does not scale past that first encounter: the same two or three paths (an
 editor's install directory, a language runtime, a package manager cache) get retyped on every
 invocation, for every agent that uses the same tool. That is the same shape of repetition
-[bundles](bundles.md) solved for domain allowlists — a named, reusable set referenced from a
+[bundles](../configuration/bundles.md) solved for domain allowlists — a named, reusable set referenced from a
 profile instead of copied into it.
 
 ## Decision
