@@ -83,6 +83,13 @@ The hostname is resolved once, each resulting address checked, and the connectio
 that checked address** — never re-resolved between check and connect, which is what closes DNS
 rebinding.
 
+When a name resolves to both IPv4 and IPv6 addresses, IPv4 is tried first — many real
+deployments (containers, VPNs, IPv4-only networks) have no working route for an IPv6 address
+DNS still happily returns, and a resolver's own answer order is not something to rely on. If
+the whole attempt still fails, it is retried once with a fresh resolution, since a resolver
+hiccup or a momentarily-unreachable address is common enough to be worth one retry; a blocked
+address is never retried, since that is a policy decision rather than a network condition.
+
 `allow_private: true` is needed when the proxy and its clients are on a private network the
 proxy must also route out of — the docker example sets it for exactly that reason.
 

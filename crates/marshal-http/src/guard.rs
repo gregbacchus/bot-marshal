@@ -74,10 +74,29 @@ impl UpstreamGuard {
     /// If *any* resolved address is blocked the whole attempt is refused, rather than quietly
     /// connecting to whichever answer happened to be acceptable. A name that resolves to both
     /// a public address and a metadata endpoint is a rebinding signal, not a menu.
+    ///
+    /// Retries once on anything other than `Blocked`, which is a security decision rather than
+    /// a network condition and would not change on a second try. Everything else — a resolver
+    /// glitch, a resolved address that turns out unreachable — is exactly the class of thing a
+    /// single retry meaningfully helps with, and each attempt is its own complete
+    /// resolve-check-connect cycle: nothing from the first attempt's resolution survives into
+    /// the second, so this does not reintroduce the re-resolution gap this module exists to
+    /// close.
     pub async fn connect(&self, authority: &Authority) -> Result<TcpStream, GuardError> {
+        match self.try_connect(authority).await {
+            Ok(stream) => Ok(stream),
+            blocked @ Err(GuardError::Blocked { .. }) => blocked,
+            Err(first) => match self.try_connect(authority).await {
+                Ok(stream) => Ok(stream),
+                Err(_) => Err(first),
+            },
+        }
+    }
+
+    async fn try_connect(&self, authority: &Authority) -> Result<TcpStream, GuardError> {
         let host = authority.host.as_str();
 
-        let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+        let mut addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
             vec![SocketAddr::new(ip, authority.port)]
         } else {
             tokio::net::lookup_host((host, authority.port))
@@ -96,6 +115,8 @@ impl UpstreamGuard {
             }
         }
 
+        prefer_ipv4(&mut addrs);
+
         // Connect to the addresses we just checked, by value. No name crosses this boundary.
         let mut last = None;
         for addr in &addrs {
@@ -111,6 +132,17 @@ impl UpstreamGuard {
         }
         Err(last.expect("addrs is non-empty"))
     }
+}
+
+/// Reorder resolved addresses so IPv4 is tried before IPv6, stably within each family.
+///
+/// A resolver answers with whichever order it likes — sometimes IPv4 first, sometimes IPv6 —
+/// and plenty of real deployments (containers, VPNs, plain IPv4-only networks) advertise no
+/// usable route for an IPv6 address DNS still happily returns. This is not a security
+/// property, just the ordering least likely to burn the whole attempt on addresses nothing
+/// here can actually reach.
+fn prefer_ipv4(addrs: &mut [SocketAddr]) {
+    addrs.sort_by_key(|addr| addr.is_ipv6());
 }
 
 /// Addresses that are not routable on the public internet, and so are never a legitimate
@@ -198,6 +230,38 @@ mod tests {
         let g = guard();
         let err =
             g.connect(&Authority { host: "169.254.169.254".into(), port: 80 }).await.unwrap_err();
+        assert!(matches!(err, GuardError::Blocked { .. }), "{err}");
+    }
+
+    #[test]
+    fn prefer_ipv4_moves_v4_ahead_of_v6_stably_within_each_family() {
+        let mut addrs: Vec<SocketAddr> = vec![
+            "[::1]:1".parse().unwrap(),
+            "10.0.0.2:1".parse().unwrap(),
+            "[::2]:1".parse().unwrap(),
+            "10.0.0.1:1".parse().unwrap(),
+        ];
+        prefer_ipv4(&mut addrs);
+        let strs: Vec<String> = addrs.iter().map(SocketAddr::to_string).collect();
+        assert_eq!(strs, ["10.0.0.2:1", "10.0.0.1:1", "[::1]:1", "[::2]:1"]);
+    }
+
+    #[test]
+    fn prefer_ipv4_is_a_no_op_on_an_all_ipv6_or_all_ipv4_list() {
+        let mut v6only: Vec<SocketAddr> =
+            vec!["[::1]:1".parse().unwrap(), "[::2]:1".parse().unwrap()];
+        prefer_ipv4(&mut v6only);
+        assert_eq!(v6only[0].to_string(), "[::1]:1");
+
+        let mut v4only: Vec<SocketAddr> = vec!["10.0.0.1:1".parse().unwrap()];
+        prefer_ipv4(&mut v4only);
+        assert_eq!(v4only[0].to_string(), "10.0.0.1:1");
+    }
+
+    #[tokio::test]
+    async fn a_blocked_literal_stays_blocked_through_connects_retry() {
+        let g = guard();
+        let err = g.connect(&Authority { host: "127.0.0.1".into(), port: 1 }).await.unwrap_err();
         assert!(matches!(err, GuardError::Blocked { .. }), "{err}");
     }
 }
