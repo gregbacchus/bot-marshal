@@ -141,6 +141,23 @@ Two things worth knowing:
   does not survive a restart. Most providers need `offline_access` in the requested scope, which
   is the tool's request to change, not marshal's.
 
+**If nothing gets captured, this is what to watch.** There is no `--audit-log` here — it is
+scoped to `serve` on purpose, since a durable copy on disk is exactly what a foreground,
+one-shot capture session should never leave behind. The global `--log-detail`/`--log` flags
+work here exactly as they do for `serve`, though: `--log-detail access` shows every request the
+session sees, and `--log debug` adds *why* a given POST wasn't treated as a login exchange (the
+wrong `grant_type`, no body, filtered out by `--host`) rather than leaving you to guess.
+
+```bash
+marshal --log debug --log-detail access --log-sink stdout \
+  secrets oauth login CLAUDE_SUBSCRIPTION --run -- some-vendor-cli login
+```
+
+`--log-sink stdout` matters here specifically: `auto` (the default) prefers journald when it's
+reachable, which most systems' interactive sessions have running, so debug output can vanish
+into the journal instead of your terminal with no error to say so. Force `stdout` while
+debugging a capture session, or check `journalctl` if you'd rather not.
+
 This is a different mechanism from
 [`capture: in_band`](configuration/oauth2.md#in-band-capture), with a different threat
 model — it trusts the session rather than excluding the client. See

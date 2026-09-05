@@ -370,7 +370,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match rt.block_on(oauth_command(&config_path, cmd)) {
+            match rt.block_on(oauth_command(&config_path, cmd, cli.log_detail)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
@@ -1553,7 +1553,11 @@ fn find_oauth_swap(swaps: Vec<OauthSwap>, name: &str) -> anyhow::Result<OauthSwa
         .ok_or_else(|| anyhow::anyhow!("no OAuth2 credential named `{name}` — {known}"))
 }
 
-async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyhow::Result<()> {
+async fn oauth_command(
+    config_path: &std::path::Path,
+    cmd: OauthCommand,
+    log_detail: LogDetail,
+) -> anyhow::Result<()> {
     let cfg = marshal_config::load(config_path)?;
     // Shared, not throwaway: bootstrap runs an audit sink, and the capture object teaches this
     // same redactor before anything it captured can be logged (ADR-0029).
@@ -1686,7 +1690,7 @@ async fn oauth_command(config_path: &std::path::Path, cmd: OauthCommand) -> anyh
                     isolation,
                     extra_binds: resolved_binds,
                 };
-                return bootstrap_capture(config_path, &cfg, &deps, opts).await;
+                return bootstrap_capture(config_path, &cfg, &deps, opts, log_detail).await;
             }
 
             let swap = find_oauth_swap(swaps()?, &name)?;
@@ -1765,6 +1769,7 @@ async fn bootstrap_capture(
     cfg: &marshal_config::model::Config,
     deps: &SecretDeps,
     opts: BootstrapOptions,
+    log_detail: LogDetail,
 ) -> anyhow::Result<()> {
     use marshal_core::{DenyingDecider, RequestResponder, RequestTransform, ResponseTransform};
 
@@ -1840,6 +1845,30 @@ async fn bootstrap_capture(
         tls: engine,
     };
 
+    // `DiscardingAudit` always runs — its own debug-level line is what `--log debug` has
+    // always shown for a bootstrap session. On top of that, honour `--log-detail` exactly as
+    // `serve` does: the same `RequestTracingSink`, redacted through the same redactor bootstrap
+    // already teaches before returning anything captured (ADR-0029), so nothing here is any
+    // less safe than what `serve --log-detail access` already prints for ordinary traffic.
+    // What stays unavailable on purpose is `--audit-log` — a *durable* copy on disk, which is
+    // exactly the thing a foreground, one-shot capture session should never leave behind.
+    let mut sinks: Vec<Arc<dyn AuditSink>> = vec![Arc::new(DiscardingAudit)];
+    match log_detail {
+        LogDetail::Log => {}
+        LogDetail::Access => {
+            sinks.push(Arc::new(RequestTracingSink::redacting(
+                RequestDetail::Access,
+                deps.redactor.clone(),
+            )));
+        }
+        LogDetail::Audit => {
+            sinks.push(Arc::new(RequestTracingSink::redacting(
+                RequestDetail::Audit,
+                deps.redactor.clone(),
+            )));
+        }
+    }
+
     let server = marshal_proxy::Server::new(
         marshal_proxy::ServerConfig {
             listen: vec!["127.0.0.1:0".into()],
@@ -1850,7 +1879,7 @@ async fn bootstrap_capture(
             &cfg.upstream.deny_cidrs,
             cfg.upstream.allow_private,
         )?),
-        Arc::new(DiscardingAudit),
+        Arc::new(MultiSink::new(sinks)),
     );
 
     let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();

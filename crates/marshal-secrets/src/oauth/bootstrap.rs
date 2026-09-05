@@ -149,14 +149,47 @@ impl BootstrapCapture {
         if let Some(host) = &self.host_filter
             && !cx.authority.host.eq_ignore_ascii_case(host)
         {
+            tracing::debug!(
+                secret = %self.name,
+                host = %cx.authority.host,
+                filter = %host,
+                "a POST reached the bootstrap session but --host excludes its destination"
+            );
             return None;
         }
         // Streaming here means nothing declared the request body buffered — a wiring mistake,
         // since this type declares it on two of its three impls.
-        let body = cx.body.as_bytes()?;
+        let Some(body) = cx.body.as_bytes() else {
+            tracing::debug!(
+                secret = %self.name,
+                host = %cx.authority.host,
+                "a POST reached the bootstrap session with no body to inspect"
+            );
+            return None;
+        };
         let params = parse_pairs(&String::from_utf8_lossy(body));
-        let grant = find(&params, "grant_type")?;
-        BOOTSTRAPPABLE.contains(&grant).then_some(params)
+        let Some(grant) = find(&params, "grant_type") else {
+            tracing::debug!(
+                secret = %self.name,
+                host = %cx.authority.host,
+                path = %cx.uri.path(),
+                "a POST reached the bootstrap session with no `grant_type` in its body — not a \
+                 token exchange"
+            );
+            return None;
+        };
+        if !BOOTSTRAPPABLE.contains(&grant) {
+            tracing::debug!(
+                secret = %self.name,
+                host = %cx.authority.host,
+                grant_type = %grant,
+                "a POST reached the bootstrap session with a `grant_type` this does not \
+                 bootstrap from — only authorization_code and device_code represent a login \
+                 in progress"
+            );
+            return None;
+        }
+        Some(params)
     }
 
     fn token_endpoint(&self, cx: &RequestContext) -> String {
