@@ -298,7 +298,9 @@ for exactly what), ready to attach to a profile's `transforms:` list if you want
 declared swap afterward. Bootstrap capture only seeds a credential once; it is not itself a
 standing part of the runtime.
 
-Full command reference, flags, and the sandboxing `--run` applies:
+Full command reference, flags, and the sandboxing `--run` applies — including why
+`--isolation netns` does not work for a flow that opens a browser and waits on a loopback
+callback, and what to use instead — see
 [`marshal secrets oauth login <name> --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd).
 See also [ADR-0034](../adr/0034-bootstrap-capture-reads-the-token-exchange.md).
 

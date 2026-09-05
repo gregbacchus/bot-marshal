@@ -136,6 +136,24 @@ Everything after `--` reaches the command untouched, its own flags included.
 and has the same prerequisites — `netns` is the only one that actually prevents the command
 routing around the proxy.
 
+**`--isolation netns` does not work for a flow that opens a browser and waits on a loopback
+callback.** Not just the callback port — the browser the tool spawns to show the login page is
+a separate process that inherits the same network namespace, so it has no route out either,
+and most browsers do not honour `HTTP_PROXY`-style environment variables even if it did. The
+callback server binds a loopback address *inside* that namespace, which is not the same
+loopback the browser (or anything else outside it) can reach, and the port is chosen by the
+tool at runtime — there's no fixed port to forward even if the namespace were otherwise
+bridged. Marshal does not attempt to bridge it: the port is arbitrary and only known once the
+tool has already bound it, and building a general host↔namespace relay for a port discovered
+that late is a lot of machinery for a case `--isolation cgroup` already sidesteps entirely by
+not isolating the network at all.
+
+Use `--isolation cgroup` for this shape of flow, or `--wait`, which sandboxes nothing. Both
+still identify the process for the token exchange to be captured; what they give up is `netns`'s
+enforcement — a hostile process really could route around the proxy under `cgroup`. That's an
+acceptable trade here specifically: bootstrap capture's whole premise is a human deliberately
+supervising a one-time login, not an untrusted agent this needs to cage.
+
 `--bind <path>`/`--bind-group <name>` work exactly as they do for `marshal run`, for whatever
 the tool's login needs beyond the workspace and standard system paths — a package manager
 cache, a config directory it reads from outside the workspace. Both are meaningless without
@@ -329,6 +347,13 @@ exist. netns isolation reaches the proxy through this socket, so the proxy must 
 with listeners.explicit.unix_socket configured`. A tool that
 needs something else, such as a package manager cache kept outside the workspace, needs
 `--bind` for it explicitly:
+
+**`--isolation netns` does not work for a tool that opens a browser and waits on a loopback
+OAuth callback** — the browser it spawns inherits the same isolated namespace and has no route
+out either, and the callback server's loopback address is not the host's; see the same caveat
+under [`marshal secrets oauth login`](#marshal-secrets-oauth-login-name---wait----run----cmd)
+for the detail. `--isolation cgroup` is the fix, at the cost of no longer enforcing that the
+tool cannot route around the proxy.
 
 ```bash
 marshal run --profile coding-agent --bind ~/.cache/uv -- uv sync
