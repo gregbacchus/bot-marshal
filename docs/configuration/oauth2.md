@@ -7,13 +7,13 @@ and endpoints), and **who is driving the login**, marshal or the agent/tool.
 | | you control the OAuth application | you don't (a vendor's own client) |
 |---|---|---|
 | **no interactive login needed** | a `{ type: oauth2 }` source with `grant: client_credentials`, `refresh_token`, or `jwt_bearer` — authenticates from config alone, below | — |
-| **a human logs in once, marshal drives it** | `grant: authorization_code`/`device_code` + [`marshal secrets oauth login <name>`](../cli.md#marshal-secrets-oauth-login-name---open---timeout-duration), below | [`marshal secrets oauth login <name> --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd) ("bootstrap capture") — marshal discovers the application from the exchange itself, no config needed |
+| **a human logs in once, marshal drives it** | `grant: authorization_code`/`device_code` + `marshal secrets oauth login <name>`, below | [§ Bootstrap capture](#bootstrap-capture) — marshal discovers the application from the exchange itself, no config needed |
 | **an agent drives the login unattended** | `source.capture: in_band`, [§ In-band capture](#in-band-capture) — marshal takes the flow over so the agent gets nothing | not possible — capture needs the authorization endpoint declared in advance |
 
 The first two rows are a `{ type: oauth2 }` secret source declared in a profile, and are what
-the rest of this page covers. The bootstrap case is a CLI command with **no source
-declaration at all** — see [`marshal secrets oauth login --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd)
-for how it finds the exchange without being told where to look.
+the rest of this page covers up to and including [§ In-band capture](#in-band-capture).
+[§ Bootstrap capture](#bootstrap-capture) is the fourth row: a CLI command with **no source
+declaration at all**.
 
 Every other source hands back a credential somebody else obtained. `oauth2` *obtains* one:
 marshal calls a token endpoint, caches the access token for its stated lifetime, and mints a
@@ -210,6 +210,16 @@ What happens, in order:
 The sentinel is not a placeholder to be recognised later. Injection is unconditional, so
 whatever the agent presents to the API is overwritten with the real token regardless.
 
+**Why `client_id` (and `client_secret`) are still required.** Step 2 is not a relay of the
+agent's own token request — marshal performs its *own* call to `token_endpoint`, and every
+token request needs a `client_id` regardless of whether the client is confidential or public
+(RFC 6749 §4.1.3). Marshal has to authenticate to the provider as the same registered
+application the agent already has, because that is the application whose PKCE challenge it
+just replaced. This is the real distinction between this and bootstrap capture below:
+`in_band` requires you to already know that application's `client_id` (and `client_secret`
+unless it's a public client, `client_auth: none`); bootstrap capture exists for exactly the
+case where you don't.
+
 Marshal also keeps the refresh token the exchange produced, exactly as
 `marshal secrets oauth login` would — so the credential survives a restart without the agent
 ever authorising again.
@@ -231,6 +241,47 @@ ever authorising again.
 
 `capture` defaults to `off`. See [ADR-0032](../adr/0032-marshal-owns-the-pkce-verifier.md) and
 [ADR-0031](../adr/0031-a-responder-may-answer-a-request.md).
+
+## Bootstrap capture
+
+Everything above — including `in_band` — assumes marshal already knows the OAuth application:
+its `client_id`, its endpoints. Bootstrap capture is for the case it doesn't, which is the
+common one for a vendor's own CLI subscription login: the application belongs to the vendor,
+is not published, and there is no `{ type: oauth2 }` source to declare in the first place.
+
+There is **no config for this at all** beyond a top-level `state_dir:`. It is a command, not a
+secret source:
+
+```bash
+marshal secrets oauth login CLAUDE_SUBSCRIPTION --mode steal --run -- some-vendor-cli login
+```
+
+Instead of driving a flow it already knows, marshal starts a disposable, foreground proxy
+instance and watches for the tool's *own* token exchange — the request the tool's own process
+makes to redeem its code. That single request carries everything worth knowing (`client_id`,
+`redirect_uri`, and — as its own destination — `token_endpoint` itself), which is why nothing
+needs to be declared beforehand. It matches on the *shape* of the request (a POST whose body
+parses as `grant_type=authorization_code` or the device-code grant) rather than a configured
+host and path, because by definition it does not know the host or path yet.
+
+That looseness is safe here specifically because this proxy exists for one command, in the
+foreground, under a timeout, with somebody watching — not as a standing part of `serve`.
+`--mode` decides what happens to the exchange it matches:
+
+* **`observe`** (default) — forwards it untouched. The tool's own login succeeds normally and
+  keeps its own working credential; marshal simply also learns one.
+* **`steal`** — redeems the code out of band itself and answers the tool with a sentinel, so
+  the tool never ends up holding a working credential — at the cost of its login reporting
+  failure, which from its point of view is exactly what happened.
+
+Either way, a refresh token the exchange produced is written under `state_dir`, and marshal
+prints the configuration it discovered — endpoint, `client_id`, scope — ready to paste into a
+profile if you want an ongoing declared swap afterward. Bootstrap capture only seeds a
+credential once; it is not itself a standing part of the runtime.
+
+Full command reference, flags, and the sandboxing `--run` applies:
+[`marshal secrets oauth login <name> --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd).
+See also [ADR-0034](../adr/0034-bootstrap-capture-reads-the-token-exchange.md).
 
 ## What this costs
 
