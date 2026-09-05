@@ -220,6 +220,17 @@ just replaced. This is the real distinction between this and bootstrap capture b
 unless it's a public client, `client_auth: none`); bootstrap capture exists for exactly the
 case where you don't.
 
+The agent's own authorization request does carry a `client_id` — step 1 reads that same
+request's `state` and `redirect_uri` straight off it. Marshal does not also read `client_id`
+from it, on purpose: doing so would let the untrusted party being excluded from the credential
+pick which configured credential marshal presents on its behalf, the same category of thing
+[ADR-0009](../adr/0009-identity-is-derived-from-the-connection.md) refuses elsewhere. It also
+would not remove the config for the common case anyway — `client_secret` is never present in
+the authorization request, only in a token request, and step 3 above never forwards the
+agent's own token request, so marshal never observes it. Harvesting
+`client_id` from the request would only ever spare `client_auth: none` clients from declaring
+it, which is not worth a special case.
+
 Marshal also keeps the refresh token the exchange produced, exactly as
 `marshal secrets oauth login` would — so the credential survives a restart without the agent
 ever authorising again.
