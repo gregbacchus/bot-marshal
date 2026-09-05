@@ -31,6 +31,7 @@ const DESCRIPTIONS = {
   'configuration/profiles': 'The unit of policy: embedded and named profiles.',
   'configuration/policy-layers': 'denylist, allowlist, rules, dlp, mcp and judge.',
   'configuration/bundles': 'Named, reusable allow-lists.',
+  'configuration/bind-groups': 'Named, reusable sandbox bind paths for marshal run --isolation netns.',
   'configuration/transforms': 'Header filtering, secret injection, and response rewriting.',
   'configuration/identity': 'Which agent is connecting, and marshal run.',
   'configuration/secret-injection-examples': 'Worked examples of injecting real credentials at the boundary.',

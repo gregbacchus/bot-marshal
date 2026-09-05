@@ -35,6 +35,7 @@ export default defineConfig({
             { slug: 'configuration/profiles' },
             { slug: 'configuration/policy-layers' },
             { slug: 'configuration/bundles' },
+            { slug: 'configuration/bind-groups' },
             { slug: 'configuration/transforms' },
             { slug: 'configuration/identity' },
             { slug: 'configuration/secret-injection-examples' },
