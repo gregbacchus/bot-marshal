@@ -16,7 +16,9 @@ pub mod error;
 pub mod guard;
 pub mod tls;
 
-pub use client::{ClientBody, MAX_RESPONSE_BYTES, json_post_request, post_form, post_json, send};
+pub use client::{
+    ClientBody, MAX_RESPONSE_BYTES, json_post_request, post_body, post_form, post_json, send,
+};
 pub use endpoint::{AsyncConn, Endpoint};
 pub use error::HttpError;
 pub use guard::{GuardError, UpstreamGuard};

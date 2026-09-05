@@ -41,7 +41,7 @@ use marshal_core::{
 };
 use marshal_http::UpstreamGuard;
 
-use super::form::{find, parse_pairs};
+use super::form::{find, parse_body};
 use super::store::{StoredGrant, TokenStore, now_unix};
 use super::token::{TokenResponse, describe_error};
 
@@ -211,7 +211,8 @@ impl BootstrapCapture {
             );
             return None;
         };
-        let params = parse_pairs(&String::from_utf8_lossy(body));
+        let content_type = cx.headers.get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
+        let params = parse_body(content_type, body);
         let Some(grant) = find(&params, "grant_type") else {
             tracing::debug!(
                 secret = %self.name,
@@ -403,10 +404,20 @@ impl RequestResponder for BootstrapCapture {
         // whatever shape this provider wants — parameter order, vendor extras, the exact
         // `code_verifier` that matches the challenge the provider recorded — and reconstructing
         // it would mean guessing at all of that.
-        let form =
-            cx.body.as_bytes().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+        let body = cx.body.as_bytes().cloned().unwrap_or_default();
         let (endpoint, path) = marshal_http::Endpoint::parse_with_path(&self.token_endpoint(cx))
             .map_err(|e| Error::Config(format!("the observed token endpoint: {e}")))?;
+
+        // The client's own `Content-Type`, not assumed — replaying JSON bytes under a
+        // form-urlencoded label would get the request refused by the provider for a reason
+        // that has nothing to do with the credential (RFC 6749 says form-encoded, but not
+        // every real client agrees).
+        let content_type = cx
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/x-www-form-urlencoded")
+            .to_owned();
 
         // Carry the client's own authentication through, for a confidential client that
         // authenticates with a header rather than in the body.
@@ -418,13 +429,14 @@ impl RequestResponder for BootstrapCapture {
         let headers: Vec<(&str, &str)> =
             auth.as_deref().map(|a| vec![("authorization", a)]).unwrap_or_default();
 
-        let call = marshal_http::post_form(
+        let call = marshal_http::post_body(
             &endpoint,
             &self.tls,
             self.guard.as_deref(),
             &path,
+            &content_type,
             &headers,
-            &form,
+            &body,
         );
         let (status, json) = match tokio::time::timeout(self.timeout, call).await {
             Ok(Ok(v)) => v,

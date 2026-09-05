@@ -95,18 +95,45 @@ pub async fn post_form(
     extra_headers: &[(&str, &str)],
     form: &str,
 ) -> Result<(StatusCode, serde_json::Value), HttpError> {
+    post_body(
+        endpoint,
+        tls_config,
+        guard,
+        path,
+        "application/x-www-form-urlencoded",
+        extra_headers,
+        form.as_bytes(),
+    )
+    .await
+}
+
+/// As [`post_form`], with an explicit `Content-Type` instead of assuming form-encoded.
+///
+/// For replaying a body marshal did not itself construct — bootstrap capture's `steal` mode
+/// resends a client's own bytes verbatim to redeem its code, and a real client sending
+/// `application/json` instead of RFC 6749's own default is common enough (an axios-based CLI
+/// among them) that mislabelling it would get the request refused by the provider for a reason
+/// that has nothing to do with the credential.
+pub async fn post_body(
+    endpoint: &Endpoint,
+    tls_config: &Arc<rustls::ClientConfig>,
+    guard: Option<&UpstreamGuard>,
+    path: &str,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<(StatusCode, serde_json::Value), HttpError> {
     let mut builder = Request::builder()
         .method("POST")
         .uri(endpoint.uri(path))
         .header("host", endpoint.host_header())
-        .header("content-type", "application/x-www-form-urlencoded")
+        .header("content-type", content_type)
         .header("accept", "application/json");
     for (name, value) in extra_headers {
         builder = builder.header(*name, *value);
     }
-    let req = builder
-        .body(body_from(form.as_bytes().to_vec()))
-        .map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
+    let req =
+        builder.body(body_from(body.to_vec())).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
 
     let (status, body) = send(endpoint, tls_config, guard, req).await?;
     // An empty or non-JSON body on an error status is a real possibility (a gateway in front

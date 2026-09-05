@@ -273,7 +273,9 @@ makes to redeem its code. That single request carries everything worth knowing (
 `redirect_uri`, and — as its own destination — `token_endpoint` itself), which is why nothing
 needs to be declared beforehand. It matches on the *shape* of the request (a POST whose body
 parses as `grant_type=authorization_code` or the device-code grant) rather than a configured
-host and path, because by definition it does not know the host or path yet.
+host and path, because by definition it does not know the host or path yet. The body is read
+per its own `Content-Type` — `application/x-www-form-urlencoded` per RFC 6749, or
+`application/json`, since plenty of real clients send that instead.
 
 That looseness is safe here specifically because this proxy exists for one command, in the
 foreground, under a timeout, with somebody watching — not as a standing part of `serve`.
