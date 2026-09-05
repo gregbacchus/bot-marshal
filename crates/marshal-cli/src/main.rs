@@ -2076,12 +2076,24 @@ async fn run_sandboxed_bootstrap(
             let bootstrapped = result.map_err(|_| {
                 anyhow::anyhow!("the capture channel closed before anything was captured")
             })?;
+            // Printed *and* logged: a full-screen TUI can own the terminal via the alternate
+            // screen buffer, and anything printed while it does is liable to be silently
+            // overwritten by its next redraw regardless of timing — `--log debug` (journald or
+            // otherwise) is the channel that survives that when the console one does not.
             println!(
-                "\n`{}` captured. Exit `{}` when you're ready.",
+                "\n`{}` captured. Exit `{}` when you're ready — this won't wait long for it.",
                 opts.name,
                 opts.run.join(" ")
             );
-            let _ = child.wait().await;
+            tracing::info!(secret = %opts.name, "credential captured");
+            // A short grace period, not an indefinite wait: under `--mode steal` the tool's own
+            // login is deliberately made to look like it failed, and plenty of tools answer
+            // that with a prompt (`retry?`) that sits until a human presses something — nothing
+            // this process can wait out. The credential is already captured and about to be
+            // reported and persisted regardless of whether the tool ever exits; this grace
+            // period exists only so a tool that makes a few more calls right after success does
+            // not immediately hit a proxy that vanished out from under it.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
             Ok(bootstrapped)
         }
         status = child.wait() => {
@@ -2126,6 +2138,7 @@ fn report_bootstrap(
     learned: marshal_secrets::Bootstrapped,
 ) -> anyhow::Result<()> {
     if !learned.enrolled {
+        tracing::warn!(secret = %opts.name, "captured an exchange but the provider issued no refresh token; nothing enrolled");
         println!(
             "\nCaptured a `{}` exchange, but the provider issued no refresh token.",
             opts.name
@@ -2139,6 +2152,7 @@ fn report_bootstrap(
         anyhow::bail!("nothing enrolled");
     }
 
+    tracing::info!(secret = %opts.name, scope = learned.scope.as_deref(), "enrolled");
     println!("\n`{}` is enrolled.", opts.name);
     if let Some(scope) = &learned.scope {
         println!("  granted scope: {scope}");
@@ -2147,6 +2161,7 @@ fn report_bootstrap(
 
     match write_discovered_swap(config_path, cfg, &opts.name, &learned) {
         Ok(Some(path)) => {
+            tracing::info!(secret = %opts.name, path = %path.display(), "discovered configuration written");
             println!("Discovered configuration written to {}.", path.display());
             println!(
                 "Add `transforms: {}` to a profile to use it unattended — it still needs the \
@@ -2156,6 +2171,7 @@ fn report_bootstrap(
             );
         }
         Ok(None) => {
+            tracing::warn!(secret = %opts.name, "a file already existed where the discovered configuration would have been written; not overwritten");
             println!(
                 "A file already exists where this would have written the discovered \
                  configuration, so nothing was overwritten. Add it by hand instead:\n"

@@ -97,12 +97,17 @@ but would not be as a standing part of `serve`, see
 [OAuth2 credentials § Bootstrap capture](configuration/oauth2.md#bootstrap-capture).
 
 **With `--run`, capture and reporting are two separate moments.** The moment the exchange is
-captured, marshal prints one short line and nothing else — the sandboxed command keeps running
-(and, for a login flow, usually keeps making its own requests, or becomes the tool's ordinary
-interactive session) sharing the same terminal, so anything longer would print into whatever it
-is still rendering. The full report — enrolled, granted scope, discovered configuration — is
-held back until the command actually exits, however long that takes; there is no timeout on
-this part, only on waiting for the capture itself.
+captured, marshal prints one short line and nothing else, then waits up to 5 seconds for the
+sandboxed command to exit before doing anything more — long enough for a tool that makes a
+couple more requests right after success to not suddenly find the proxy gone out from under
+it, but not an indefinite wait: under `--mode steal` the tool's own login is deliberately made
+to look like it failed, and plenty of tools answer that with a prompt that sits until a human
+presses something, which nothing here can wait out. The full report — enrolled, granted scope,
+discovered configuration — always follows within that window, whether or not the command has
+exited. It is also logged (`credential captured`, `enrolled`, `discovered configuration
+written`), not only printed: a full-screen TUI can own the terminal via the alternate screen
+buffer, and anything printed while it does can be silently overwritten by its next redraw
+regardless of timing, which `--log debug` survives even when the console does not.
 
 **The discovered configuration is written to a file, not just printed.** On success, a named
 transform bundle is written to `transforms_path` (default `transforms/`) as `<name>.yaml` —
