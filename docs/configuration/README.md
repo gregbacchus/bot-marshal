@@ -8,6 +8,7 @@ every restart.
 * [Bundles](bundles.md) — named, reusable allow-lists.
 * [Bind groups](bind-groups.md) — named, reusable `--isolation netns` bind paths.
 * [Transforms](transforms.md) — header setting/filtering, secret injection, response rewriting.
+* [OAuth2 credentials](oauth2.md) — grants, private-key auth, and an agent-driven flow marshal captures in band.
 * [Secret injection examples](secret-injection-examples.md) — worked configs for OpenAI, Anthropic, OpenRouter, Claude Code, Codex, GitHub, and others.
 * [Identity](identity.md) — which agent is connecting, and `marshal run`.
 

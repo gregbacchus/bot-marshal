@@ -93,6 +93,7 @@ When you change something, update the matching page:
 | config schema — any key, any default | [docs/configuration/](docs/configuration/) — the page for that concept, plus the base-file example in [configuration/README.md](docs/configuration/README.md) |
 | a policy layer's options or behaviour | [docs/configuration/policy-layers.md](docs/configuration/policy-layers.md) |
 | a transform, secret source, or buffering rule | [docs/configuration/transforms.md](docs/configuration/transforms.md) |
+| an OAuth2 grant, in-band capture, or the token cache | [docs/configuration/oauth2.md](docs/configuration/oauth2.md) |
 | an identity resolver, or `marshal run` | [docs/configuration/identity.md](docs/configuration/identity.md) |
 | a CLI flag, subcommand, or env var | [docs/cli.md](docs/cli.md) |
 | log fields, levels, sinks, formats, metrics | [docs/observability.md](docs/observability.md) |

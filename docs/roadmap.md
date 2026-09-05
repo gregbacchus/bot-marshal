@@ -28,7 +28,7 @@ audited separately.
 PKCE) and `device_code`, the last two enrolled via `marshal secrets oauth login`;
 `client_secret_basic`/`_post`, `private_key_jwt` and public clients; and two capture
 mechanisms with deliberately different threat models —
-[`capture: in_band`](configuration/transforms.md#in-band-capture), which owns the PKCE verifier
+[`capture: in_band`](configuration/oauth2.md#in-band-capture), which owns the PKCE verifier
 so an untrusted agent cannot redeem its own code
 ([ADR-0032](adr/0032-marshal-owns-the-pkce-verifier.md)), and
 [`oauth login --wait`/`--run`](cli.md#marshal-secrets-oauth-login-name---wait----run----cmd),

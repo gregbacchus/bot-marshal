@@ -28,7 +28,7 @@ enough to work it out from their docs:
 | `Authorization: Basic <user:pass base64>` | `inject: { type: basic, username: "..." }` |
 | a custom header (`X-Api-Key`, `api-key`, `X-Auth-Token`, ...) | `inject: { type: header, name: "..." }` |
 | `?api_key=...` / `?key=...` in the URL | `inject: { type: query, name: "..." }` |
-| "get a short-lived token from our OAuth endpoint first" | `source: { type: oauth2, ... }` — see below and [Transforms § OAuth2](transforms.md#oauth2) |
+| "get a short-lived token from our OAuth endpoint first" | `source: { type: oauth2, ... }` — see below and [OAuth2 credentials](oauth2.md) |
 | AWS SigV4 (`Authorization: AWS4-HMAC-SHA256 ...`) | `inject: { type: sigv4, ... }` — see [Transforms § AWS SigV4](transforms.md#aws-sigv4) |
 
 A provider that documents both Bearer and Basic (Stripe is one) — prefer Bearer. It's one
@@ -127,7 +127,7 @@ request_transforms:
 Vertex AI authenticates with a Google service account rather than a long-lived key —
 `grant: jwt_bearer` (RFC 7523) is built for exactly this, and it's the one entry here with no
 static secret anywhere: marshal signs a fresh assertion and exchanges it for an access token on
-every mint. See [Transforms § OAuth2](transforms.md#oauth2) for the field reference.
+every mint. See [OAuth2 credentials](oauth2.md) for the field reference.
 
 ```yaml
 request_transforms:
@@ -208,7 +208,7 @@ Once enrolled, the permanent swap uses the values it reported:
 
 If instead you want Claude Code to drive its *own* login through the proxy every time and never
 hold anything, that is `capture: in_band`
-([Transforms § In-band capture](transforms.md#in-band-capture)) — a different mechanism with a
+([OAuth2 credentials § In-band capture](oauth2.md#in-band-capture)) — a different mechanism with a
 different threat model; read [ADR-0034](../adr/0034-bootstrap-capture-reads-the-token-exchange.md)
 on which applies.
 
@@ -329,5 +329,5 @@ request_transforms:
 ```
 
 `grant: client_credentials` is the default, so it doesn't need to be spelled out. See
-[Transforms § OAuth2](transforms.md#oauth2) for `refresh_token`, `jwt_bearer`, and the
+[OAuth2 credentials](oauth2.md) for `refresh_token`, `jwt_bearer`, and the
 interactive grants this same source type also supports.

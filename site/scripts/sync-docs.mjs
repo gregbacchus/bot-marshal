@@ -33,6 +33,7 @@ const DESCRIPTIONS = {
   'configuration/bundles': 'Named, reusable allow-lists.',
   'configuration/bind-groups': 'Named, reusable sandbox bind paths for marshal run --isolation netns.',
   'configuration/transforms': 'Header filtering, secret injection, and response rewriting.',
+  'configuration/oauth2': 'Grants, private-key client auth, and capturing an agent-driven OAuth flow in band.',
   'configuration/identity': 'Which agent is connecting, and marshal run.',
   'configuration/secret-injection-examples': 'Worked examples of injecting real credentials at the boundary.',
   'adr/index': 'Why the design is the way it is.',

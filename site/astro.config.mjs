@@ -37,6 +37,7 @@ export default defineConfig({
             { slug: 'configuration/bundles' },
             { slug: 'configuration/bind-groups' },
             { slug: 'configuration/transforms' },
+            { slug: 'configuration/oauth2' },
             { slug: 'configuration/identity' },
             { slug: 'configuration/secret-injection-examples' },
           ],

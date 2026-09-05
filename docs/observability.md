@@ -110,7 +110,7 @@ the record says so in `reason`:
 ```
 
 `reason.code` is the field to key on. Today `oauth2_terminated` is the only one, emitted when
-[in-band capture](configuration/transforms.md#in-band-capture) answers a token request rather
+[in-band capture](configuration/oauth2.md#in-band-capture) answers a token request rather
 than forwarding it. Every such response also carries `proxy-agent: bot-marshal` on the wire.
 
 ### OAuth2 log lines

@@ -132,7 +132,7 @@ Two things worth knowing:
   is the tool's request to change, not marshal's.
 
 This is a different mechanism from
-[`capture: in_band`](configuration/transforms.md#in-band-capture), with a different threat
+[`capture: in_band`](configuration/oauth2.md#in-band-capture), with a different threat
 model — it trusts the session rather than excluding the client. See
 [ADR-0034](adr/0034-bootstrap-capture-reads-the-token-exchange.md).
 
