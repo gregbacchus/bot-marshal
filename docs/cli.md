@@ -149,7 +149,12 @@ sees, and `--log debug` adds *why* a given POST wasn't treated as a login exchan
 same way `serve --audit-log` does — like every audit record it never carries a body or a
 captured secret's value, since the redactor already knows any credential this session captures
 before logging anything about that request (ADR-0029), and it's meaningless without
-`--wait`/`--run` since there's no bootstrap session to log otherwise.
+`--wait`/`--run` since there's no bootstrap session to log otherwise. Every record also carries
+[`request_headers`/`response_headers`](observability.md#request_headers-and-response_headers)
+— `content-type`/`content-encoding` on both sides is usually the fastest way to see why a
+response that reached the exchange still wasn't captured (a compressed body this cannot yet
+decode, an unexpected content type), without ever showing a header this doesn't recognise as
+safe, `authorization` and `cookie` included.
 
 Where per-request *console* output should go depends on which of `--wait`/`--run` you used,
 because `--run`'s sandboxed command inherits marshal's own stdout and stderr directly —

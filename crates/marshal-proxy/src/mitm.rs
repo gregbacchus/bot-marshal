@@ -278,8 +278,18 @@ async fn handle_request(
     let outcome = handler.chain.evaluate(&cx).await;
     let would_deny = outcome.would_deny;
     if outcome.action == Action::Deny {
-        emit(&handler, &cx, &outcome.reason, Action::Deny, outcome.evidence, None, started, false)
-            .await;
+        emit(
+            &handler,
+            &cx,
+            &outcome.reason,
+            Action::Deny,
+            outcome.evidence,
+            None,
+            started,
+            false,
+            None,
+        )
+        .await;
         return Ok(denial_response(&outcome.reason, &cx, jsonrpc_id));
     }
 
@@ -290,8 +300,18 @@ async fn handle_request(
             // without its credential swap would leak the placeholder upstream and fail in a
             // way that looks like an upstream problem.
             let reason = Reason::new(transform.name(), "transform_failed", e.to_string());
-            emit(&handler, &cx, &reason, Action::Deny, outcome.evidence, None, started, false)
-                .await;
+            emit(
+                &handler,
+                &cx,
+                &reason,
+                Action::Deny,
+                outcome.evidence,
+                None,
+                started,
+                false,
+                None,
+            )
+            .await;
             return Ok(denial_response(&reason, &cx, jsonrpc_id));
         }
     }
@@ -304,6 +324,16 @@ async fn handle_request(
             Ok(Some(synth)) => {
                 let reason =
                     Reason::new(responder.name(), synth.code.clone(), synth.message.clone());
+                let synth_headers: http::HeaderMap = synth
+                    .headers
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        Some((
+                            http::HeaderName::try_from(k).ok()?,
+                            http::HeaderValue::try_from(v.as_str()).ok()?,
+                        ))
+                    })
+                    .collect();
                 emit(
                     &handler,
                     &cx,
@@ -313,6 +343,7 @@ async fn handle_request(
                     Some(synth.status),
                     started,
                     would_deny,
+                    Some(&synth_headers),
                 )
                 .await;
                 return Ok(synthesized_response(synth));
@@ -323,8 +354,18 @@ async fn handle_request(
                 // silently skipped, because the request it would have answered is one the
                 // upstream must not see.
                 let reason = Reason::new(responder.name(), "responder_failed", e.to_string());
-                emit(&handler, &cx, &reason, Action::Deny, outcome.evidence, None, started, false)
-                    .await;
+                emit(
+                    &handler,
+                    &cx,
+                    &reason,
+                    Action::Deny,
+                    outcome.evidence,
+                    None,
+                    started,
+                    false,
+                    None,
+                )
+                .await;
                 return Ok(denial_response(&reason, &cx, jsonrpc_id));
             }
         }
@@ -369,6 +410,7 @@ async fn handle_request(
         Some(status.as_u16()),
         started,
         would_deny,
+        Some(response.headers()),
     )
     .await;
 
@@ -760,6 +802,7 @@ async fn emit(
     status_code: Option<u16>,
     started: std::time::Instant,
     would_deny: bool,
+    response_headers: Option<&http::HeaderMap>,
 ) {
     // Two halves. The chain accumulates into a clone of the context's evidence, because layers
     // see it read-only; transforms and responders mutate the context's own afterwards. Folding
@@ -791,6 +834,10 @@ async fn emit(
             flags: evidence.flags,
             status_code,
             duration_ms: started.elapsed().as_millis() as u64,
+            request_headers: marshal_core::redact_headers(&cx.headers),
+            response_headers: response_headers
+                .map(marshal_core::redact_headers)
+                .unwrap_or_default(),
         })
         .await;
 }

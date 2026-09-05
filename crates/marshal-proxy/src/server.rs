@@ -884,6 +884,11 @@ impl Server {
                 flags: evidence.flags,
                 status_code,
                 duration_ms: started.elapsed().as_millis() as u64,
+                // A CONNECT carries no headers of its own at this level, and this path never
+                // parses a response — that only happens once TLS is intercepted, in
+                // `mitm::emit`. Plain absolute-form HTTP's request headers still show, though.
+                request_headers: marshal_core::redact_headers(&cx.headers),
+                response_headers: std::collections::BTreeMap::new(),
             })
             .await;
     }

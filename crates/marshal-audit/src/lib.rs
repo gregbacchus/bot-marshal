@@ -249,6 +249,8 @@ mod tests {
             }],
             status_code: None,
             duration_ms: 7,
+            request_headers: Default::default(),
+            response_headers: Default::default(),
         }
     }
 

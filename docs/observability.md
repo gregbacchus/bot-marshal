@@ -68,8 +68,9 @@ One JSON object per line, append mode, created if missing, **never truncated or 
 bot-marshal itself** — point logrotate at it.
 
 Each record carries the resolved identity, whether it was attributed, which resolver matched,
-the profile, the deciding layer, the full evidence trail, status and timing. Injected secrets
-are scrubbed from every audit path and log line.
+the profile, the deciding layer, the full evidence trail, status and timing, and — see
+[below](#request_headers-and-response_headers) — every header name from both directions.
+Injected secrets are scrubbed from every audit path and log line.
 
 ### `facts` and `flags`
 
@@ -96,6 +97,34 @@ Two things worth knowing about what does *not* appear:
 * **`secrets.not_injected.<host><path>`** marks an endpoint deliberately left unauthenticated
   — an OAuth2 swap's own token or authorization endpoint. Its absence of a credential is
   intentional, and this is what says so.
+
+### `request_headers` and `response_headers`
+
+Every header **name** on both directions, but the **value** only for a header this recognises
+as never carrying a credential — `content-type`, `content-encoding`, `content-length`,
+`accept-encoding`, `cache-control`, `date`, `server`, and similar transport/negotiation
+metadata. Everything else — `authorization`, `cookie`, `set-cookie`, `location` (an
+authorization redirect carries the code in its query string), and any header this does not
+recognise at all — keeps its name but shows `"[redacted]"` in its place. An unrecognised
+header is redacted by default, not allowlisted by default: a vendor's own auth scheme under a
+header name nothing here has ever seen still gets blanked.
+
+```json
+{ "action": "allow", "method": "POST", "path": "/v1/oauth/token", "status_code": 200,
+  "request_headers": { "authorization": "[redacted]", "content-type": "application/x-www-form-urlencoded" },
+  "response_headers": { "content-encoding": "br", "content-type": "application/json" } }
+```
+
+This is independent of, and in addition to, the credential redaction described above: that
+scrubs a value once something has *learned* it is secret, which cannot cover a header on an
+exchange that never completed — exactly the case debugging *why* it never completed needs to
+see the shape of, without ever seeing the credential itself. Name-based redaction applies
+before that question can even be asked.
+
+Omitted when there is nothing to show: a CONNECT carries no headers of its own at this level,
+a denial before a request was parsed has none either, and a plain (non-TLS) absolute-form
+request through the explicit proxy is relayed byte-for-byte rather than parsed, so it never has
+response headers to show (see [Capture](capture.md)).
 
 ### A request marshal answered itself
 
