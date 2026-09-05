@@ -202,7 +202,7 @@ async fn a_profile_naming_a_transform_bundle_resolves_it() {
     let mut c = cfg(r#"
 profile:
   default_action: deny
-  transforms: shared
+  transforms: [shared]
 "#);
     c.transforms.insert(
         "shared".to_owned(),

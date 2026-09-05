@@ -294,9 +294,9 @@ foreground, under a timeout, with somebody watching — not as a standing part o
 Either way, a refresh token the exchange produced is written under `state_dir`, and the
 configuration it discovered — endpoint, `client_id`, scope — is written as a named transform
 bundle under `transforms_path` (see [`marshal secrets oauth login --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd)
-for exactly what), ready to attach to a profile with `transforms: <name>` if you want an
-ongoing declared swap afterward. Bootstrap capture only seeds a credential once; it is not
-itself a standing part of the runtime.
+for exactly what), ready to attach to a profile's `transforms:` list if you want an ongoing
+declared swap afterward. Bootstrap capture only seeds a credential once; it is not itself a
+standing part of the runtime.
 
 Full command reference, flags, and the sandboxing `--run` applies:
 [`marshal secrets oauth login <name> --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd).

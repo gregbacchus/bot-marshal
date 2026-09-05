@@ -344,7 +344,7 @@ fn check_profile(
         }
     }
 
-    if let Some(name) = &profile.transforms {
+    if !profile.transforms.is_empty() {
         let has_inline_request = profile.request_transforms.headers.is_some()
             || !profile.request_transforms.set_headers.is_empty()
             || !profile.request_transforms.secrets.is_empty();
@@ -359,12 +359,46 @@ fn check_profile(
                     .into(),
             });
         }
-        if !cfg.transforms.contains_key(name) {
-            out.push(Diagnostic {
-                severity: Severity::Error,
-                location: format!("{at}.transforms"),
-                message: format!("references unknown transform bundle `{name}`"),
-            });
+
+        let mut request_headers_from: Option<&str> = None;
+        let mut response_headers_from: Option<&str> = None;
+        for name in &profile.transforms {
+            let Some(bundle) = cfg.transforms.get(name) else {
+                out.push(Diagnostic {
+                    severity: Severity::Error,
+                    location: format!("{at}.transforms"),
+                    message: format!("references unknown transform bundle `{name}`"),
+                });
+                continue;
+            };
+            if bundle.request_transforms.headers.is_some() {
+                if let Some(first) = request_headers_from {
+                    out.push(Diagnostic {
+                        severity: Severity::Error,
+                        location: format!("{at}.transforms"),
+                        message: format!(
+                            "both `{first}` and `{name}` set request_transforms.headers — at \
+                             most one bundle in the list may, since combining two allowlists \
+                             silently would be a guess, not a decision"
+                        ),
+                    });
+                }
+                request_headers_from.get_or_insert(name);
+            }
+            if bundle.response_transforms.headers.is_some() {
+                if let Some(first) = response_headers_from {
+                    out.push(Diagnostic {
+                        severity: Severity::Error,
+                        location: format!("{at}.transforms"),
+                        message: format!(
+                            "both `{first}` and `{name}` set response_transforms.headers — at \
+                             most one bundle in the list may, since combining two allowlists \
+                             silently would be a guess, not a decision"
+                        ),
+                    });
+                }
+                response_headers_from.get_or_insert(name);
+            }
         }
     }
 }
@@ -561,7 +595,7 @@ mod tests {
 
     #[test]
     fn a_profile_cannot_both_reference_and_embed_transforms() {
-        let mut profile = Profile { transforms: Some("shared".into()), ..Default::default() };
+        let mut profile = Profile { transforms: vec!["shared".into()], ..Default::default() };
         profile.request_transforms.headers = Some(Default::default());
         let cfg = cfg_with(profile);
         assert!(
@@ -569,6 +603,66 @@ mod tests {
                 .iter()
                 .any(|d| d.severity == Severity::Error && d.location == "profiles.p.transforms")
         );
+    }
+
+    #[test]
+    fn a_profile_transforms_list_can_name_more_than_one_bundle() {
+        let mut cfg = Config::default();
+        cfg.transforms.insert("a".into(), crate::model::TransformBundle::default());
+        cfg.transforms.insert("b".into(), crate::model::TransformBundle::default());
+        cfg.profiles.insert(
+            "p".into(),
+            Profile { transforms: vec!["a".into(), "b".into()], ..Default::default() },
+        );
+        assert!(!validate(&cfg).iter().any(|d| d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn an_unknown_bundle_anywhere_in_the_transforms_list_is_reported() {
+        let mut cfg = Config::default();
+        cfg.transforms.insert("a".into(), crate::model::TransformBundle::default());
+        cfg.profiles.insert(
+            "p".into(),
+            Profile { transforms: vec!["a".into(), "nope".into()], ..Default::default() },
+        );
+        let diagnostics = validate(&cfg);
+        assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
+            && d.location == "profiles.p.transforms"
+            && d.message.contains("nope")));
+    }
+
+    #[test]
+    fn two_bundles_both_setting_a_headers_allowlist_on_the_same_side_is_rejected() {
+        let mut cfg = Config::default();
+        let mut with_headers = crate::model::TransformBundle::default();
+        with_headers.request_transforms.headers = Some(Default::default());
+        cfg.transforms.insert("a".into(), with_headers.clone());
+        cfg.transforms.insert("b".into(), with_headers);
+        cfg.profiles.insert(
+            "p".into(),
+            Profile { transforms: vec!["a".into(), "b".into()], ..Default::default() },
+        );
+        let diagnostics = validate(&cfg);
+        assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
+            && d.location == "profiles.p.transforms"
+            && d.message.contains('a')
+            && d.message.contains('b')));
+    }
+
+    #[test]
+    fn one_bundle_setting_request_headers_and_another_setting_response_headers_is_fine() {
+        let mut cfg = Config::default();
+        let mut req_only = crate::model::TransformBundle::default();
+        req_only.request_transforms.headers = Some(Default::default());
+        let mut resp_only = crate::model::TransformBundle::default();
+        resp_only.response_transforms.headers = Some(Default::default());
+        cfg.transforms.insert("a".into(), req_only);
+        cfg.transforms.insert("b".into(), resp_only);
+        cfg.profiles.insert(
+            "p".into(),
+            Profile { transforms: vec!["a".into(), "b".into()], ..Default::default() },
+        );
+        assert!(!validate(&cfg).iter().any(|d| d.severity == Severity::Error));
     }
 
     #[test]
@@ -623,7 +717,7 @@ response_transforms:
 
     #[test]
     fn a_profile_referencing_an_unknown_transform_bundle_is_an_error() {
-        let cfg = cfg_with(Profile { transforms: Some("nope".into()), ..Default::default() });
+        let cfg = cfg_with(Profile { transforms: vec!["nope".into()], ..Default::default() });
         assert!(
             validate(&cfg)
                 .iter()

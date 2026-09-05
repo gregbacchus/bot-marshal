@@ -35,7 +35,7 @@ policy:
   - layer: allowlist
     allow: { bundles: [github, npm] }
     on_match: allow
-transforms: default-headers
+transforms: [default-headers]
 ```
 
 A [resolver](identity.md) or `marshal run --profile <name>` can **only target a named

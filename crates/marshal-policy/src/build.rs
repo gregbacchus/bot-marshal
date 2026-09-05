@@ -122,24 +122,39 @@ pub fn build_request_transforms(
     Ok(vec![Arc::new(RequestHeaderSetter::new(headers))])
 }
 
-/// Resolve a profile's `transforms: <name>` indirection, if it has one, into an effective
-/// profile whose `request_transforms`/`response_transforms` are ready to use.
+/// Resolve a profile's `transforms: [<name>, ...]` indirection, if it has one, into an
+/// effective profile whose `request_transforms`/`response_transforms` are ready to use.
 ///
 /// `marshal config check` already rejects a profile that sets `transforms` alongside either
-/// section directly, so exactly one of "inline" or "named bundle" is ever populated on the
-/// input — this just resolves the latter into the same shape as the former.
+/// section directly, and rejects more than one named bundle setting a `headers` allowlist on
+/// the same side — so composing the list here is just concatenation (`secrets`, response
+/// `body`) and a merge (`set_headers`, later bundle wins on a shared key) with at most one
+/// bundle ever contributing `headers`.
 pub fn resolve_profile(
     cfg: &Config,
     profile: &marshal_config::model::Profile,
 ) -> Result<marshal_config::model::Profile, BuildError> {
     let mut effective = profile.clone();
-    if let Some(name) = &profile.transforms {
-        let bundle = cfg
-            .transforms
-            .get(name)
-            .ok_or_else(|| BuildError::UnknownTransformBundle(name.clone()))?;
-        effective.request_transforms = bundle.request_transforms.clone();
-        effective.response_transforms = bundle.response_transforms.clone();
+    if !profile.transforms.is_empty() {
+        let mut request = marshal_config::model::RequestTransforms::default();
+        let mut response = marshal_config::model::ResponseTransforms::default();
+        for name in &profile.transforms {
+            let bundle = cfg
+                .transforms
+                .get(name)
+                .ok_or_else(|| BuildError::UnknownTransformBundle(name.clone()))?;
+            if bundle.request_transforms.headers.is_some() {
+                request.headers = bundle.request_transforms.headers.clone();
+            }
+            request.set_headers.extend(bundle.request_transforms.set_headers.clone());
+            request.secrets.extend(bundle.request_transforms.secrets.iter().cloned());
+            if bundle.response_transforms.headers.is_some() {
+                response.headers = bundle.response_transforms.headers.clone();
+            }
+            response.body.extend(bundle.response_transforms.body.iter().cloned());
+        }
+        effective.request_transforms = request;
+        effective.response_transforms = response;
     }
     Ok(effective)
 }
@@ -370,4 +385,56 @@ fn matcher(
         layer,
         source,
     })
+}
+
+#[cfg(test)]
+mod resolve_profile_tests {
+    use super::*;
+    use marshal_config::model::{BodyTransform, Profile, TransformBundle};
+
+    fn bundle(secret_name: &str, header_key: &str, header_value: &str) -> TransformBundle {
+        let mut b = TransformBundle::default();
+        b.request_transforms.secrets.push(serde_json::json!({ "name": secret_name }));
+        b.request_transforms.set_headers.insert(header_key.into(), header_value.into());
+        b.response_transforms
+            .body
+            .push(BodyTransform::Limit { max_bytes: 1024, on_oversize: Default::default() });
+        b
+    }
+
+    #[test]
+    fn transforms_list_concatenates_secrets_and_body_in_order() {
+        let mut cfg = Config::default();
+        cfg.transforms.insert("a".into(), bundle("A_SECRET", "x-a", "1"));
+        cfg.transforms.insert("b".into(), bundle("B_SECRET", "x-b", "2"));
+        let profile = Profile { transforms: vec!["a".into(), "b".into()], ..Default::default() };
+
+        let effective = resolve_profile(&cfg, &profile).unwrap();
+        assert_eq!(effective.request_transforms.secrets.len(), 2);
+        assert_eq!(
+            effective.request_transforms.secrets[0]["name"].as_str(),
+            Some("A_SECRET"),
+            "bundles compose in the order the list names them"
+        );
+        assert_eq!(effective.request_transforms.secrets[1]["name"].as_str(), Some("B_SECRET"));
+        assert_eq!(effective.response_transforms.body.len(), 2);
+    }
+
+    #[test]
+    fn a_later_bundle_wins_a_set_headers_key_both_set() {
+        let mut cfg = Config::default();
+        cfg.transforms.insert("a".into(), bundle("A", "x-shared", "from-a"));
+        cfg.transforms.insert("b".into(), bundle("B", "x-shared", "from-b"));
+        let profile = Profile { transforms: vec!["a".into(), "b".into()], ..Default::default() };
+
+        let effective = resolve_profile(&cfg, &profile).unwrap();
+        assert_eq!(effective.request_transforms.set_headers.get("x-shared").unwrap(), "from-b");
+    }
+
+    #[test]
+    fn an_unknown_bundle_in_the_list_is_an_error() {
+        let cfg = Config::default();
+        let profile = Profile { transforms: vec!["nope".into()], ..Default::default() };
+        assert!(resolve_profile(&cfg, &profile).is_err());
+    }
 }

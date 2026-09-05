@@ -283,10 +283,14 @@ pub struct Profile {
     /// Ordered chain. First terminal verdict wins.
     #[serde(default)]
     pub policy: Vec<LayerConfig>,
-    /// A named bundle from `transforms_path`, used in place of `request_transforms`/
-    /// `response_transforms` below. Mutually exclusive with setting either of them directly.
+    /// Named bundles from `transforms_path`, composed in order in place of
+    /// `request_transforms`/`response_transforms` below. Mutually exclusive with setting
+    /// either of them directly. `secrets` and response `body` transforms concatenate across
+    /// the list; `set_headers` merges with a later bundle overwriting an earlier one's same
+    /// key; at most one bundle in the list may set a `headers` allowlist on either side —
+    /// two would be an ambiguous filter to combine silently, so `config check` rejects it.
     #[serde(default)]
-    pub transforms: Option<String>,
+    pub transforms: Vec<String>,
     /// Applied on the way out, after the chain has allowed. Ignored if `transforms` is set.
     #[serde(default)]
     pub request_transforms: RequestTransforms,

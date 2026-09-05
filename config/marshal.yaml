@@ -69,7 +69,7 @@ profile:
       on_match: allow
       on_miss: pass
 
-  transforms: default-headers
+  transforms: [default-headers]
 
 # coding-agent and llm-agent (the intended shape for two real agent profiles — dlp, rules and
 # judge arrive in M3/M4.5) live under profiles/, one file each, since only this fallback needs

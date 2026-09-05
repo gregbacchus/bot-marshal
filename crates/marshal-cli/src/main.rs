@@ -2164,10 +2164,11 @@ fn report_bootstrap(
             tracing::info!(secret = %opts.name, path = %path.display(), "discovered configuration written");
             println!("Discovered configuration written to {}.", path.display());
             println!(
-                "Add `transforms: {}` to a profile to use it unattended — it still needs the \
+                "Add `{}` to a profile's `transforms:` list to use it unattended (a profile \
+                 with no `transforms:` yet needs `transforms: [{}]`) — it still needs the \
                  `rules` host filled in, since bootstrap only learns the token endpoint, not \
                  which API the credential is for.",
-                opts.name
+                opts.name, opts.name
             );
         }
         Ok(None) => {

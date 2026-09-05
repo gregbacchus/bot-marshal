@@ -2,7 +2,7 @@
 # endpoint — and the difference between `search_repositories` and `delete_repository` is
 # entirely in the body.
 default_action: deny
-transforms: default-headers
+transforms: [default-headers]
 policy:
   - layer: allowlist
     allow:

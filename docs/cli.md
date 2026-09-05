@@ -113,9 +113,10 @@ regardless of timing, which `--log debug` survives even when the console does no
 transform bundle is written to `transforms_path` (default `transforms/`) as `<name>.yaml` —
 `token_endpoint`, `client_id`, `redirect_uri`, everything but the `rules` host, which bootstrap
 has no way to know: it learns where the *token* endpoint is, not which API the credential is
-for. Add `transforms: <name>` to whichever profile needs it, fill in that one field, and it's
-live — no copying a multi-line block by hand. An existing file at that path is never
-overwritten; the full block is printed instead, exactly as before this existed.
+for. Add `<name>` to whichever profile's `transforms:` list needs it (`transforms: [<name>]` if
+it has none yet), fill in that one field, and it's live — no copying a multi-line block by
+hand. An existing file at that path is never overwritten; the full block is printed instead,
+exactly as before this existed.
 
 ```bash
 marshal secrets oauth login CLAUDE_SUBSCRIPTION --wait

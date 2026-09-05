@@ -275,15 +275,30 @@ request_transforms:
     allow: ["accept*", "content-*", "user-agent", "authorization"]
 ```
 
-A profile opts in by name:
+A profile opts in by name — `transforms:` is a list, so more than one bundle can compose on
+the same profile:
 
 ```yaml
 # profiles/llm-agent.yaml
 default_action: deny
-transforms: default-headers
+transforms: [default-headers]
 policy: [...]
 ```
 
-`transforms: <name>` and embedded `request_transforms:` / `response_transforms:` are
-**mutually exclusive on one profile** — `marshal config check` rejects setting both rather
-than silently picking one.
+```yaml
+# profiles/llm-agent.yaml, using two bundles together
+default_action: deny
+transforms: [default-headers, claude-subscription]
+policy: [...]
+```
+
+Composing is concatenation, not replacement: `secrets` and response `body` transforms from
+every named bundle all apply, in the order listed. `set_headers` merges, a later bundle
+winning on a key two bundles both set. A `headers` allowlist (request or response) is the one
+piece that does not silently combine — at most one bundle in the list may set it on a given
+side, since merging two allowlists would be a guess about which one governs rather than a
+decision either bundle actually made; `marshal config check` rejects two that both try.
+
+`transforms:` and embedded `request_transforms:` / `response_transforms:` are **mutually
+exclusive on one profile** — `marshal config check` rejects setting both rather than silently
+picking one.

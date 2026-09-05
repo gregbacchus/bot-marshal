@@ -33,8 +33,8 @@ ordering:
 
 * **[Bundles](../configuration/bundles.md)** — a named domain set referenced by an
   `allowlist` layer, so the shared thing is data inside a layer the profile placed itself.
-* **[Named transform bundles](../configuration/transforms.md)** — `transforms: <name>`, since
-  transforms are not ordered against each other the way layers are.
+* **[Named transform bundles](../configuration/transforms.md)** — `transforms: [<name>, ...]`,
+  since transforms are not ordered against each other the way layers are.
 
 ## Alternatives considered
 
