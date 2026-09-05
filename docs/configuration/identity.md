@@ -12,7 +12,7 @@ order they should be tried:
 | resolver | strength | limitation |
 |---|---|---|
 | `peer_cred` uid/gid | kernel-supplied, unspoofable | only separates agents running as different users/groups |
-| `launched` | cgroup naming from `marshal run`, inherited by child processes | a process can move itself between delegated cgroups |
+| `run` | cgroup naming from `marshal run`, inherited by child processes | a process can move itself between delegated cgroups |
 | `source_ip` | as trustworthy as the network | collapses when two agents share a namespace |
 | `listener_port` | as trustworthy as whatever stops an agent reaching another agent's port | client-cooperative — nothing in the proxy itself prevents it |
 | `proxy_auth` | client-asserted | an agent that can read another token can pick another profile |
@@ -46,7 +46,7 @@ identities:
           identity: "shared-agents"
           profile: llm-agent
 
-    - type: launched                  # identities `marshal run` registers — no map needed,
+    - type: run                       # identities `marshal run` registers — no map needed,
                                       # the cgroup naming convention *is* the registration
 
     - type: source_ip                 # containers / netns: one IP per agent
@@ -150,7 +150,7 @@ marshal run --profile coding-agent -- claude
 
 The agent goes into a network namespace with no route out, inside a transient systemd scope
 named `marshal-coding-agent-<id>.scope`. The scope supplies identity — the naming convention
-*is* the registration, so the `launched` resolver reads the profile back out of the cgroup and
+*is* the registration, so the `run` resolver reads the profile back out of the cgroup and
 there is no control socket to get out of sync.
 
 Because cgroups are inherited, the `git`, `npm` and `curl` processes the agent spawns — where
@@ -163,7 +163,7 @@ for agents running as the *same* uid, which uid alone cannot do.
 marshal run -- claude
 ```
 
-The scope is then named `marshal-<id>.scope`, with no profile segment — a shape the `launched`
+The scope is then named `marshal-<id>.scope`, with no profile segment — a shape the `run`
 resolver does not recognise, so it declines to match, exactly as it does for any cgroup that
 isn't its naming convention at all. The connection falls through to the ordinary unattributed
 path and gets the embedded `profile:`, same as any other unattributed traffic. Isolation is

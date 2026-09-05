@@ -80,7 +80,7 @@ pub struct ProxyEndpoint {
     pub credential: Option<(String, String)>,
 }
 
-/// Build the scope name the `launched` resolver reads identity back out of.
+/// Build the scope name the `run` resolver reads identity back out of.
 ///
 /// The naming convention *is* the registration: no control socket, and nothing to get out of
 /// sync if the proxy restarts. `profile: None` (no `--profile`) omits the profile segment
@@ -208,7 +208,7 @@ const READONLY_SYSTEM_DIRS: &[&str] = &["/usr", "/etc", "/bin", "/sbin", "/lib",
 
 /// `systemd-run --user --scope --unit=… -- bwrap --unshare-net -- marshal sandbox -- <agent>`
 ///
-/// The scope supplies identity (the `launched` resolver reads the profile back out of the
+/// The scope supplies identity (the `run` resolver reads the profile back out of the
 /// cgroup name); `bwrap` supplies the empty network namespace; `marshal sandbox` supplies the
 /// only way out of it.
 ///
@@ -392,8 +392,7 @@ mod tests {
         assert_eq!(name, "marshal-coding-agent-4821.scope");
         // The launcher and the resolver must agree, or identity silently stops working.
         let (profile, identity) =
-            marshal_proxy::identity::launched::parse_scope(&format!("0::/user.slice/{name}"))
-                .unwrap();
+            marshal_proxy::identity::run::parse_scope(&format!("0::/user.slice/{name}")).unwrap();
         assert_eq!(profile, "coding-agent");
         assert_eq!(identity, "coding-agent-4821");
     }
@@ -406,8 +405,7 @@ mod tests {
         let name = scope_name(None, 4821);
         assert_eq!(name, "marshal-4821.scope");
         assert!(
-            marshal_proxy::identity::launched::parse_scope(&format!("0::/user.slice/{name}"))
-                .is_none()
+            marshal_proxy::identity::run::parse_scope(&format!("0::/user.slice/{name}")).is_none()
         );
     }
 

@@ -810,7 +810,7 @@ fn build_identities(
 ) -> anyhow::Result<marshal_proxy::identity::IdentityRegistry> {
     use marshal_config::model::ResolverConfig;
     use marshal_proxy::identity::{
-        IdentityRegistry, LaunchedResolver, PeerCredResolver, ProxyAuthResolver, SourceIpResolver,
+        IdentityRegistry, PeerCredResolver, ProxyAuthResolver, RunResolver, SourceIpResolver,
     };
 
     let mut resolvers: Vec<Arc<dyn marshal_core::IdentityResolver>> = Vec::new();
@@ -896,11 +896,11 @@ fn build_identities(
                 }
                 resolvers.push(Arc::new(PeerCredResolver::new(uids, gids, cgroups)?));
             }
-            ResolverConfig::Launched => {
+            ResolverConfig::Run => {
                 // The launcher's identity lives in the cgroup name, so this resolver only
                 // works with enrichment on.
                 enrich = true;
-                resolvers.push(Arc::new(LaunchedResolver::new(cfg.profiles.keys().cloned())));
+                resolvers.push(Arc::new(RunResolver::new(cfg.profiles.keys().cloned())));
             }
             ResolverConfig::ListenerPort { map } => {
                 resolvers.push(Arc::new(marshal_proxy::identity::ListenerPortResolver::new(
@@ -957,6 +957,23 @@ fn run_command(
             "error: unknown profile `{profile}`; {} is configured with: {}",
             config_path.display(),
             cfg.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+        return ExitCode::FAILURE;
+    }
+    // The cgroup this launches into only means anything if a running `serve` is configured to
+    // read it back — otherwise every request from this agent lands unattributed on the
+    // fallback profile, silently, with no signal short of the audit log.
+    if !cfg
+        .identities
+        .resolvers
+        .iter()
+        .any(|r| matches!(r, marshal_config::model::ResolverConfig::Run))
+    {
+        eprintln!(
+            "error: no `run` resolver in {}'s `identities.resolvers`; requests from this launch \
+             would not be attributed to any profile. Add:\n\n  identities:\n    resolvers:\n      \
+             - type: run",
+            config_path.display()
         );
         return ExitCode::FAILURE;
     }

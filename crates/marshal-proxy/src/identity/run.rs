@@ -22,13 +22,13 @@ use marshal_core::{ConnInfo, Identity, IdentityResolver, Resolved};
 pub const SCOPE_PREFIX: &str = "marshal-";
 
 #[derive(Debug)]
-pub struct LaunchedResolver {
+pub struct RunResolver {
     /// Profiles that exist. A cgroup naming a profile the config does not define is ignored
     /// rather than trusted, so a stale scope cannot conjure a profile into being.
     known_profiles: HashSet<String>,
 }
 
-impl LaunchedResolver {
+impl RunResolver {
     pub fn new(known_profiles: impl IntoIterator<Item = String>) -> Self {
         Self { known_profiles: known_profiles.into_iter().collect() }
     }
@@ -51,9 +51,9 @@ pub fn parse_scope(cgroup: &str) -> Option<(String, String)> {
 }
 
 #[async_trait::async_trait]
-impl IdentityResolver for LaunchedResolver {
+impl IdentityResolver for RunResolver {
     fn name(&self) -> &str {
-        "launched"
+        "run"
     }
 
     async fn resolve(&self, conn: &ConnInfo) -> Option<Resolved> {
@@ -62,7 +62,7 @@ impl IdentityResolver for LaunchedResolver {
         if !self.known_profiles.contains(&profile) {
             tracing::warn!(
                 %profile,
-                "a launched scope named a profile that is not configured; ignoring it"
+                "a run scope named a profile that is not configured; ignoring it"
             );
             return None;
         }
@@ -70,7 +70,7 @@ impl IdentityResolver for LaunchedResolver {
             identity: Identity::new(identity),
             profile: Arc::from(profile.as_str()),
             attributed: true,
-            resolver: Some("launched".into()),
+            resolver: Some("run".into()),
         })
     }
 }
@@ -101,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_scope_naming_an_unknown_profile_is_not_trusted() {
-        let r = LaunchedResolver::new(["coding-agent".to_string()]);
+        let r = RunResolver::new(["coding-agent".to_string()]);
         let conn = |cgroup: &str| ConnInfo {
             ingress: IngressMode::Explicit,
             client_addr: "127.0.0.1:1".parse().unwrap(),

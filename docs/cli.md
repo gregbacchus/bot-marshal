@@ -202,6 +202,11 @@ the socket `serve` creates doesn't exist yet (see below); for `--isolation cgrou
 surfaces later, as connection errors from the agent itself when it tries to talk to a proxy
 nothing is listening on.
 
+**`run` also refuses to launch when `identities.resolvers` has no `run` entry.** A cgroup name
+is only meaningful if something reads it back — otherwise the agent launches, runs, and every
+one of its requests lands unattributed on the fallback profile with no signal short of the
+audit log. See [Identity](configuration/identity.md#configuration).
+
 | flag | default | |
 |---|---|---|
 | `--profile <name>` | none | a *named* profile, from `profiles/`; omit to run under the embedded `profile:` instead — the same one unattributed traffic falls back to |

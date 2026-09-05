@@ -520,7 +520,7 @@ pub enum ResolverConfig {
         map: Vec<PeerCredEntry>,
     },
     /// Identities created by `marshal run`, identified by the cgroup scope it names.
-    Launched,
+    Run,
     /// Identity by which listener accepted, for agents that share a uid.
     ListenerPort {
         #[serde(default)]
@@ -534,7 +534,7 @@ impl ResolverConfig {
             ResolverConfig::ProxyAuth { .. } => "proxy_auth",
             ResolverConfig::SourceIp { .. } => "source_ip",
             ResolverConfig::PeerCred { .. } => "peer_cred",
-            ResolverConfig::Launched => "launched",
+            ResolverConfig::Run => "run",
             ResolverConfig::ListenerPort { .. } => "listener_port",
         }
     }

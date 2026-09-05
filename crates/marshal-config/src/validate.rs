@@ -132,7 +132,7 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
                 }
                 map.iter().map(|e| &e.profile).collect()
             }
-            crate::model::ResolverConfig::Launched => Vec::new(),
+            crate::model::ResolverConfig::Run => Vec::new(),
             crate::model::ResolverConfig::ListenerPort { map } => {
                 // A port this resolver names but nothing binds can never match — silently,
                 // since the resolver just falls through like any other miss. Worth catching
