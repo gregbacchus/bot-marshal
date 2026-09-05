@@ -176,15 +176,11 @@ impl Server {
             "explicit proxy listening"
         );
 
-        // A proxy silently in warn mode is worse than no proxy, because somebody believes it
-        // is protecting them. Say so at startup as well as on every affected request.
-        let warn_only = runtime.warn_only_profiles();
-        if !warn_only.is_empty() {
-            tracing::warn!(
-                profiles = ?warn_only,
-                "WARN MODE: these profiles record refusals but forward every request"
-            );
-        }
+        // Warn mode is already reported per profile by `validate()`'s diagnostics, which
+        // `build_runtime` logs at every startup (including for the embedded fallback, which
+        // has no name to appear in `runtime.chains` and so cannot be listed here) — a second,
+        // coarser summary here would just restate that, incompletely. `warn_only_profiles()`
+        // remains for the management API (`/v1/status`), which has no equivalent already.
 
         // Interception is mandatory (see `Runtime::tls`), so the only way a request-level
         // layer is skipped is a host deliberately listed in `tls.passthrough`. Worth saying
