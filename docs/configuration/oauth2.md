@@ -1,5 +1,20 @@
 # OAuth2 credentials
 
+There are four different ways marshal ends up holding an OAuth2 credential, and which one
+applies depends on two questions: **do you control the OAuth application** (its `client_id`
+and endpoints), and **who is driving the login**, marshal or the agent/tool.
+
+| | you control the OAuth application | you don't (a vendor's own client) |
+|---|---|---|
+| **no interactive login needed** | a `{ type: oauth2 }` source with `grant: client_credentials`, `refresh_token`, or `jwt_bearer` — authenticates from config alone, below | — |
+| **a human logs in once, marshal drives it** | `grant: authorization_code`/`device_code` + [`marshal secrets oauth login <name>`](../cli.md#marshal-secrets-oauth-login-name---open---timeout-duration), below | [`marshal secrets oauth login <name> --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd) ("bootstrap capture") — marshal discovers the application from the exchange itself, no config needed |
+| **an agent drives the login unattended** | `source.capture: in_band`, [§ In-band capture](#in-band-capture) — marshal takes the flow over so the agent gets nothing | not possible — capture needs the authorization endpoint declared in advance |
+
+The first two rows are a `{ type: oauth2 }` secret source declared in a profile, and are what
+the rest of this page covers. The bootstrap case is a CLI command with **no source
+declaration at all** — see [`marshal secrets oauth login --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd)
+for how it finds the exchange without being told where to look.
+
 Every other source hands back a credential somebody else obtained. `oauth2` *obtains* one:
 marshal calls a token endpoint, caches the access token for its stated lifetime, and mints a
 new one when it expires. The agent holds nothing — and unlike a long-lived API key, there is

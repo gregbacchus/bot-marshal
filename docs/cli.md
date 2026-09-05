@@ -95,6 +95,21 @@ beforehand: here `<name>` is only the storage key the result is filed under, not
 a swap. On success marshal prints the configuration it discovered, ready to paste into a
 profile.
 
+**What counts as "the exchange":** this proxy instance matches **any** `POST` in the session
+whose body parses as a token request with `grant_type=authorization_code` or the device-code
+grant — from whatever host it happens to go to. It does not know or check the provider, the
+endpoint, or the client in advance; that is the entire point of not needing config. The request
+itself carries everything worth learning (`client_id`, `redirect_uri`, and — as its own
+destination — the token endpoint), so matching on shape is enough.
+
+Matching on shape alone, with no host check, would be too loose for a standing part of `serve`
+— it would treat every token exchange any profile makes as fair game for capture. It is safe
+*here* only because this is a separate, disposable proxy that exists for one command, in the
+foreground, under `--timeout`, for as long as you are watching it — not `serve`'s long-running
+listener. `--host` narrows the match to one hostname for the rare case where more than one
+flow could be in progress in the same session; without it, the first exchange that looks like
+one wins, so don't run an unrelated login through the same session at the same time.
+
 ```bash
 marshal secrets oauth login CLAUDE_SUBSCRIPTION --wait
 ```
@@ -120,8 +135,7 @@ routing around the proxy.
 | `observe` (default) | forward it untouched. The tool's own login succeeds and it keeps a working credential too; marshal simply also has one. |
 | `steal` | redeem it out of band and answer the tool with a sentinel, so it never holds a working credential — at the cost of its login reporting failure, which from its point of view is what happened. |
 
-`--host` narrows capture to one hostname, for the rare session with more than one flow in
-flight. `--timeout` bounds the wait (default `5m`).
+`--timeout` bounds the wait (default `5m`).
 
 Two things worth knowing:
 
