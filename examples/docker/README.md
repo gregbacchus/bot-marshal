@@ -31,3 +31,10 @@ DNS interception is a convenience for workloads that cannot be configured, not a
 boundary. A client that ships its own resolver, uses DNS-over-HTTPS, or connects to a literal
 address never asks us at all. `deploy/nftables.conf` closes those gaps on a host you control;
 `marshal run --isolation netns` closes them for a process you launch.
+
+## Podman
+
+Nothing here is Docker-specific — `podman compose up --build -d` (or `podman-compose`) runs
+the same compose file unchanged. See [docs/capture.md](../../docs/capture.md#containers-dockerpodman)
+for the general container patterns, including why an `iptables`/`nftables` redirect to marshal
+is not a supported alternative to the two patterns shown there.

@@ -64,6 +64,40 @@ For a workload that cannot be configured to use a proxy, DNS mode above is the s
 option — weaker (nothing stops a client with its own resolver from bypassing it), but honest
 about that weakness rather than silently under-enforcing while appearing to intercept.
 
+## Containers (Docker/Podman)
+
+Marshal has no container-specific code — a container is just another client — so both modes
+above apply unchanged, and either works the same under Podman as under Docker (the compose
+file in `examples/docker/` has nothing Docker-specific in it; `podman compose up` or
+`podman-compose up` runs it as-is).
+
+* **DNS capture, marshal as a sidecar** — the pattern in `examples/docker/`. The client
+  container sets no proxy variables and knows nothing about marshal; its `dns:` entry (or the
+  network's default resolver) points at marshal, so hostnames resolve to marshal's address and
+  connections arrive on their own. Identity comes from `source_ip`, so give each container a
+  static address — see [Identity](configuration/identity.md). Set `upstream.allow_private:
+  true` since marshal must route out of the container network to the real internet, and mount
+  marshal's CA cert into the client container for TLS interception.
+* **Explicit proxy, marshal on the host** — set `HTTP_PROXY`/`HTTPS_PROXY` in the container to
+  marshal's `listeners.explicit` address and mount the CA cert. If the container runs with
+  `--network host`, it shares the host's network namespace, so `listeners.explicit.unix_socket`
+  can be bind-mounted in and `peer_cred` identity (strongest — kernel-supplied uid/gid, see
+  [Identity](configuration/identity.md#so_peercred-and-the-unix-listener)) works exactly as it
+  would for a bare host process; with bridge networking, `source_ip` is the available resolver
+  instead.
+
+**Routing a container's egress through marshal with `iptables -m owner --uid-owner` plus
+`REDIRECT` does not work, for two separate reasons.** First, `-m owner` matches the *local*
+process that owns the socket at the point the rule evaluates it; a bridge-networked container's
+packets are NAT'd/forwarded through a veth from a different network namespace, so the host's
+uid-owner rule never sees the container process's uid at all — only host-network containers
+expose a matchable uid. Second, and more fundamentally, even a REDIRECT that did match is the
+transparent-capture mode described above, which marshal does not accept: it byte-relays rather
+than terminating the connection, so `rules`, `dlp`, `mcp`, `judge`, and every transform never
+run, regardless of what selected which packets to redirect. Use one of the two patterns above
+instead — DNS capture needs no host firewall rule at all, and the explicit-proxy pattern gets
+you the same per-uid identity a `uid-owner` rule was trying to provide, without the redirect.
+
 ## The upstream guard
 
 Independent of capture mode, every resolved IP is checked against `upstream.deny_cidrs` after
