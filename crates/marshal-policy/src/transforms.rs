@@ -39,6 +39,128 @@ impl RequestTransform for RequestHeaderSetter {
     }
 }
 
+/// A compiled header filter: exactly one of allow (default-deny — keep only what matches) or
+/// deny (default-allow — drop only what matches). Config validation is what enforces "exactly
+/// one"; by the time this exists, that choice has already been made.
+#[derive(Debug, Clone)]
+pub enum HeaderFilterMode {
+    Allow(Vec<String>),
+    Deny(Vec<String>),
+}
+
+/// Case-insensitive glob match, `*` standing for any run of characters (including none) —
+/// header names are ASCII per RFC 9110 §5.1, so a byte-wise comparison is exact rather than an
+/// approximation. Simple recursive backtracking: header-name patterns are short and few, so
+/// this never runs against an input where its worst case matters.
+fn header_glob_matches(pattern: &str, name: &str) -> bool {
+    fn rec(p: &[u8], s: &[u8]) -> bool {
+        match p.split_first() {
+            None => s.is_empty(),
+            Some((b'*', rest)) => {
+                rec(rest, s) || matches!(s.split_first(), Some((_, tail)) if rec(p, tail))
+            }
+            Some((pc, prest)) => match s.split_first() {
+                Some((sc, srest)) if pc.eq_ignore_ascii_case(sc) => rec(prest, srest),
+                _ => false,
+            },
+        }
+    }
+    rec(pattern.as_bytes(), name.as_bytes())
+}
+
+/// `is_managed` exempts framing/routing headers from whatever `mode` says — see
+/// [`marshal_config::model::request_header_is_managed`] and its response-side counterpart.
+/// Dropping `Host` because an operator's `allow` list forgot it, or `Content-Length` because a
+/// `deny` pattern happened to match `content-*`, breaks the request/response outright rather
+/// than filtering it; a filter's whole job is the headers *above* that layer, never the wire
+/// framing underneath it.
+fn header_filter_apply(
+    headers: &mut http::HeaderMap,
+    mode: &HeaderFilterMode,
+    is_managed: fn(&http::HeaderName) -> bool,
+) {
+    let (patterns, keep_on_match): (&[String], bool) = match mode {
+        HeaderFilterMode::Allow(patterns) => (patterns, true),
+        HeaderFilterMode::Deny(patterns) => (patterns, false),
+    };
+    let drop: Vec<http::HeaderName> = headers
+        .keys()
+        .filter(|name| {
+            if is_managed(name) {
+                return false;
+            }
+            let matched = patterns.iter().any(|p| header_glob_matches(p, name.as_str()));
+            matched != keep_on_match
+        })
+        .cloned()
+        .collect();
+    for name in drop {
+        headers.remove(name);
+    }
+}
+
+/// Filters request headers before the request leaves — see [`HeaderFilterMode`].
+#[derive(Debug, Clone)]
+pub struct RequestHeaderFilter {
+    mode: HeaderFilterMode,
+}
+
+impl RequestHeaderFilter {
+    pub fn new(mode: HeaderFilterMode) -> Self {
+        Self { mode }
+    }
+}
+
+#[async_trait::async_trait]
+impl RequestTransform for RequestHeaderFilter {
+    fn name(&self) -> &str {
+        "filter_request_headers"
+    }
+
+    async fn apply(&self, cx: &mut RequestContext) -> Result<()> {
+        header_filter_apply(
+            &mut cx.headers,
+            &self.mode,
+            marshal_config::model::request_header_is_managed,
+        );
+        Ok(())
+    }
+}
+
+/// Filters response headers before the response reaches the agent — see [`HeaderFilterMode`].
+#[derive(Debug, Clone)]
+pub struct ResponseHeaderFilter {
+    mode: HeaderFilterMode,
+}
+
+impl ResponseHeaderFilter {
+    pub fn new(mode: HeaderFilterMode) -> Self {
+        Self { mode }
+    }
+}
+
+#[async_trait::async_trait]
+impl ResponseTransform for ResponseHeaderFilter {
+    fn name(&self) -> &str {
+        "filter_response_headers"
+    }
+
+    // Headers only — the body is untouched, so a filter never has a reason to stop a response
+    // from streaming.
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn apply(&self, _cx: &RequestContext, resp: &mut ResponseParts) -> Result<()> {
+        header_filter_apply(
+            &mut resp.headers,
+            &self.mode,
+            marshal_config::model::response_header_is_managed,
+        );
+        Ok(())
+    }
+}
+
 /// Bounds a response body before it reaches the agent.
 #[derive(Debug)]
 pub struct ResponseLimiter {
@@ -307,6 +429,105 @@ impl ResponseTransform for McpToolFilter {
 mod tests {
     use super::*;
     use marshal_config::layer::McpServer;
+
+    fn header_map(pairs: &[(&str, &str)]) -> http::HeaderMap {
+        let mut h = http::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(http::HeaderName::from_bytes(k.as_bytes()).unwrap(), v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn glob_matches_a_trailing_star_case_insensitively() {
+        assert!(header_glob_matches("content-*", "Content-Type"));
+        assert!(header_glob_matches("content-*", "content-length"));
+        assert!(!header_glob_matches("content-*", "accept"));
+    }
+
+    #[test]
+    fn glob_matches_exact_names_case_insensitively() {
+        assert!(header_glob_matches("authorization", "Authorization"));
+        assert!(!header_glob_matches("authorization", "x-authorization"));
+    }
+
+    #[test]
+    fn glob_matches_a_star_in_the_middle() {
+        assert!(header_glob_matches("x-*-id", "x-request-id"));
+        assert!(!header_glob_matches("x-*-id", "x-request-token"));
+    }
+
+    #[test]
+    fn allow_keeps_only_matching_headers() {
+        let mut h = header_map(&[
+            ("accept", "*/*"),
+            ("content-type", "application/json"),
+            ("x-custom", "drop-me"),
+        ]);
+        header_filter_apply(
+            &mut h,
+            &HeaderFilterMode::Allow(vec!["accept*".into(), "content-*".into()]),
+            marshal_config::model::request_header_is_managed,
+        );
+        assert!(h.contains_key("accept"));
+        assert!(h.contains_key("content-type"));
+        assert!(!h.contains_key("x-custom"));
+    }
+
+    #[test]
+    fn deny_drops_only_matching_headers_and_keeps_the_rest() {
+        let mut h = header_map(&[
+            ("accept", "*/*"),
+            ("chatgpt-account-id", "acct-1"),
+            ("x-custom", "keep-me"),
+        ]);
+        header_filter_apply(
+            &mut h,
+            &HeaderFilterMode::Deny(vec!["chatgpt-account-id".into()]),
+            marshal_config::model::request_header_is_managed,
+        );
+        assert!(h.contains_key("accept"));
+        assert!(h.contains_key("x-custom"));
+        assert!(!h.contains_key("chatgpt-account-id"));
+    }
+
+    #[test]
+    fn a_multi_valued_header_is_removed_entirely_by_deny() {
+        let mut h = http::HeaderMap::new();
+        h.append(http::header::VIA, "1.1 a".parse().unwrap());
+        h.append(http::header::VIA, "1.1 b".parse().unwrap());
+        header_filter_apply(
+            &mut h,
+            &HeaderFilterMode::Deny(vec!["via".into()]),
+            marshal_config::model::request_header_is_managed,
+        );
+        assert!(!h.contains_key(http::header::VIA));
+    }
+
+    #[test]
+    fn an_allow_list_that_omits_host_does_not_strip_it() {
+        // The exact bug this exists to prevent: `allow: ["accept*"]` reads as "keep only
+        // Accept", but Host is wire framing, not a header a filter has any business dropping.
+        let mut h = header_map(&[("accept", "*/*"), ("host", "example.com")]);
+        header_filter_apply(
+            &mut h,
+            &HeaderFilterMode::Allow(vec!["accept*".into()]),
+            marshal_config::model::request_header_is_managed,
+        );
+        assert!(h.contains_key("host"), "Host must survive an allow-list that never named it");
+    }
+
+    #[test]
+    fn a_deny_list_matching_content_length_by_glob_does_not_strip_it() {
+        let mut h = header_map(&[("content-length", "42"), ("content-type", "text/plain")]);
+        header_filter_apply(
+            &mut h,
+            &HeaderFilterMode::Deny(vec!["content-*".into()]),
+            marshal_config::model::request_header_is_managed,
+        );
+        assert!(h.contains_key("content-length"), "framing headers are never dropped by deny");
+        assert!(!h.contains_key("content-type"), "an unmanaged header the pattern named is");
+    }
 
     fn filter() -> McpToolFilter {
         let servers: Vec<McpServer> = serde_yaml_ng::from_str(

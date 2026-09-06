@@ -196,7 +196,7 @@ async fn a_profile_naming_a_transform_bundle_resolves_it() {
     // `transforms:` is populated by `load()` from `transforms_path` — not part of the YAML
     // document itself — so it's set directly here rather than parsed.
     use marshal_config::model::{
-        HeaderAllowlist, RequestTransforms, ResponseTransforms, TransformBundle,
+        HeaderFilterSpec, RequestTransforms, ResponseTransforms, TransformBundle,
     };
 
     let mut c = cfg(r#"
@@ -208,12 +208,15 @@ profile:
         "shared".to_owned(),
         TransformBundle {
             request_transforms: RequestTransforms {
-                headers: Some(HeaderAllowlist { allow: vec!["accept".into()] }),
+                headers: Some(HeaderFilterSpec { allow: vec!["accept".into()], deny: vec![] }),
                 set_headers: Default::default(),
                 secrets: vec![],
             },
             response_transforms: ResponseTransforms {
-                headers: Some(HeaderAllowlist { allow: vec!["content-type".into()] }),
+                headers: Some(HeaderFilterSpec {
+                    allow: vec!["content-type".into()],
+                    deny: vec![],
+                }),
                 body: vec![],
             },
         },
@@ -244,6 +247,79 @@ profile:
 
     assert_eq!(req.headers["accept"], "application/json");
     assert_eq!(req.headers["x-marshal-mode"], "enforced");
+}
+
+#[tokio::test]
+async fn a_request_deny_list_drops_only_the_named_header() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+  request_transforms:
+    headers:
+      deny: ["x-forwarded-*"]
+"#);
+    let transforms = build_request_transforms(&c, "p", &c.profile).unwrap();
+    let mut req = request("api.example.com");
+    req.headers.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+    req.headers.insert("authorization", "Bearer real".parse().unwrap());
+
+    for transform in transforms {
+        transform.apply(&mut req).await.unwrap();
+    }
+
+    assert!(!req.headers.contains_key("x-forwarded-for"));
+    assert_eq!(req.headers["authorization"], "Bearer real");
+}
+
+#[tokio::test]
+async fn a_request_allow_list_drops_everything_not_named() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+  request_transforms:
+    headers:
+      allow: ["accept*", "authorization"]
+"#);
+    let transforms = build_request_transforms(&c, "p", &c.profile).unwrap();
+    let mut req = request("api.example.com");
+    req.headers.insert("accept", "*/*".parse().unwrap());
+    req.headers.insert("authorization", "Bearer real".parse().unwrap());
+    req.headers.insert("x-tracking-id", "should-be-dropped".parse().unwrap());
+
+    for transform in transforms {
+        transform.apply(&mut req).await.unwrap();
+    }
+
+    assert_eq!(req.headers["accept"], "*/*");
+    assert_eq!(req.headers["authorization"], "Bearer real");
+    assert!(!req.headers.contains_key("x-tracking-id"));
+}
+
+#[tokio::test]
+async fn a_response_deny_list_drops_only_the_named_header() {
+    let c = cfg(r#"
+profile:
+  default_action: deny
+  response_transforms:
+    headers:
+      deny: ["set-cookie"]
+"#);
+    let transforms = build_response_transforms(&c, "p", &c.profile).unwrap();
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::SET_COOKIE, "session=abc".parse().unwrap());
+    headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    let mut response = marshal_core::ResponseParts {
+        status: http::StatusCode::OK,
+        headers,
+        body: BodyHandle::Buffered(bytes::Bytes::new()),
+    };
+
+    for transform in &transforms {
+        transform.apply(&request("api.example.com"), &mut response).await.unwrap();
+    }
+
+    assert!(!response.headers.contains_key(http::header::SET_COOKIE));
+    assert_eq!(response.headers[http::header::CONTENT_TYPE], "application/json");
 }
 
 #[tokio::test]

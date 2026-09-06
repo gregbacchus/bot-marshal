@@ -16,6 +16,12 @@ pub struct TokenResponse {
     pub refresh_token: Option<SecretValue>,
     /// What was actually granted, which can be narrower than what was asked for.
     pub scope: Option<String>,
+    /// An OIDC ID token, when the provider issues one. Not itself the credential presented on
+    /// requests, but some providers (OpenAI's ChatGPT sign-in among them) put routing
+    /// information a resource server needs — an account or workspace id — in its claims rather
+    /// than in `scope`, so a swap needing that value has to read it from here. See
+    /// [`decode_id_token_claims`].
+    pub id_token: Option<SecretValue>,
 }
 
 impl TokenResponse {
@@ -48,8 +54,32 @@ impl TokenResponse {
                 .filter(|s| !s.is_empty())
                 .map(SecretValue::new),
             scope: body.get("scope").and_then(|v| v.as_str()).map(str::to_owned),
+            id_token: body
+                .get("id_token")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(SecretValue::new),
         })
     }
+}
+
+/// Read an ID token's claims without verifying its signature.
+///
+/// That is not a shortcut: there is nothing to verify *against* here. This token was not
+/// presented by a client asking to be trusted — it was returned to marshal directly by the
+/// provider's own token endpoint, over the TLS connection marshal itself just made, seconds
+/// ago. The only question left is what one of its fields says, and that needs a base64 decode,
+/// not a signature check.
+pub fn decode_id_token_claims(jwt: &SecretValue) -> Result<serde_json::Value> {
+    let jwt = jwt.expose();
+    let payload =
+        jwt.split('.').nth(1).filter(|_| jwt.split('.').count() == 3).ok_or_else(|| {
+            Error::Config("id_token is not a JWT: expected three dot-separated parts".to_owned())
+        })?;
+    let bytes = marshal_core::base64url_decode(payload)
+        .map_err(|e| Error::Config(format!("id_token payload is not valid base64url: {e}")))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Config(format!("id_token payload is not valid JSON: {e}")))
 }
 
 /// The error shape ([RFC 6749 §5.2](https://www.rfc-editor.org/rfc/rfc6749#section-5.2)),
@@ -58,14 +88,31 @@ impl TokenResponse {
 /// Worth its own function because `error_description` is very often the only thing that says
 /// what is actually wrong — "invalid_client" alone does not distinguish a typo'd client id
 /// from an expired secret.
+///
+/// Not every provider sends the flat RFC shape. OpenAI's token endpoint nests it —
+/// `{"error": {"message": "...", "code": "...", "type": "..."}}` — so `error` is a JSON
+/// *object* there, and matching only the RFC's string form silently discarded every OpenAI
+/// error down to a bare status code. This checks the object shape too, rather than assuming
+/// the RFC is the only dialect a provider speaks.
 pub fn describe_error(status: http::StatusCode, body: &serde_json::Value) -> String {
-    match body.get("error").and_then(|v| v.as_str()) {
-        Some(code) => match body.get("error_description").and_then(|v| v.as_str()) {
+    let error = body.get("error");
+    if let Some(code) = error.and_then(|v| v.as_str()) {
+        return match body.get("error_description").and_then(|v| v.as_str()) {
             Some(desc) => format!("{status}: {code}: {desc}"),
             None => format!("{status}: {code}"),
-        },
-        None => format!("{status}"),
+        };
     }
+    if let Some(obj) = error.filter(|v| v.is_object()) {
+        let code = obj.get("code").and_then(|v| v.as_str());
+        let message = obj.get("message").and_then(|v| v.as_str());
+        return match (code, message) {
+            (Some(code), Some(message)) => format!("{status}: {code}: {message}"),
+            (Some(code), None) => format!("{status}: {code}"),
+            (None, Some(message)) => format!("{status}: {message}"),
+            (None, None) => format!("{status}"),
+        };
+    }
+    format!("{status}")
 }
 
 /// An access token held in memory, with the moment it stops being usable.
@@ -79,6 +126,10 @@ pub struct CachedToken {
     /// `None` when the provider gave no `expires_in`. Such a token is used once and never
     /// cached — see [`CachedToken::is_live`].
     pub expires_at: Option<Instant>,
+    /// Carried alongside the access token it arrived with, for a claim source to read — see
+    /// [`decode_id_token_claims`]. Not re-derivable once the access token is gone, so it lives
+    /// and dies with the same cache entry rather than its own.
+    pub id_token: Option<SecretValue>,
 }
 
 impl CachedToken {
@@ -88,8 +139,17 @@ impl CachedToken {
     /// passes any check made before the request is sent and is still refused by the API by
     /// the time it arrives. Subtracting a margin turns that race into an early refresh.
     pub fn new(value: SecretValue, expires_in: Option<Duration>, skew: Duration) -> Self {
+        Self::with_id_token(value, expires_in, skew, None)
+    }
+
+    pub fn with_id_token(
+        value: SecretValue,
+        expires_in: Option<Duration>,
+        skew: Duration,
+        id_token: Option<SecretValue>,
+    ) -> Self {
         let expires_at = expires_in.map(|ttl| Instant::now() + ttl.saturating_sub(skew));
-        Self { value, expires_at }
+        Self { value, expires_at, id_token }
     }
 
     /// Whether this token can still be handed out.
@@ -165,6 +225,35 @@ mod tests {
         assert_eq!(
             describe_error(http::StatusCode::BAD_GATEWAY, &serde_json::json!({})),
             "502 Bad Gateway"
+        );
+    }
+
+    #[test]
+    fn a_nested_object_error_shape_is_described_too() {
+        // OpenAI's actual shape: `error` is an object, not the RFC's bare string. Matching
+        // only the string form silently reduced every one of these to a bare status code.
+        let body = serde_json::json!({
+            "error": {
+                "message": "Your refresh token has already been used to generate a new access \
+                             token. Please try signing in again.",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "refresh_token_reused"
+            }
+        });
+        assert_eq!(
+            describe_error(http::StatusCode::UNAUTHORIZED, &body),
+            "401 Unauthorized: refresh_token_reused: Your refresh token has already been used \
+             to generate a new access token. Please try signing in again."
+        );
+    }
+
+    #[test]
+    fn a_nested_error_object_with_only_a_message_still_shows_it() {
+        let body = serde_json::json!({"error": {"message": "insufficient scope"}});
+        assert_eq!(
+            describe_error(http::StatusCode::FORBIDDEN, &body),
+            "403 Forbidden: insufficient scope"
         );
     }
 

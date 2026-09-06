@@ -340,7 +340,7 @@ pub enum Mode {
 #[serde(deny_unknown_fields)]
 pub struct RequestTransforms {
     #[serde(default)]
-    pub headers: Option<HeaderAllowlist>,
+    pub headers: Option<HeaderFilterSpec>,
     /// Header values to add or replace after policy allows the request.
     #[serde(default)]
     pub set_headers: std::collections::BTreeMap<String, String>,
@@ -369,12 +369,31 @@ pub fn request_header_is_managed(name: &http::HeaderName) -> bool {
     )
 }
 
+/// The response-side counterpart of [`request_header_is_managed`], for a
+/// `response_transforms.headers` filter: framing headers a filter must never touch, whatever
+/// `allow`/`deny` says, because the wire code downstream either recomputes them (`content-length`
+/// after a body rewrite) or needs them to still say what the connection is actually doing
+/// (`connection`, `transfer-encoding`, `upgrade`) regardless of what an operator's pattern list
+/// happened to match. `host` and the client-to-proxy-only `proxy-*`/`te` headers have no
+/// response-side meaning, so they are not repeated here.
+pub fn response_header_is_managed(name: &http::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "content-length"
+            | "connection"
+            | "keep-alive"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
 /// Rewrites applied to a response before the agent sees it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseTransforms {
     #[serde(default)]
-    pub headers: Option<HeaderAllowlist>,
+    pub headers: Option<HeaderFilterSpec>,
     /// Body rewrites. Each of these needs the whole body in memory, so a profile that
     /// declares one is stating that responses it applies to are no longer streamable.
     #[serde(default)]
@@ -483,12 +502,18 @@ impl BodyTransform {
     }
 }
 
-/// Default-deny header filtering: headers not listed are stripped.
+/// Header filtering: exactly one of `allow` (default-deny — keep only what matches) or `deny`
+/// (default-allow — drop only what matches) must be set. `marshal config check` rejects both
+/// set together and both empty, since either is certainly not what was intended — an empty
+/// `allow` drops every header, and an empty `deny` drops none, and a config author who wrote
+/// this block meant to filter something.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HeaderAllowlist {
+pub struct HeaderFilterSpec {
     #[serde(default)]
     pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

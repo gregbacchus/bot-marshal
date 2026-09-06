@@ -314,6 +314,102 @@ callback, and what to use instead — see
 [`marshal secrets oauth login <name> --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd).
 See also [ADR-0034](../adr/0034-bootstrap-capture-reads-the-token-exchange.md).
 
+## An ID token claim as a second header
+
+Most providers put everything a resource server needs to authorize a request in the access
+token itself. Some do not: OpenAI's ChatGPT sign-in issues an access token that authenticates a
+*session*, and separately expects a `ChatGPT-Account-ID` header naming which of that account's
+workspaces the request is for — taken from a claim inside the ID token the same token response
+carried. A swap injecting only `Authorization: Bearer` gets a `401` from the resource server
+even though the token is live, current, and correctly scoped, because from the resource
+server's side there is no account to authorize against until it sees that header too.
+
+`type: oauth2_claim` reads a value out of another `oauth2` swap's ID token rather than minting
+one of its own:
+
+```yaml
+request_transforms:
+  secrets:
+    - name: CODEX_SUBSCRIPTION
+      source:
+        type: oauth2
+        grant: authorization_code
+        token_endpoint: https://auth.openai.com/oauth/token
+        client_id: app_EMoamEEZ73f0CkXaXp7hrann
+        redirect_uri: https://auth.openai.com/deviceauth/callback
+        client_auth: none
+      inject: { type: bearer }
+      rules: [{ host: "api.openai.com" }]
+
+    - name: CODEX_ACCOUNT_ID
+      source:
+        type: oauth2_claim
+        of: CODEX_SUBSCRIPTION
+        claim: ["https://api.openai.com/auth", "chatgpt_account_id"]
+      inject: { type: header, name: ChatGPT-Account-ID }
+      rules: [{ host: "api.openai.com" }]
+```
+
+| field | |
+|---|---|
+| `of` | the other swap's `name:`. Must appear **earlier** in `secrets:` — config is built top to bottom, and the claim swap needs the other one already built to share its cache rather than minting a second, independent copy of the same credential |
+| `claim` | a list of object keys to walk into the ID token's claims, not a single dotted string or a JSON Pointer — a claim is commonly itself namespaced by a URL (`https://api.openai.com/auth`) that would need escaping in either of those |
+
+The two swaps share one `Oauth2Source` instance: `CODEX_ACCOUNT_ID` mints nothing itself, it
+only reads the ID token that came back the last time `CODEX_SUBSCRIPTION` minted or refreshed —
+triggering a mint first if nothing is cached yet, so it works correctly as the very first
+request too, not only after some unrelated request already warmed the cache.
+
+The signature on the ID token is not checked. There is nothing to check it against: this token
+was not presented by a client asking to be trusted, it was returned to marshal directly by the
+provider's own token endpoint, over the TLS connection marshal itself just made, seconds ago.
+The only question left is what one field of it says.
+
+A provider that issues no `id_token` alongside its access token, or whose ID token has nothing
+at the given `claim` path, fails the request the same way a missing environment variable
+would — named, at the exact path that had nothing under it, not a bare "not found".
+
+## A token exchange for a different credential
+
+The claim source above assumes the grant's own access token is the right credential and only a
+second *header* is missing. Some providers issue an access token that is not the right
+credential at all: OpenAI's ChatGPT sign-in hands back a token that authenticates a session, and
+a resource server like `api.openai.com` wants a *different* token, obtained by exchanging that
+session for one — an [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token exchange. Without
+it, requests fail with a missing-scope error that reads exactly like a configuration mistake,
+on a token that is perfectly live and correctly obtained.
+
+`token_exchange` runs this as a second call, immediately after every mint, and it is the
+*exchanged* token that gets cached and injected — not the grant's own:
+
+```yaml
+source:
+  type: oauth2
+  grant: authorization_code
+  token_endpoint: https://auth.openai.com/oauth/token
+  client_id: app_EMoamEEZ73f0CkXaXp7hrann
+  redirect_uri: https://auth.openai.com/deviceauth/callback
+  client_auth: none
+  token_exchange:
+    subject: id_token
+    extra_params: { requested_token: "openai-api-key" }
+```
+
+| field | |
+|---|---|
+| `subject` | which of the grant's tokens is presented as `subject_token`: `id_token` (default — what OpenAI's exchange needs) or `access_token` |
+| `extra_params` | anything the provider's exchange wants beyond the RFC's own fields. OpenAI's, for instance, says what it wants back with a non-standard `requested_token` field rather than the RFC's `requested_token_type` URI |
+
+The session's `id_token` survives the exchange onto the cached result, so a `type: oauth2_claim`
+source reading account-routing information out of it (the section above) still works with
+`token_exchange` set on the same swap — the exchange response is not expected to carry its own
+ID token, and the claim source has no use for the exchanged credential's claims even if it did.
+
+The exchange is not verified against anything beyond what `post_token` already does for every
+grant: same client authentication, same timeout, same redaction of whatever comes back. See
+[ADR-0039](../adr/0039-oauth2-can-exchange-a-token-before-caching-it.md) for why this runs on
+every mint rather than once at enrolment.
+
 ## What this costs
 
 **A request can block on a third party.** Minting happens on the request path, so a slow token
@@ -331,6 +427,10 @@ new one.
 **Concurrent requests on an expired token mint once**, not once each — some providers
 invalidate the previous refresh token on every use, which turns a concurrent double refresh
 into a broken credential rather than merely a wasted round trip.
+
+**`token_exchange` doubles the round trips on a cache miss.** The exchange is a second call to
+the same endpoint, bounded by the same `timeout` and failing closed the same way, but the
+first-request-after-expiry latency above is now roughly two token-endpoint calls, not one.
 
 **The token endpoint obeys `upstream.deny_cidrs` and `upstream.allow_private`**, the same
 rules that constrain agent egress. A token endpoint on the public internet is unaffected; an

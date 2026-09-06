@@ -36,7 +36,7 @@ the request is forwarded.
 The standard content-negotiation header is `Accept` (singular). A header named `Accepts` is
 valid as a custom header, but most HTTP servers will not interpret it as content negotiation.
 
-### Allow-listing headers
+### Filtering headers: allow or deny
 
 ```yaml
 request_transforms:
@@ -45,10 +45,28 @@ request_transforms:
 
 response_transforms:
   headers:
-    allow: ["content-*", "date", "etag", "cache-control", "retry-after"]
+    deny: ["set-cookie", "server"]
 ```
 
-An allow-list, not a deny-list: a header not named is dropped. Globs match a family.
+Exactly one of `allow` or `deny` — they are two different default behaviors, not two lists
+that combine, and `marshal config check` rejects both set together (or neither). `allow` is
+default-deny: a header not named is dropped. `deny` is default-allow: only a header matching a
+pattern is dropped, everything else passes through. Globs (`*`) match a family; matching is
+case-insensitive, as header names are.
+
+A filter never touches wire-framing headers — `Host`, `Content-Length`, `Connection`,
+`Transfer-Encoding`, and the rest of what [`request_header_is_managed`](../../crates/marshal-config/src/model.rs)
+and its response-side counterpart name — regardless of what `allow`/`deny` says. An `allow`
+list that forgets `host`, or a `deny` pattern that happens to match `content-*`, filters what a
+config author meant to filter without breaking the request or response those headers make
+possible in the first place.
+
+Request-side filtering runs before `set_headers` and before secret injection, so a client's own
+header is dropped (or kept) first, and marshal's own additions are never at risk of being
+filtered out from under it. Response-side filtering runs last, after any `response_transforms.body`
+`limit` has had its say — an `allow` list governs exactly what reaches the agent, including a
+header a body limiter itself added (`x-marshal-response-limited`); list it explicitly if a
+profile using both needs the agent to see it.
 
 ## Secret injection
 

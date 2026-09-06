@@ -12,7 +12,10 @@ use crate::layers::dlp::Oversize as DlpOversize;
 use crate::layers::{Allowlist, Denylist, Dlp, Mcp, Rules};
 use crate::mcp::McpPolicy;
 use crate::patterns;
-use crate::transforms::{McpToolFilter, RequestHeaderSetter, ResponseLimiter};
+use crate::transforms::{
+    HeaderFilterMode, McpToolFilter, RequestHeaderFilter, RequestHeaderSetter,
+    ResponseHeaderFilter, ResponseLimiter,
+};
 use marshal_judge::{AnthropicProvider, CompiledScope, Judge, OpenAiProvider, Provider};
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +52,12 @@ pub enum BuildError {
     #[error("profile `{profile}`: unknown bundle `{bundle}`")]
     UnknownBundle { profile: String, bundle: String },
 
+    #[error(
+        "profile `{profile}`: {side}_transforms.headers: exactly one of `allow`/`deny` must be \
+         set — `marshal config check` should have caught this before the runtime was built"
+    )]
+    AmbiguousHeaderFilter { profile: String, side: &'static str },
+
     #[error("profile `{profile}`: `{layer}` is not implemented yet")]
     Unimplemented { profile: String, layer: &'static str },
 
@@ -84,6 +93,22 @@ pub enum BuildError {
     },
 }
 
+/// Resolve a `HeaderFilterSpec` into exactly one [`HeaderFilterMode`]. `marshal config check`
+/// already rejects both-set and neither-set, so hitting either arm here means a caller built a
+/// runtime without validating first — a real bug, not a user config mistake, which is why the
+/// error message says so.
+fn header_filter_mode(
+    spec: &marshal_config::model::HeaderFilterSpec,
+    profile: &str,
+    side: &'static str,
+) -> Result<HeaderFilterMode, BuildError> {
+    match (spec.allow.is_empty(), spec.deny.is_empty()) {
+        (false, true) => Ok(HeaderFilterMode::Allow(spec.allow.clone())),
+        (true, false) => Ok(HeaderFilterMode::Deny(spec.deny.clone())),
+        _ => Err(BuildError::AmbiguousHeaderFilter { profile: profile.to_owned(), side }),
+    }
+}
+
 /// Build request-header rewrites declared directly or through a named transform bundle.
 pub fn build_request_transforms(
     cfg: &Config,
@@ -91,35 +116,43 @@ pub fn build_request_transforms(
     profile: &marshal_config::model::Profile,
 ) -> Result<Vec<Arc<dyn marshal_core::RequestTransform>>, BuildError> {
     let profile = resolve_profile(cfg, profile)?;
-    if profile.request_transforms.set_headers.is_empty() {
-        return Ok(Vec::new());
+    let mut out: Vec<Arc<dyn marshal_core::RequestTransform>> = Vec::new();
+
+    // Filtering first: it decides what the client is even allowed to have sent before
+    // anything downstream — a header setter or secret injection — adds or replaces one.
+    if let Some(spec) = &profile.request_transforms.headers {
+        let mode = header_filter_mode(spec, profile_name, "request")?;
+        out.push(Arc::new(RequestHeaderFilter::new(mode)));
     }
 
-    let mut headers = Vec::with_capacity(profile.request_transforms.set_headers.len());
-    for (name, value) in &profile.request_transforms.set_headers {
-        let parsed_name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-            BuildError::InvalidRequestHeaderName {
-                profile: profile_name.to_owned(),
-                name: name.clone(),
+    if !profile.request_transforms.set_headers.is_empty() {
+        let mut headers = Vec::with_capacity(profile.request_transforms.set_headers.len());
+        for (name, value) in &profile.request_transforms.set_headers {
+            let parsed_name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                BuildError::InvalidRequestHeaderName {
+                    profile: profile_name.to_owned(),
+                    name: name.clone(),
+                }
+            })?;
+            if marshal_config::model::request_header_is_managed(&parsed_name) {
+                return Err(BuildError::ManagedRequestHeader {
+                    profile: profile_name.to_owned(),
+                    name: name.clone(),
+                });
             }
-        })?;
-        if marshal_config::model::request_header_is_managed(&parsed_name) {
-            return Err(BuildError::ManagedRequestHeader {
-                profile: profile_name.to_owned(),
-                name: name.clone(),
-            });
+            let parsed_value = http::HeaderValue::from_str(value).map_err(|source| {
+                BuildError::InvalidRequestHeaderValue {
+                    profile: profile_name.to_owned(),
+                    name: name.clone(),
+                    source,
+                }
+            })?;
+            headers.push((parsed_name, parsed_value));
         }
-        let parsed_value = http::HeaderValue::from_str(value).map_err(|source| {
-            BuildError::InvalidRequestHeaderValue {
-                profile: profile_name.to_owned(),
-                name: name.clone(),
-                source,
-            }
-        })?;
-        headers.push((parsed_name, parsed_value));
+        out.push(Arc::new(RequestHeaderSetter::new(headers)));
     }
 
-    Ok(vec![Arc::new(RequestHeaderSetter::new(headers))])
+    Ok(out)
 }
 
 /// Resolve a profile's `transforms: [<name>, ...]` indirection, if it has one, into an
@@ -358,6 +391,15 @@ pub fn build_response_transforms(
             marshal_config::model::ResponseOversizeAction::default(),
         )));
     }
+
+    // Filtering last: an `allow` list governs exactly what reaches the agent, including
+    // anything a body limiter above added (`x-marshal-response-limited`) — list it explicitly
+    // if a profile using both needs the agent to see it.
+    if let Some(spec) = &profile.response_transforms.headers {
+        let mode = header_filter_mode(spec, profile_name, "response")?;
+        out.push(Arc::new(ResponseHeaderFilter::new(mode)));
+    }
+
     Ok(out)
 }
 

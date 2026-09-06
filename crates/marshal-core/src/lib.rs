@@ -18,7 +18,9 @@ pub mod secret;
 pub mod verdict;
 
 pub use audit::{Action, AuditRecord, AuditSink, redact_headers};
-pub use encoding::{base64_encode, base64url_encode, form_urlencode, percent_encode};
+pub use encoding::{
+    base64_encode, base64url_decode, base64url_encode, form_urlencode, percent_encode,
+};
 pub use error::{Error, Result};
 pub use evidence::{Evidence, Fact, Flag, LayerOutcome};
 pub use hosts::{HostMatcher, MatchKind, PatternError};

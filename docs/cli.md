@@ -247,7 +247,7 @@ same swap name share one stored grant, deliberately.
 
 ### `marshal secrets oauth refresh <name>`
 
-Discards the cached access token and mints a new one immediately. The way to check a
+Discards the cached access token and requests a new one immediately. The way to check a
 credential works without waiting for an agent to need it. The token itself is **not** printed:
 putting a live credential into a terminal, a scrollback buffer and a shell history undoes what
 boundary injection is for.

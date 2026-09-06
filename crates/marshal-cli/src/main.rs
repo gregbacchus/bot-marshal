@@ -1633,7 +1633,7 @@ async fn oauth_command(
             // a live token on a terminal (and into a shell history, and a scrollback buffer)
             // undoes what this whole feature is for.
             swap.source.resolve().await?;
-            println!("`{}`: minted a fresh access token successfully", swap.name);
+            println!("`{}`: obtained a fresh access token successfully", swap.name);
             Ok(())
         }
 
@@ -2511,6 +2511,10 @@ fn build_secrets(
     // An OAuth2 credential's own endpoints, which must never have that credential injected
     // into them — see `SecretInjector::excluding` for why.
     let mut exceptions: Vec<(String, String)> = Vec::new();
+    // Every `oauth2` swap built so far, keyed by its own name, so an `oauth2_claim` swap can
+    // read the other swap's ID token — see `SecretSourceSpec::Oauth2Claim`. Built up as the
+    // loop goes, which is why a claim source must name a swap earlier in the list than itself.
+    let mut oauth_sources: HashMap<String, Arc<marshal_secrets::Oauth2Source>> = HashMap::new();
 
     let mut swaps = Vec::new();
     for (i, raw) in profile.request_transforms.secrets.iter().enumerate() {
@@ -2525,32 +2529,47 @@ fn build_secrets(
         // it is called; there is nothing sensible to derive it from.
         let swap_label = spec.name.clone().unwrap_or_else(|| format!("secrets[{i}]"));
 
-        if let Some(SecretSourceSpec::Oauth2(oauth)) = &spec.source {
-            for url in [Some(&oauth.token_endpoint), oauth.authorization_endpoint.as_ref()]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(pair) = host_and_path(url) {
-                    exceptions.push(pair);
+        // Built eagerly, rather than lazily inside `require_source` below, so the one instance
+        // goes both into this swap's injection *and* into `oauth_sources` for a later
+        // `oauth2_claim` swap to share — two separately built sources would mint (and cache,
+        // and rotate) the same credential independently of each other.
+        let oauth2_source: Option<Arc<marshal_secrets::Oauth2Source>> = match &spec.source {
+            Some(SecretSourceSpec::Oauth2(oauth)) => {
+                for url in [Some(&oauth.token_endpoint), oauth.authorization_endpoint.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(pair) = host_and_path(url) {
+                        exceptions.push(pair);
+                    }
                 }
+                if oauth.capture == CaptureSpec::InBand {
+                    brokers
+                        .push(Arc::new(build_broker(oauth, deps, &swap_label).map_err(|e| {
+                            anyhow::anyhow!("request_transforms.secrets[{i}]: {e}")
+                        })?));
+                }
+                let built = build_oauth2_source(oauth, deps, &swap_label)
+                    .map_err(|e| anyhow::anyhow!("request_transforms.secrets[{i}]: {e}"))?;
+                let arc = Arc::new(built);
+                oauth_sources.insert(swap_label.clone(), arc.clone());
+                Some(arc)
             }
-            if oauth.capture == CaptureSpec::InBand {
-                brokers.push(Arc::new(
-                    build_broker(oauth, deps, &swap_label)
-                        .map_err(|e| anyhow::anyhow!("request_transforms.secrets[{i}]: {e}"))?,
-                ));
-            }
-        }
+            _ => None,
+        };
 
         // `source` is required for every kind except `sigv4`, which carries its own two (or
         // three) secrets instead — one `source:` value cannot express an access key pair.
         let require_source = || -> anyhow::Result<Arc<dyn SecretSource>> {
+            if let Some(arc) = &oauth2_source {
+                return Ok(arc.clone());
+            }
             let s = spec.source.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "request_transforms.secrets[{i}]: `source` is required for this `inject.type`"
                 )
             })?;
-            build_source(s, deps, &swap_label)
+            build_source(s, deps, &swap_label, &oauth_sources)
         };
 
         let injection = match &spec.inject {
@@ -2588,11 +2607,16 @@ fn build_secrets(
                     );
                 }
                 marshal_secrets::Injection::SigV4 {
-                    access_key_id: build_source(access_key_id, deps, &swap_label)?,
-                    secret_access_key: build_source(secret_access_key, deps, &swap_label)?,
+                    access_key_id: build_source(access_key_id, deps, &swap_label, &oauth_sources)?,
+                    secret_access_key: build_source(
+                        secret_access_key,
+                        deps,
+                        &swap_label,
+                        &oauth_sources,
+                    )?,
                     session_token: session_token
                         .as_ref()
-                        .map(|t| build_source(t, deps, &swap_label))
+                        .map(|t| build_source(t, deps, &swap_label, &oauth_sources))
                         .transpose()?,
                     region: region.clone(),
                     service: service.clone(),
@@ -2689,6 +2713,7 @@ fn build_source(
     spec: &SecretSourceSpec,
     deps: &SecretDeps,
     swap_label: &str,
+    oauth_sources: &HashMap<String, Arc<marshal_secrets::Oauth2Source>>,
 ) -> anyhow::Result<Arc<dyn marshal_core::SecretSource>> {
     Ok(match spec {
         SecretSourceSpec::Env { var } => Arc::new(marshal_secrets::EnvSource::new(var)),
@@ -2700,6 +2725,27 @@ fn build_source(
             ))
         }
         SecretSourceSpec::Oauth2(spec) => Arc::new(build_oauth2_source(spec, deps, swap_label)?),
+        SecretSourceSpec::Oauth2Claim { of, claim } => {
+            let source = oauth_sources.get(of).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "request_transforms.secrets: `{swap_label}` reads a claim from `{of}`, but \
+                     no `oauth2` swap named `{of}` was found earlier in `secrets:` — an \
+                     `oauth2_claim` source must list the swap it reads from after that swap's \
+                     own entry"
+                )
+            })?;
+            anyhow::ensure!(
+                !claim.is_empty(),
+                "request_transforms.secrets: `{swap_label}`: `claim` must name at least one \
+                 key to look up"
+            );
+            Arc::new(marshal_secrets::OauthClaimSource::new(
+                swap_label,
+                source.clone(),
+                claim.clone(),
+                deps.redactor.clone(),
+            ))
+        }
     })
 }
 
@@ -2710,11 +2756,15 @@ fn build_oauth2_source(
 ) -> anyhow::Result<marshal_secrets::Oauth2Source> {
     use marshal_secrets::{ClientAuth, Grant, Oauth2Config};
 
+    // None of these nested sources can sensibly be `oauth2_claim` — a credential referencing
+    // its own swap's ID token before that swap exists — so an empty map is correct here, not a
+    // shortcut.
+    let no_oauth_sources = HashMap::new();
     let client_secret = |what: &str| -> anyhow::Result<Arc<dyn marshal_core::SecretSource>> {
         let src = spec.client_secret.as_ref().ok_or_else(|| {
             anyhow::anyhow!("source.client_secret is required for `client_auth: {what}`")
         })?;
-        build_source(src, deps, swap_label)
+        build_source(src, deps, swap_label, &no_oauth_sources)
     };
     // The signing key both RFC 7523 flows use. Resolved once so `grant: jwt_bearer` with
     // `client_auth: private_key_jwt` — a real combination — does not need two config keys for
@@ -2725,7 +2775,7 @@ fn build_oauth2_source(
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("source.private_key is required for `{what}`"))?;
         Ok(marshal_secrets::AssertionKey {
-            source: build_source(src, deps, swap_label)?,
+            source: build_source(src, deps, swap_label, &no_oauth_sources)?,
             algorithm: marshal_secrets::Algorithm::parse(
                 spec.algorithm.as_deref().unwrap_or("RS256"),
             )
@@ -2760,7 +2810,7 @@ fn build_oauth2_source(
             let src = spec.refresh_token.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("source.refresh_token is required for `grant: refresh_token`")
             })?;
-            Grant::RefreshToken { source: build_source(src, deps, swap_label)? }
+            Grant::RefreshToken { source: build_source(src, deps, swap_label, &no_oauth_sources)? }
         }
         GrantSpec::JwtBearer => {
             // `client_id` is not part of an RFC 7523 §2.1 request at all, so `issuer` is what
@@ -2844,6 +2894,15 @@ fn build_oauth2_source(
             authorization_endpoint: spec.authorization_endpoint.clone(),
             redirect_uri: spec.redirect_uri.clone(),
             device_authorization_endpoint: spec.device_authorization_endpoint.clone(),
+            token_exchange: spec.token_exchange.as_ref().map(|t| marshal_secrets::TokenExchange {
+                subject: match t.subject {
+                    ExchangeSubjectSpec::IdToken => marshal_secrets::ExchangeSubject::IdToken,
+                    ExchangeSubjectSpec::AccessToken => {
+                        marshal_secrets::ExchangeSubject::AccessToken
+                    }
+                },
+                extra_params: t.extra_params.clone(),
+            }),
         },
         Arc::clone(&deps.store),
         Arc::clone(&deps.tls),
@@ -2968,6 +3027,21 @@ enum SecretSourceSpec {
     /// A credential marshal *obtains* from an OAuth2 token endpoint, rather than one it is
     /// given. Composes with any `inject.type` — `bearer` in practice.
     Oauth2(Box<Oauth2Spec>),
+    /// A value read out of another `oauth2` swap's ID token, rather than its access token.
+    ///
+    /// Some providers put routing information a resource server needs — which account or
+    /// workspace a request is for — in an ID token claim rather than in the access token's
+    /// scope, and expect it back as a second header alongside `Authorization: Bearer`. `of`
+    /// names the other swap by its `name:`, which must appear earlier in `secrets:` since
+    /// config is built top to bottom. See
+    /// [OAuth2 credentials § an ID token claim as a second header](../docs/configuration/oauth2.md#an-id-token-claim-as-a-second-header).
+    Oauth2Claim {
+        of: String,
+        /// The path of object keys to walk into the ID token's claims — a list rather than a
+        /// dotted string, since a claim is commonly namespaced by a URL that itself contains
+        /// `.` and `/` (e.g. `["https://api.openai.com/auth", "chatgpt_account_id"]`).
+        claim: Vec<String>,
+    },
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -3044,6 +3118,37 @@ struct Oauth2Spec {
     /// larger claim on its behaviour than injecting a header.
     #[serde(default)]
     capture: CaptureSpec,
+    /// A second, RFC 8693 token-exchange hop run after every mint, for a provider whose grant
+    /// hands back a token that authenticates a session rather than one authorized for API
+    /// calls — see [OAuth2 credentials § a token exchange for a different
+    /// credential](../docs/configuration/oauth2.md#a-token-exchange-for-a-different-credential)
+    /// and ADR-0039.
+    #[serde(default)]
+    token_exchange: Option<TokenExchangeSpec>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenExchangeSpec {
+    #[serde(default)]
+    subject: ExchangeSubjectSpec,
+    /// Anything the provider wants beyond the RFC 8693 fields this always sends. OpenAI's own
+    /// exchange, for instance, names what it wants back with a non-standard `requested_token`
+    /// field rather than the RFC's `requested_token_type` URI.
+    #[serde(default)]
+    extra_params: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExchangeSubjectSpec {
+    /// `urn:ietf:params:oauth:token-type:id_token` — the session's identity, not its access
+    /// grant. What OpenAI's exchange wants.
+    #[default]
+    IdToken,
+    /// `urn:ietf:params:oauth:token-type:access_token`, for a provider that exchanges the
+    /// access token itself rather than a separate ID token.
+    AccessToken,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize)]

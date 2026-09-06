@@ -109,6 +109,22 @@ fn token_body(access_token: &str, expires_in: u64) -> String {
     )
 }
 
+/// A response that also carries an ID token — the shape OpenAI's ChatGPT sign-in uses to hand
+/// back account-routing information the access token itself does not carry.
+fn token_body_with_id_token(access_token: &str, expires_in: u64, id_token: &str) -> String {
+    format!(
+        r#"{{"access_token":"{access_token}","token_type":"Bearer","expires_in":{expires_in},"id_token":"{id_token}"}}"#
+    )
+}
+
+/// An unsigned JWT carrying `claims` as its payload. Nothing here ever checks the signature —
+/// see [`marshal_secrets::decode_id_token_claims`]'s doc comment for why that is fine.
+fn jwt_with_claims(claims: &serde_json::Value) -> String {
+    let header = marshal_core::base64url_encode(br#"{"alg":"none"}"#);
+    let payload = marshal_core::base64url_encode(claims.to_string().as_bytes());
+    format!("{header}.{payload}.")
+}
+
 struct Harness {
     proxy: std::net::SocketAddr,
     upstream: std::net::SocketAddr,
@@ -201,6 +217,44 @@ fn oauth_source(auth: &FakeAuthServer, redactor: &Redactor, grant: Grant) -> Arc
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
+                token_exchange: None,
+            },
+            Arc::new(TokenStore::new(None)),
+            marshal_http::default_tls_config(),
+            // No guard: the fake token endpoint is on loopback, which is exactly what the
+            // guard exists to refuse. Production wiring passes one.
+            None,
+            redactor.clone(),
+        )
+        .unwrap(),
+    )
+}
+
+/// Like [`oauth_source`], but configured to exchange the grant's ID token for a different
+/// token before caching or injecting it — the shape OpenAI's ChatGPT sign-in needs.
+fn oauth_source_with_exchange(auth: &FakeAuthServer, redactor: &Redactor) -> Arc<Oauth2Source> {
+    Arc::new(
+        Oauth2Source::new(
+            "SERVICE",
+            Oauth2Config {
+                token_endpoint: auth.token_endpoint(),
+                client_id: "marshal".into(),
+                client_auth: ClientAuth::None,
+                grant: Grant::ClientCredentials,
+                scope: vec![],
+                audience: None,
+                extra_params: Default::default(),
+                expiry_skew: Duration::ZERO,
+                timeout: Duration::from_secs(10),
+                authorization_endpoint: None,
+                redirect_uri: None,
+                device_authorization_endpoint: None,
+                token_exchange: Some(marshal_secrets::TokenExchange {
+                    subject: marshal_secrets::ExchangeSubject::IdToken,
+                    extra_params: [("requested_token".to_owned(), "openai-api-key".to_owned())]
+                        .into_iter()
+                        .collect(),
+                }),
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),
@@ -214,6 +268,17 @@ fn oauth_source(auth: &FakeAuthServer, redactor: &Redactor, grant: Grant) -> Arc
 }
 
 async fn harness(source: Arc<dyn SecretSource>, redactor: Redactor) -> Harness {
+    let swap = SecretSwap {
+        name: "SERVICE".into(),
+        injection: Injection::Bearer { source },
+        hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
+    };
+    harness_multi(vec![swap], redactor).await
+}
+
+/// Like [`harness`], but for a test needing more than one swap in play at once — e.g. a
+/// second swap reading a claim out of the first's ID token.
+async fn harness_multi(swaps: Vec<SecretSwap>, redactor: Redactor) -> Harness {
     let pki = test_pki();
     let upstream = start_tls_upstream(&pki).await;
 
@@ -232,13 +297,7 @@ async fn harness(source: Arc<dyn SecretSource>, redactor: Redactor) -> Harness {
     let sink = JsonSink::new(SharedWriter(Arc::clone(&buffer))).redacting(redactor.clone());
     let audit_sink: Arc<dyn AuditSink> = Arc::new(sink);
 
-    let swap = SecretSwap {
-        name: "SERVICE".into(),
-        injection: Injection::Bearer { source },
-        hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
-    };
-    let transforms: Vec<Arc<dyn RequestTransform>> =
-        vec![Arc::new(SecretInjector::new(vec![swap]))];
+    let transforms: Vec<Arc<dyn RequestTransform>> = vec![Arc::new(SecretInjector::new(swaps))];
 
     let server = Server::new(
         ServerConfig { listen: vec!["127.0.0.1:0".into()], unix_socket: None },
@@ -281,6 +340,105 @@ async fn a_client_holding_nothing_reaches_the_upstream_with_a_minted_token() {
 
     let seen = reflect(&h).await;
     assert_eq!(seen["authorization"], format!("Bearer {MINTED_TOKEN}"));
+    assert_eq!(auth.calls(), 1);
+}
+
+const EXCHANGED_TOKEN: &str = "sk_exchangedapikey0000000000000000000000";
+
+#[tokio::test]
+async fn token_exchange_injects_the_exchanged_token_not_the_grants_own() {
+    // The grant's own access token authenticates a session; the exchanged one is what the
+    // resource server actually wants (see ADR-0038 and ADR-0039). The two must never be
+    // confused with each other.
+    let id_token = jwt_with_claims(&serde_json::json!({"sub": "irrelevant-here"}));
+    let auth = fake_auth_server(vec![
+        (200, token_body_with_id_token(MINTED_TOKEN, 3600, &id_token)),
+        (200, token_body(EXCHANGED_TOKEN, 3600)),
+    ])
+    .await;
+    let redactor = Redactor::default();
+    let h = harness(oauth_source_with_exchange(&auth, &redactor), redactor).await;
+
+    let seen = reflect(&h).await;
+    assert_eq!(seen["authorization"], format!("Bearer {EXCHANGED_TOKEN}"));
+    assert_eq!(auth.calls(), 2, "one grant call, one exchange call");
+
+    let exchange_request = auth.last_request();
+    assert!(
+        exchange_request
+            .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"),
+        "{exchange_request}"
+    );
+    assert!(
+        exchange_request.contains(&format!("subject_token={}", pct(&id_token))),
+        "{exchange_request}"
+    );
+    assert!(exchange_request.contains("requested_token=openai-api-key"), "{exchange_request}");
+}
+
+#[tokio::test]
+async fn token_exchange_reuses_the_cached_result_rather_than_re_exchanging_per_request() {
+    let id_token = jwt_with_claims(&serde_json::json!({"sub": "irrelevant-here"}));
+    let auth = fake_auth_server(vec![
+        (200, token_body_with_id_token(MINTED_TOKEN, 3600, &id_token)),
+        (200, token_body(EXCHANGED_TOKEN, 3600)),
+    ])
+    .await;
+    let redactor = Redactor::default();
+    let h = harness(oauth_source_with_exchange(&auth, &redactor), redactor).await;
+
+    for _ in 0..3 {
+        assert_eq!(reflect(&h).await["authorization"], format!("Bearer {EXCHANGED_TOKEN}"));
+    }
+    assert_eq!(auth.calls(), 2, "the exchange should not repeat once its result is cached");
+}
+
+#[tokio::test]
+async fn a_second_swap_injects_a_claim_from_the_first_swaps_id_token() {
+    // The exact shape OpenAI's ChatGPT sign-in needs and a bearer token alone cannot provide:
+    // an account id claim, carried in the ID token the same token response returned, injected
+    // as its own header alongside the access token.
+    let id_token = jwt_with_claims(&serde_json::json!({
+        "https://api.openai.com/auth": { "chatgpt_account_id": "acct-789" }
+    }));
+    let auth =
+        fake_auth_server(vec![(200, token_body_with_id_token(MINTED_TOKEN, 3600, &id_token))])
+            .await;
+    let redactor = Redactor::default();
+    let oauth = oauth_source(&auth, &redactor, Grant::ClientCredentials);
+
+    let claim_source = Arc::new(marshal_secrets::OauthClaimSource::new(
+        "ACCOUNT_ID",
+        Arc::clone(&oauth),
+        vec!["https://api.openai.com/auth".into(), "chatgpt_account_id".into()],
+        redactor.clone(),
+    ));
+    let swaps = vec![
+        SecretSwap {
+            name: "SERVICE".into(),
+            injection: Injection::Bearer { source: oauth },
+            hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
+        },
+        SecretSwap {
+            name: "ACCOUNT_ID".into(),
+            // `/reflect` only echoes back a fixed set of headers, `x-api-key` among them — see
+            // `support::mod`. The real header name (`ChatGPT-Account-ID`) is `Injection::Header`
+            // config, exercised by the `config check` and unit-test coverage elsewhere; what
+            // this test proves is the claim itself reaching an injected header at all.
+            injection: Injection::Header {
+                name: http::HeaderName::from_static("x-api-key"),
+                source: claim_source,
+            },
+            hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
+        },
+    ];
+    let h = harness_multi(swaps, redactor).await;
+
+    let seen = reflect(&h).await;
+    assert_eq!(seen["authorization"], format!("Bearer {MINTED_TOKEN}"));
+    assert_eq!(seen["x-api-key"], "acct-789");
+    // One mint served both swaps — the claim source shares the oauth2 source rather than
+    // minting its own copy of the same credential.
     assert_eq!(auth.calls(), 1);
 }
 
@@ -466,6 +624,49 @@ async fn starting_up_does_not_mint_anything() {
 }
 
 #[tokio::test]
+async fn a_claim_source_alongside_its_oauth2_source_still_does_not_mint_at_startup() {
+    // The exact bug ADR-0030 exists to prevent, reached through a different door: an
+    // `oauth2_claim` swap that forgot to override `preload` would fall back to the trait's
+    // default (`resolve`), which mints `of`'s credential just to seed the redactor at boot —
+    // the moment both swaps are registered in the same injector, not only when the claim
+    // source is resolved directly.
+    let id_token = jwt_with_claims(&serde_json::json!({
+        "https://api.openai.com/auth": { "chatgpt_account_id": "acct-1" }
+    }));
+    let auth =
+        fake_auth_server(vec![(200, token_body_with_id_token(MINTED_TOKEN, 3600, &id_token))])
+            .await;
+    let redactor = Redactor::default();
+    let oauth = oauth_source(&auth, &redactor, Grant::ClientCredentials);
+    let claim_source = Arc::new(marshal_secrets::OauthClaimSource::new(
+        "ACCOUNT_ID",
+        Arc::clone(&oauth),
+        vec!["https://api.openai.com/auth".into(), "chatgpt_account_id".into()],
+        redactor.clone(),
+    ));
+
+    let injector = SecretInjector::new(vec![
+        SecretSwap {
+            name: "SERVICE".into(),
+            injection: Injection::Bearer { source: oauth },
+            hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
+        },
+        SecretSwap {
+            name: "ACCOUNT_ID".into(),
+            injection: Injection::Header {
+                name: http::HeaderName::from_static("x-api-key"),
+                source: claim_source,
+            },
+            hosts: HostMatcher::new(Vec::<&str>::new(), ["127.0.0.0/8"]).unwrap(),
+        },
+    ]);
+    let seeded = injector.resolve_all().await;
+
+    assert_eq!(auth.calls(), 0, "startup called the token endpoint {} time(s)", auth.calls());
+    assert!(seeded.is_empty());
+}
+
+#[tokio::test]
 async fn a_token_endpoint_that_never_answers_is_bounded_rather_than_hanging() {
     // Minting is on the request path. An endpoint that accepts the connection and then goes
     // silent would otherwise hang the request forever, holding the per-swap minting lock while
@@ -495,6 +696,7 @@ async fn a_token_endpoint_that_never_answers_is_bounded_rather_than_hanging() {
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
+                token_exchange: None,
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),
@@ -765,6 +967,7 @@ async fn capture_harness(
                 authorization_endpoint: Some(format!("https://{}/oauth2/authorize", provider.addr)),
                 redirect_uri: None,
                 device_authorization_endpoint: None,
+                token_exchange: None,
             },
             Arc::new(TokenStore::new(Some(store_dir))),
             // The provider presents the test PKI's leaf, so marshal's own out-of-band call

@@ -48,6 +48,9 @@ later, so a future change is made knowingly rather than by accident.
 | [0035](0035-release-versioning-uses-cocogitto-not-release-plz.md) | Release versioning uses cocogitto, not release-plz | Accepted |
 | [0036](0036-bind-groups-are-named-and-shared-like-bundles.md) | Bind groups are named and shared, the same way bundles are | Accepted |
 | [0037](0037-identity-and-profile-are-independent.md) | Identity and profile are independent axes of the scope name | Accepted |
+| [0038](0038-a-second-source-can-read-another-swaps-id-token.md) | A second source can read another swap's ID token | Accepted |
+| [0039](0039-oauth2-can-exchange-a-token-before-caching-it.md) | OAuth2 can exchange a token before caching it | Accepted |
+| [0040](0040-header-filtering-is-allow-or-deny-never-both.md) | Header filtering is allow or deny, never both — and never touches wire framing | Accepted |
 
 ## Writing a new one
 

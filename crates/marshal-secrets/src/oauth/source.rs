@@ -258,6 +258,47 @@ pub struct Oauth2Config {
     pub redirect_uri: Option<String>,
     /// RFC 8628 device authorization endpoint. `device_code` only.
     pub device_authorization_endpoint: Option<String>,
+    /// A second hop, run after every mint: [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)
+    /// token exchange, for a provider whose ordinary grant hands back a token that
+    /// authenticates a *session* rather than authorizing API calls. OpenAI's ChatGPT sign-in is
+    /// exactly this: the grant's own access token only ever proves who is signed in, and a
+    /// resource server wants a different, separately-issued token obtained by exchanging the
+    /// session's ID token for one. When set, the exchanged token — not the grant's own access
+    /// token — is what gets cached and injected.
+    pub token_exchange: Option<TokenExchange>,
+}
+
+/// Configuration for the RFC 8693 hop described on [`Oauth2Config::token_exchange`].
+#[derive(Debug, Clone)]
+pub struct TokenExchange {
+    /// Which of the grant's own tokens is presented as `subject_token`.
+    pub subject: ExchangeSubject,
+    /// Anything the provider wants beyond the four RFC 8693 fields this always sends
+    /// (`grant_type`, `client_id` via the ordinary `client_auth`, `subject_token`,
+    /// `subject_token_type`) — OpenAI's own exchange, for instance, names what it wants back
+    /// with a non-standard `requested_token` field rather than the RFC's `requested_token_type`
+    /// URI, so this has to stay a free-form escape hatch rather than a typed field.
+    pub extra_params: BTreeMap<String, String>,
+}
+
+/// Which token from the grant response becomes the exchange's `subject_token`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExchangeSubject {
+    /// `urn:ietf:params:oauth:token-type:id_token`. What OpenAI's exchange wants — the
+    /// session's identity, not its access grant.
+    IdToken,
+    /// `urn:ietf:params:oauth:token-type:access_token`, for a provider that exchanges the
+    /// access token itself rather than a separate ID token.
+    AccessToken,
+}
+
+impl ExchangeSubject {
+    fn token_type_uri(self) -> &'static str {
+        match self {
+            Self::IdToken => "urn:ietf:params:oauth:token-type:id_token",
+            Self::AccessToken => "urn:ietf:params:oauth:token-type:access_token",
+        }
+    }
 }
 
 pub struct Oauth2Source {
@@ -341,19 +382,28 @@ impl Oauth2Source {
         Ok(value)
     }
 
-    /// The refresh token this grant will present, and where it came from.
-    async fn refresh_token(&self) -> Result<Option<(SecretValue, bool)>> {
+    /// The refresh token this grant will present, where it came from, and — for an enrolled
+    /// grant — the scope it was originally obtained with.
+    ///
+    /// That scope matters on the request that follows: a provider is not obliged to preserve
+    /// the original scope of a refresh token when the refresh request omits `scope` (RFC 6749
+    /// §6 makes it a SHOULD, not a MUST), and at least one major provider issues a
+    /// narrower-than-original access token when it is left out. Carrying it forward from what
+    /// was actually granted at enrolment, rather than only from `scope:` in config, is what
+    /// keeps a bootstrap-discovered swap — which never had a `scope:` to write — minting tokens
+    /// with the same scope every time instead of drifting narrower on each refresh.
+    async fn refresh_token(&self) -> Result<Option<(SecretValue, bool, Option<String>)>> {
         match &self.cfg.grant {
             Grant::ClientCredentials | Grant::JwtBearer { .. } => Ok(None),
             Grant::RefreshToken { source } => {
-                Ok(Some((self.present(source, "refresh_token").await?, false)))
+                Ok(Some((self.present(source, "refresh_token").await?, false, None)))
             }
             Grant::Enrolled => match self.store.grant(&self.name)? {
                 Some(g) => {
                     // Read from disk, so it has never been through `post_token`'s learning.
                     self.redactor
                         .learn(format!("{}.refresh_token", self.name), g.refresh_token.expose());
-                    Ok(Some((g.refresh_token, true)))
+                    Ok(Some((g.refresh_token, true, g.scope)))
                 }
                 None => Err(Error::Config(format!(
                     "the `{}` credential has not been enrolled: run `marshal secrets oauth \
@@ -446,15 +496,24 @@ impl Oauth2Source {
             }
             return Ok(params);
         }
-        match self.refresh_token().await? {
-            None => params.push(("grant_type".into(), "client_credentials".into())),
-            Some((token, _)) => {
+        let enrolled_scope = match self.refresh_token().await? {
+            None => {
+                params.push(("grant_type".into(), "client_credentials".into()));
+                None
+            }
+            Some((token, _, scope)) => {
                 params.push(("grant_type".into(), "refresh_token".into()));
                 params.push(("refresh_token".into(), token.expose().to_owned()));
+                scope
             }
-        }
+        };
+        // `scope:` in config always wins when set. Otherwise fall back to whatever scope this
+        // grant was actually obtained with — see `refresh_token`'s doc comment for why that
+        // fallback exists at all.
         if !self.cfg.scope.is_empty() {
             params.push(("scope".into(), self.cfg.scope.join(" ")));
+        } else if let Some(scope) = enrolled_scope {
+            params.push(("scope".into(), scope));
         }
         if let Some(audience) = &self.cfg.audience {
             params.push(("audience".into(), audience.clone()));
@@ -543,8 +602,8 @@ impl Oauth2Source {
     /// one place that has to teach the redactor. A second path to the token endpoint that
     /// forgot to would be silently unredacted (ADR-0029).
     ///
-    /// `what` names the operation for the error message: "minting", "exchanging the
-    /// authorization code". An operator reading a failure needs to know which step failed.
+    /// `what` names the operation for the error message: "requesting", "exchanging the
+    /// authorization code for". An operator reading a failure needs to know which step failed.
     async fn post_token(&self, what: &str, params: Vec<(String, String)>) -> Result<TokenResponse> {
         let (auth_params, headers) = self.client_auth().await?;
         let form = self.form_body(params, auth_params);
@@ -589,35 +648,110 @@ impl Oauth2Source {
         if let Some(rt) = &response.refresh_token {
             self.redactor.learn(&self.name, rt.expose());
         }
+        if let Some(idt) = &response.id_token {
+            self.redactor.learn(format!("{}.id_token", self.name), idt.expose());
+        }
         Ok(response)
     }
 
-    /// One round trip to the token endpoint for an ordinary request-path mint.
+    /// One round trip to the token endpoint for an ordinary request-path token request — two,
+    /// when `token_exchange` is set.
     async fn mint(&self) -> Result<SecretValue> {
         let params = self.grant_params().await?;
-        let response = self.post_token("minting", params).await?;
+        let mut response = self.post_token("requesting", params).await?;
 
+        // Rotation is about the grant's own refresh token, which only this response — never
+        // an exchange response — can carry. Persist before the exchange, which is one more
+        // network call and therefore one more thing that can fail between here and returning.
         self.persist_rotation(&response)?;
+
+        if let Some(exchange) = &self.cfg.token_exchange {
+            let id_token = response.id_token.take();
+            let mut exchanged = self.exchange_token(&response, id_token.as_ref(), exchange).await?;
+            // The exchange response is not expected to carry its own ID token, so keep the
+            // session's — a claim source reads it for account-routing information the
+            // exchanged token itself has no reason to repeat.
+            exchanged.id_token = id_token;
+            response = exchanged;
+        }
+
         self.cache(&response);
 
         tracing::info!(
             secret = %self.name,
             grant = self.cfg.grant.label(),
             expires_in_secs = response.expires_in.map(|d| d.as_secs()),
-            "minted an oauth2 access token"
+            exchanged = self.cfg.token_exchange.is_some(),
+            "obtained an oauth2 access token from the provider's token endpoint"
         );
         Ok(response.access_token)
+    }
+
+    /// [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token exchange: swap one of the
+    /// grant's tokens for a different one the resource server actually wants — see
+    /// [`Oauth2Config::token_exchange`] for why this exists at all.
+    async fn exchange_token(
+        &self,
+        response: &TokenResponse,
+        id_token: Option<&SecretValue>,
+        exchange: &TokenExchange,
+    ) -> Result<TokenResponse> {
+        let subject_token = match exchange.subject {
+            ExchangeSubject::IdToken => id_token.ok_or_else(|| {
+                Error::Config(format!(
+                    "`{}` is configured with `token_exchange: {{ subject: id_token }}`, but \
+                     the grant response carried no `id_token` to exchange",
+                    self.name
+                ))
+            })?,
+            ExchangeSubject::AccessToken => &response.access_token,
+        };
+
+        let mut params = vec![
+            ("grant_type".into(), "urn:ietf:params:oauth:grant-type:token-exchange".into()),
+            ("subject_token".into(), subject_token.expose().to_owned()),
+            ("subject_token_type".into(), exchange.subject.token_type_uri().into()),
+        ];
+        params.extend(exchange.extra_params.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+        let what = match exchange.subject {
+            ExchangeSubject::IdToken => "exchanging the id token for",
+            ExchangeSubject::AccessToken => "exchanging the access token for",
+        };
+        self.post_token(what, params).await
     }
 
     fn cache(&self, response: &TokenResponse) {
         self.store.put_access(
             &self.name,
-            CachedToken::new(
+            CachedToken::with_id_token(
                 response.access_token.clone(),
                 response.expires_in,
                 self.cfg.expiry_skew,
+                response.id_token.clone(),
             ),
         );
+    }
+
+    /// A claim from the ID token this credential was most recently minted with, for a
+    /// [`super::claim::OauthClaimSource`] reading a routing value the access token itself does
+    /// not carry (see that type's doc comment for why one exists at all).
+    ///
+    /// Mints first if nothing is cached, so the claim is available on first use rather than
+    /// only after some unrelated request has already minted this swap's access token.
+    pub async fn id_token_claim(&self) -> Result<Option<serde_json::Value>> {
+        use marshal_core::SecretSource;
+        self.resolve().await?;
+        self.cached_id_token_claim()
+    }
+
+    /// Only what is already held — the [`Oauth2Source::preload`] of `id_token_claim`, for
+    /// [`super::claim::OauthClaimSource::preload`] to seed the redactor at startup without
+    /// cascading into a mint of the swap it reads from.
+    pub fn cached_id_token_claim(&self) -> Result<Option<serde_json::Value>> {
+        let Some(cached) = self.store.cached_access(&self.name) else { return Ok(None) };
+        let Some(id_token) = &cached.id_token else { return Ok(None) };
+        Ok(Some(super::token::decode_id_token_claims(id_token)?))
     }
 
     // ---------------------------------------------------------------------------------
@@ -944,6 +1078,7 @@ mod tests {
                 authorization_endpoint: Some("https://auth.example.com/oauth2/authorize".into()),
                 redirect_uri: Some("http://127.0.0.1:7777/callback".into()),
                 device_authorization_endpoint: Some("https://auth.example.com/device".into()),
+                token_exchange: None,
             },
             Arc::new(TokenStore::new(dir)),
             marshal_http::default_tls_config(),
@@ -969,6 +1104,7 @@ mod tests {
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
+                token_exchange: None,
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),
@@ -1128,6 +1264,7 @@ mod tests {
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
+                token_exchange: None,
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),
@@ -1219,6 +1356,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refresh_with_no_configured_scope_resends_the_scope_it_was_enrolled_with() {
+        // Bootstrap capture writes exactly this shape: a swap enrolled from an observed token
+        // exchange, with no `scope:` in config because bootstrap never saw the authorization
+        // request that would have named one. Omitting `scope` on the refresh leaves it up to
+        // the provider whether the new access token keeps the original grant's scope — RFC
+        // 6749 §6 only says it MAY — and at least one real provider narrows it when asked.
+        // Carrying the enrolled scope forward is what keeps that refresh identical to the one
+        // enrolment itself got.
+        let dir = std::env::temp_dir()
+            .join(format!("marshal-refresh-scope-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = Oauth2Source::new(
+            "SERVICE",
+            Oauth2Config {
+                token_endpoint: "https://auth.example.com/oauth2/token".into(),
+                client_id: "marshal".into(),
+                client_auth: ClientAuth::None,
+                grant: Grant::Enrolled,
+                scope: vec![],
+                audience: None,
+                extra_params: BTreeMap::new(),
+                expiry_skew: Duration::from_secs(60),
+                timeout: Duration::from_secs(10),
+                authorization_endpoint: None,
+                redirect_uri: None,
+                device_authorization_endpoint: None,
+                token_exchange: None,
+            },
+            Arc::new(TokenStore::new(Some(dir.clone()))),
+            marshal_http::default_tls_config(),
+            None,
+            Redactor::default(),
+        )
+        .unwrap();
+        s.store
+            .put_grant(
+                "SERVICE",
+                StoredGrant {
+                    refresh_token: SecretValue::new("rt-enrolled"),
+                    obtained_at: now_unix(),
+                    scope: Some("api.responses.write".into()),
+                },
+            )
+            .unwrap();
+
+        let (form, _) = s.token_request().await.unwrap();
+        assert!(form.contains("refresh_token=rt-enrolled"), "{form}");
+        assert!(form.contains("scope=api.responses.write"), "{form}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_configured_scope_uses_that_instead_of_the_enrolled_one() {
+        // `scope:` in config is an explicit override — set it and the enrolled value must not
+        // leak through instead.
+        let dir = std::env::temp_dir()
+            .join(format!("marshal-refresh-scope-override-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = interactive(Grant::Enrolled, Some(dir.clone()));
+        s.store
+            .put_grant(
+                "SERVICE",
+                StoredGrant {
+                    refresh_token: SecretValue::new("rt-enrolled"),
+                    obtained_at: now_unix(),
+                    scope: Some("some.other.scope".into()),
+                },
+            )
+            .unwrap();
+
+        let (form, _) = s.token_request().await.unwrap();
+        assert!(form.contains("scope=offline_access%20read%3Athings"), "{form}");
+        assert!(!form.contains("some.other.scope"), "{form}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn extra_params_reach_the_form_body() {
         let mut cfg_extra = BTreeMap::new();
         cfg_extra.insert("resource".to_owned(), "https://api.example.com".to_owned());
@@ -1237,6 +1451,7 @@ mod tests {
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
+                token_exchange: None,
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),
@@ -1470,6 +1685,7 @@ mod tests {
                 authorization_endpoint: None,
                 redirect_uri: None,
                 device_authorization_endpoint: None,
+                token_exchange: None,
             },
             Arc::new(TokenStore::new(None)),
             marshal_http::default_tls_config(),

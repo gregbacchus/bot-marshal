@@ -48,6 +48,16 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
     }
     for (name, bundle) in &cfg.transforms {
         check_request_headers(&format!("transforms.{name}"), &bundle.request_transforms, &mut out);
+        check_header_filter(
+            &format!("transforms.{name}.request_transforms.headers"),
+            &bundle.request_transforms.headers,
+            &mut out,
+        );
+        check_header_filter(
+            &format!("transforms.{name}.response_transforms.headers"),
+            &bundle.response_transforms.headers,
+            &mut out,
+        );
     }
 
     if let Some(explicit) = &cfg.listeners.explicit
@@ -194,6 +204,16 @@ fn check_profile(
     out: &mut Vec<Diagnostic>,
 ) {
     check_request_headers(at, &profile.request_transforms, out);
+    check_header_filter(
+        &format!("{at}.request_transforms.headers"),
+        &profile.request_transforms.headers,
+        out,
+    );
+    check_header_filter(
+        &format!("{at}.response_transforms.headers"),
+        &profile.response_transforms.headers,
+        out,
+    );
 
     if profile.default_action == Decision::Allow && !profile.i_understand_this_is_allow_by_default {
         out.push(Diagnostic {
@@ -400,6 +420,36 @@ fn check_profile(
                 response_headers_from.get_or_insert(name);
             }
         }
+    }
+}
+
+/// `allow` and `deny` are two different default behaviors (default-deny vs default-allow), not
+/// two lists that compose — setting both is almost certainly not what was meant, and setting
+/// neither on a block that exists at all is the same "this does nothing" mistake in the other
+/// direction.
+fn check_header_filter(
+    location: &str,
+    spec: &Option<crate::model::HeaderFilterSpec>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(spec) = spec else { return };
+    match (spec.allow.is_empty(), spec.deny.is_empty()) {
+        (false, false) => out.push(Diagnostic {
+            severity: Severity::Error,
+            location: location.into(),
+            message: "both `allow` and `deny` are set — they are two different default \
+                      behaviors (keep only what matches vs. drop only what matches), not two \
+                      lists that combine. Use one or the other."
+                .into(),
+        }),
+        (true, true) => out.push(Diagnostic {
+            severity: Severity::Error,
+            location: location.into(),
+            message: "neither `allow` nor `deny` is set, so this header filter matches \
+                      nothing and does nothing"
+                .into(),
+        }),
+        _ => {}
     }
 }
 
@@ -635,7 +685,8 @@ mod tests {
     fn two_bundles_both_setting_a_headers_allowlist_on_the_same_side_is_rejected() {
         let mut cfg = Config::default();
         let mut with_headers = crate::model::TransformBundle::default();
-        with_headers.request_transforms.headers = Some(Default::default());
+        with_headers.request_transforms.headers =
+            Some(crate::model::HeaderFilterSpec { allow: vec!["accept".into()], deny: vec![] });
         cfg.transforms.insert("a".into(), with_headers.clone());
         cfg.transforms.insert("b".into(), with_headers);
         cfg.profiles.insert(
@@ -653,9 +704,13 @@ mod tests {
     fn one_bundle_setting_request_headers_and_another_setting_response_headers_is_fine() {
         let mut cfg = Config::default();
         let mut req_only = crate::model::TransformBundle::default();
-        req_only.request_transforms.headers = Some(Default::default());
+        req_only.request_transforms.headers =
+            Some(crate::model::HeaderFilterSpec { allow: vec!["accept".into()], deny: vec![] });
         let mut resp_only = crate::model::TransformBundle::default();
-        resp_only.response_transforms.headers = Some(Default::default());
+        resp_only.response_transforms.headers = Some(crate::model::HeaderFilterSpec {
+            allow: vec!["content-type".into()],
+            deny: vec![],
+        });
         cfg.transforms.insert("a".into(), req_only);
         cfg.transforms.insert("b".into(), resp_only);
         cfg.profiles.insert(
@@ -688,6 +743,37 @@ mod tests {
                 && d.location == "profiles.p.request_transforms.set_headers.Content-Length"
                 && d.message.contains("managed by the proxy")
         }));
+    }
+
+    #[test]
+    fn a_header_filter_setting_both_allow_and_deny_is_rejected() {
+        let mut profile = Profile::default();
+        profile.request_transforms.headers = Some(crate::model::HeaderFilterSpec {
+            allow: vec!["accept".into()],
+            deny: vec!["x-custom".into()],
+        });
+        let diagnostics = validate(&cfg_with(profile));
+        assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
+            && d.location == "profiles.p.request_transforms.headers"
+            && d.message.contains("both")));
+    }
+
+    #[test]
+    fn a_header_filter_setting_neither_allow_nor_deny_is_rejected() {
+        let mut profile = Profile::default();
+        profile.response_transforms.headers = Some(crate::model::HeaderFilterSpec::default());
+        let diagnostics = validate(&cfg_with(profile));
+        assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
+            && d.location == "profiles.p.response_transforms.headers"
+            && d.message.contains("does nothing")));
+    }
+
+    #[test]
+    fn a_header_filter_setting_only_deny_is_fine() {
+        let mut profile = Profile::default();
+        profile.request_transforms.headers =
+            Some(crate::model::HeaderFilterSpec { allow: vec![], deny: vec!["x-custom".into()] });
+        assert!(!validate(&cfg_with(profile)).iter().any(|d| d.severity == Severity::Error));
     }
 
     #[test]

@@ -43,6 +43,32 @@ pub fn base64url_encode(input: &[u8]) -> String {
     encode_with(URL_SAFE, input, false)
 }
 
+/// URL-safe base64 without padding ([RFC 4648 §5](https://www.rfc-editor.org/rfc/rfc4648)),
+/// decoded. What a JWT's header and payload segments are encoded as — this is what reads one
+/// back out.
+pub fn base64url_decode(input: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in input.chars() {
+        let v = match c {
+            'A'..='Z' => c as u32 - 'A' as u32,
+            'a'..='z' => c as u32 - 'a' as u32 + 26,
+            '0'..='9' => c as u32 - '0' as u32 + 52,
+            '-' => 62,
+            '_' => 63,
+            '=' => continue, // tolerated, though base64url is specified unpadded
+            _ => return Err(format!("invalid base64url character {c:?}")),
+        };
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
 /// Percent-encode every byte outside the RFC 3986 unreserved set. Safe to use on either half
 /// of a query parameter, because it encodes `=` and `&` along with everything else.
 pub fn percent_encode(input: &[u8]) -> String {
@@ -98,6 +124,18 @@ mod tests {
         assert_eq!(base64url_encode(&[0xfb, 0xff]), "-_8");
         assert_eq!(base64url_encode(b"f"), "Zg");
         assert_eq!(base64url_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64url_decode_round_trips_through_encode() {
+        for input in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar", &[0xfb, 0xff]] {
+            assert_eq!(base64url_decode(&base64url_encode(input)).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn base64url_decode_rejects_a_character_outside_the_alphabet() {
+        assert!(base64url_decode("not valid!").is_err());
     }
 
     #[test]

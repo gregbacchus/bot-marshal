@@ -149,7 +149,7 @@ are not per-request lines):
 
 | message | fields | when |
 |---|---|---|
-| `minted an oauth2 access token` | `secret`, `grant`, `expires_in_secs` | a token was obtained; once per expiry, not once per request |
+| `obtained an oauth2 access token from the provider's token endpoint` | `secret`, `grant`, `expires_in_secs` | a real token request completed; once per expiry, not once per request |
 | `substituted marshal's PKCE challenge into an authorization request` | `secret` | in-band capture rewrote an authorization request |
 | `captured an authorization code in band and exchanged it` | `secret`, `scope` | capture succeeded |
 | `captured an authorization code but could not exchange it` | `secret`, `error` | **at `error`** — the agent's flow appears to have succeeded, but requests needing the credential will be refused |
@@ -158,7 +158,8 @@ are not per-request lines):
 
 No value appears in any of them. `secret` is the swap name.
 
-A repeated `minted an oauth2 access token` at high frequency means the cache is not holding —
+A repeated `obtained an oauth2 access token from the provider's token endpoint` at high
+frequency means the cache is not holding —
 usually a provider that omits `expires_in`, which is never cached because treating a token with
 no stated lifetime as immortal would mean a revoked credential is never re-fetched.
 
