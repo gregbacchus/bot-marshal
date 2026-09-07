@@ -13,15 +13,26 @@ sudo mkdir -p /etc/bot-marshal /var/lib/bot-marshal
 sudo chown bot-marshal:bot-marshal /var/lib/bot-marshal
 sudo chmod 0700 /var/lib/bot-marshal
 
-# Seed /etc/bot-marshal from the shipped example — config/marshal.yaml becomes config.yaml on
-# disk (see "Config layout" below for why), profiles/bundles/transforms/bind-groups come along
-# unchanged, one file each. Edit config.yaml afterwards to point tls.ca_cert / tls.ca_key and
-# state_dir under /var/lib/bot-marshal.
-sudo cp path/to/bot-marshal/config/marshal.yaml /etc/bot-marshal/config.yaml
-sudo cp -r path/to/bot-marshal/config/{profiles,bundles,transforms,bind-groups} /etc/bot-marshal/
-sudo chown -R root:bot-marshal /etc/bot-marshal
-sudo chmod -R 0640 /etc/bot-marshal
-sudo chmod 0750 /etc/bot-marshal /etc/bot-marshal/{profiles,bundles,transforms,bind-groups}
+# Minimum config.yaml to get `config check` and `serve` running: listeners, the CA paths and
+# state_dir under /var/lib/bot-marshal, and the required embedded `profile:` (deny-all until
+# you add policy — see Configuration). Add profiles/, bundles/, transforms/ next to it as your
+# policy grows.
+sudo tee /etc/bot-marshal/config.yaml > /dev/null <<'YAML'
+listeners:
+  explicit:
+    listen: "127.0.0.1:8080"
+
+tls:
+  ca_cert: "/var/lib/bot-marshal/ca.crt"
+  ca_key: "/var/lib/bot-marshal/ca.key"
+
+state_dir: "/var/lib/bot-marshal/state"
+
+profile:
+  default_action: deny
+YAML
+sudo chown root:bot-marshal /etc/bot-marshal/config.yaml
+sudo chmod 0640 /etc/bot-marshal/config.yaml
 
 sudo -u bot-marshal marshal --config /etc/bot-marshal/config.yaml ca init
 ```
