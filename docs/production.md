@@ -34,7 +34,20 @@ profile:
 YAML
 sudo chown root:bot-marshal /etc/bot-marshal/config.yaml
 sudo chmod 0640 /etc/bot-marshal/config.yaml
+```
 
+If `marshal` was installed via Homebrew, it lives under the Homebrew prefix (e.g.
+`/home/linuxbrew/.linuxbrew/bin/marshal` or `/opt/homebrew/bin/marshal`), which is only on
+`PATH` for shells that source Homebrew's shellenv. `bot-marshal` is a service user with no such
+shell setup, so `sudo -u bot-marshal marshal ...` and, later, systemd's `ExecStart` both fail
+with "command not found". Symlink the binary into `/usr/local/bin`, which is on the default
+system `PATH` and needs no per-user setup, before doing anything else as that user:
+
+```bash
+sudo ln -sf "$(brew --prefix)/bin/marshal" /usr/local/bin/marshal
+```
+
+```bash
 sudo -u bot-marshal marshal --config /etc/bot-marshal/config.yaml ca init
 ```
 
@@ -62,16 +75,8 @@ the check to run after a restore.
 
 ## systemd unit
 
-If `marshal` was installed via Homebrew, it lives under the Homebrew prefix (e.g.
-`/home/linuxbrew/.linuxbrew/bin/marshal` or `/opt/homebrew/bin/marshal`), which is only on
-`PATH` for shells that source Homebrew's shellenv — the `bot-marshal` service user's session
-never does, and systemd's `ExecStart` does not consult `PATH` at all, so an `ExecStart=marshal
-...` or a plain Homebrew path both fail with "command not found". Symlink the binary into
-`/usr/local/bin`, which is on the default system `PATH` and needs no per-user setup:
-
-```bash
-sudo ln -sf "$(brew --prefix)/bin/marshal" /usr/local/bin/marshal
-```
+`ExecStart` below points at `/usr/local/bin/marshal` — the symlink created above — rather than
+a Homebrew path, for the same PATH reason.
 
 ```ini
 # /etc/systemd/system/bot-marshal.service
