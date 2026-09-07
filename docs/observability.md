@@ -47,9 +47,18 @@ Every field lands as a real, structured journal field (`identity` → `F_IDENTIT
 `F_HOST`, …), so `journalctl` *is* the follow command:
 
 ```bash
-journalctl -u bot-marshal -f                                       # follow, human-readable
+journalctl -u bot-marshal -f                                       # follow, human-readable (systemd service)
 journalctl -u bot-marshal -o json -f | jq -c 'select(.TARGET=="access")'
 journalctl -u bot-marshal FIELD=F_HOST=api.github.com               # everything for one host
+```
+
+`-u bot-marshal` only works when `marshal` is running as the `bot-marshal` systemd unit
+(see [production.md](production.md)). Running `marshal` directly from the CLI has no unit to
+filter by — journald still records it, but tagged by the binary's `_COMM`, not a unit. Use that
+field instead:
+
+```bash
+journalctl _COMM=marshal -f                                        # follow a CLI-run marshal process
 ```
 
 `tracing`'s fields are flat, so `audit`'s evidence trail travels as a JSON *string* rather than
