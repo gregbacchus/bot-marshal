@@ -21,6 +21,7 @@ sudo tee /etc/bot-marshal/config.yaml > /dev/null <<'YAML'
 listeners:
   explicit:
     listen: "127.0.0.1:8080"
+    unix_socket: "/var/lib/bot-marshal/marshal.sock"   # unlocks SO_PEERCRED identity
 
 tls:
   ca_cert: "/var/lib/bot-marshal/ca.crt"
