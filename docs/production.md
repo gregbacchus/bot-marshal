@@ -62,6 +62,17 @@ the check to run after a restore.
 
 ## systemd unit
 
+If `marshal` was installed via Homebrew, it lives under the Homebrew prefix (e.g.
+`/home/linuxbrew/.linuxbrew/bin/marshal` or `/opt/homebrew/bin/marshal`), which is only on
+`PATH` for shells that source Homebrew's shellenv — the `bot-marshal` service user's session
+never does, and systemd's `ExecStart` does not consult `PATH` at all, so an `ExecStart=marshal
+...` or a plain Homebrew path both fail with "command not found". Symlink the binary into
+`/usr/local/bin`, which is on the default system `PATH` and needs no per-user setup:
+
+```bash
+sudo ln -sf "$(brew --prefix)/bin/marshal" /usr/local/bin/marshal
+```
+
 ```ini
 # /etc/systemd/system/bot-marshal.service
 [Unit]
