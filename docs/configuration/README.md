@@ -18,7 +18,7 @@ With no `--config`, bot-marshal looks in `$XDG_CONFIG_HOME/bot-marshal/config.ya
 `~/.config/bot-marshal/config.yaml`. That is the right default for a normal user running this
 interactively (`ca init`, `marshal run`, trying things out) and the wrong one for a
 long-running service: **pass `--config` explicitly there.** A conventional system layout looks
-like `/etc/bot-marshal/marshal.yaml`, with the profile, bundle and transform directories and
+like `/etc/bot-marshal/config.yaml`, with the profile, bundle and transform directories and
 any secret files it references kept alongside — see [Production](../production.md).
 
 `~/` at the start of a path (`tls.ca_cert`, `tls.upstream_ca_certs` entries, secret `file`
@@ -90,7 +90,7 @@ next to the config file, and the same convention holds for `bundles/`, `bind-gro
 
 ```
 /etc/bot-marshal/
-├── marshal.yaml          # listeners, tls, upstream, the embedded `profile:`, `identities:`
+├── config.yaml           # listeners, tls, upstream, the embedded `profile:`, `identities:`
 ├── profiles/
 │   ├── coding-agent.yaml # the filename is the profile's name
 │   └── llm-agent.yaml

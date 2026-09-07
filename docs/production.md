@@ -12,8 +12,18 @@ sudo useradd --system --no-create-home --home-dir /var/lib/bot-marshal bot-marsh
 sudo mkdir -p /etc/bot-marshal /var/lib/bot-marshal
 sudo chown bot-marshal:bot-marshal /var/lib/bot-marshal
 sudo chmod 0700 /var/lib/bot-marshal
-# tls.ca_cert / tls.ca_key and state_dir in marshal.yaml should point under /var/lib/bot-marshal
-sudo -u bot-marshal marshal --config /etc/bot-marshal/marshal.yaml ca init
+
+# Seed /etc/bot-marshal from the shipped example — config/marshal.yaml becomes config.yaml on
+# disk (see "Config layout" below for why), profiles/bundles/transforms/bind-groups come along
+# unchanged, one file each. Edit config.yaml afterwards to point tls.ca_cert / tls.ca_key and
+# state_dir under /var/lib/bot-marshal.
+sudo cp path/to/bot-marshal/config/marshal.yaml /etc/bot-marshal/config.yaml
+sudo cp -r path/to/bot-marshal/config/{profiles,bundles,transforms,bind-groups} /etc/bot-marshal/
+sudo chown -R root:bot-marshal /etc/bot-marshal
+sudo chmod -R 0640 /etc/bot-marshal
+sudo chmod 0750 /etc/bot-marshal /etc/bot-marshal/{profiles,bundles,transforms,bind-groups}
+
+sudo -u bot-marshal marshal --config /etc/bot-marshal/config.yaml ca init
 ```
 
 ### `state_dir`
@@ -49,7 +59,7 @@ After=network.target
 [Service]
 User=bot-marshal
 Group=bot-marshal
-ExecStart=/usr/local/bin/marshal --config /etc/bot-marshal/marshal.yaml serve
+ExecStart=/usr/local/bin/marshal --config /etc/bot-marshal/config.yaml serve
 Restart=on-failure
 # Only if listeners.dns or listeners.explicit binds a port below 1024.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -73,7 +83,7 @@ use and is the wrong answer for a daemon.
 
 ```
 /etc/bot-marshal/
-├── marshal.yaml
+├── config.yaml
 ├── .env            # mode 0600 — the credentials `env` sources name (optional)
 ├── profiles/
 ├── bundles/
@@ -128,5 +138,5 @@ binary upgrade, `systemctl restart` — in-flight requests are dropped, so pick 
 Validate first:
 
 ```bash
-marshal --config /etc/bot-marshal/marshal.yaml config check && sudo systemctl restart bot-marshal
+marshal --config /etc/bot-marshal/config.yaml config check && sudo systemctl restart bot-marshal
 ```
