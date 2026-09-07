@@ -166,5 +166,5 @@ binary upgrade, `systemctl restart` — in-flight requests are dropped, so pick 
 Validate first:
 
 ```bash
-marshal --config /etc/bot-marshal/config.yaml config check && sudo systemctl restart bot-marshal
+sudo -u bot-marshal marshal --config /etc/bot-marshal/config.yaml config check && sudo systemctl restart bot-marshal
 ```
