@@ -2,6 +2,25 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.5.0](https://github.com/gregbacchus/bot-marshal/compare/195ab1eff244f290e8c7bf4531df45134f17384d..v0.5.0) - 2026-10-01
+#### Features
+- add LLM model routing - ([30e875c](https://github.com/gregbacchus/bot-marshal/commit/30e875c1d5460e276180945a4a3688c0c607aaf5)) - test, OpenAI Codex
+#### Bug Fixes
+- update rustls version to 0.23.45 and checksum - ([95315a7](https://github.com/gregbacchus/bot-marshal/commit/95315a7169a02e9f98468909026176d60e1d08f8)) - test
+- update VSCode settings for activity and status bar colors - ([9bdca0a](https://github.com/gregbacchus/bot-marshal/commit/9bdca0aec98ae3aa4d5f0e9205eada57b39718be)) - test
+#### Documentation
+- (**production**) add activityBar and activityBarTop active border colors to settings - ([b584019](https://github.com/gregbacchus/bot-marshal/commit/b584019297390210177e5a1576ca935b7bec9726)) - Greg Bacchus
+- (**production**) specify user for marshal command in config check - ([d31e462](https://github.com/gregbacchus/bot-marshal/commit/d31e46282dc1422bbf1fd7f104f9f4a4365986b8)) - Greg Bacchus
+- (**production**) move the Homebrew PATH fix before ca init - ([59e0c4b](https://github.com/gregbacchus/bot-marshal/commit/59e0c4b5b85a541ca3c60251b8661b159a77d6d7)) - test, Claude Sonnet 5
+- (**production**) note the Homebrew PATH gotcha for the systemd unit - ([a3ae74f](https://github.com/gregbacchus/bot-marshal/commit/a3ae74f2832705b59ca087c2133c8e30c25a7639)) - test, Claude Sonnet 5
+- (**production**) add unix_socket to the minimum config - ([f895824](https://github.com/gregbacchus/bot-marshal/commit/f895824ea7ffecf513562dbddf34ce3b4e7b36c3)) - test, Claude Sonnet 5
+- (**production**) write the minimum config directly instead of copying the example - ([b65e832](https://github.com/gregbacchus/bot-marshal/commit/b65e832efc057602cff4faea73ce3f99315e2f31)) - test, Claude Sonnet 5
+- (**production**) script the baseline config seed, rename to config.yaml - ([d534e42](https://github.com/gregbacchus/bot-marshal/commit/d534e42bc96585d06948874c130274b8de6eab4f)) - test, Claude Sonnet 5
+- clarify journalctl filter for CLI-run marshal vs systemd unit - ([8520072](https://github.com/gregbacchus/bot-marshal/commit/85200725fb0d5948d846ae2e5491947d7bc1d0a6)) - test, Claude Sonnet 5
+- add docker/podman documentation - ([195ab1e](https://github.com/gregbacchus/bot-marshal/commit/195ab1eff244f290e8c7bf4531df45134f17384d)) - test
+
+- - -
+
 ## [v0.4.0](https://github.com/gregbacchus/bot-marshal/compare/68f5aa7a9c920aca7e04df73fa244a7950ceb66f..v0.4.0) - 2026-09-06
 #### Features
 - (**audit**) add redacted request/response headers to every audit record - ([e97febd](https://github.com/gregbacchus/bot-marshal/commit/e97febdaca93b9ebd284d68863656a55c714acfb)) - test, Claude Sonnet 5
