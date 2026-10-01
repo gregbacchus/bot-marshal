@@ -27,9 +27,11 @@ pub use hosts::{HostMatcher, MatchKind, PatternError};
 pub use identity::{ConnInfo, Credential, Identity, IdentityResolver, PeerCred, Resolved};
 pub use policy::{
     BodyRequirement, CostClass, FailureMode, PolicyLayer, RequestResponder, RequestTransform,
-    ResponseTransform, SynthesizedResponse,
+    ResponseTransform, SseRewriter, SynthesizedResponse,
 };
 pub use redact::Redactor;
-pub use request::{Authority, BodyHandle, IngressMode, Phase, RequestContext, ResponseParts};
+pub use request::{
+    Authority, BodyHandle, IngressMode, LlmRoute, Phase, RequestContext, ResponseParts,
+};
 pub use secret::{SecretSource, SecretValue};
 pub use verdict::{ApprovalRequest, Decider, Decision, DenyingDecider, Reason, Verdict};

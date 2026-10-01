@@ -230,6 +230,54 @@ async fn upstream_service(
                 .unwrap())
         }
 
+        // A strict Anthropic-shaped origin for the LLM router acceptance test. A response is
+        // successful only when the request reached this mapped socket in translated form and
+        // the client-side credential did not ride along.
+        "/v1/messages" => {
+            let leaked_auth = req.headers().contains_key("authorization")
+                || req.headers().contains_key("x-api-key");
+            let version = req
+                .headers()
+                .get("anthropic-version")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+            let doc: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            if leaked_auth
+                || version != "2023-06-01"
+                || doc["model"] != "claude-origin"
+                || doc["system"] != "be brief"
+            {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header("content-type", "application/json")
+                    .body(full(
+                        serde_json::to_vec(&serde_json::json!({
+                            "leaked_auth": leaked_auth,
+                            "version": version,
+                            "request": doc,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap());
+            }
+            let reply = serde_json::json!({
+                "id": "msg_live",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-origin",
+                "content": [{"type": "text", "text": "routed hello"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 2, "output_tokens": 2}
+            });
+            Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body(full(serde_json::to_vec(&reply).unwrap()))
+                .unwrap())
+        }
+
         _ => Ok(Response::builder().status(StatusCode::OK).body(full(b"ok".to_vec())).unwrap()),
     }
 }

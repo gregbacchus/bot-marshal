@@ -136,6 +136,23 @@ pub trait RequestTransform: Send + Sync + std::fmt::Debug {
         BodyRequirement::Streaming
     }
 
+    /// The requirement for one concrete request, before its body has been read. Most
+    /// transforms are unconditional; endpoint-aware transforms can leave unrelated uploads
+    /// streaming by deciding from the already-parsed authority and URI.
+    fn body_requirement_for(
+        &self,
+        _authority: &crate::Authority,
+        _uri: &http::Uri,
+    ) -> BodyRequirement {
+        self.body_requirement()
+    }
+
+    /// True when this transform may send the request to a different origin than the CONNECT
+    /// authority, so intercept must not TCP-connect to the CONNECT host yet.
+    fn defers_connect(&self, _host: &str) -> bool {
+        false
+    }
+
     async fn apply(&self, cx: &mut RequestContext) -> Result<()>;
 }
 
@@ -160,6 +177,13 @@ pub trait ResponseTransform: Send + Sync + std::fmt::Debug {
         BodyRequirement::Streaming
     }
 
+    /// The requirement for one concrete response. Most transforms are unconditional and use
+    /// [`body_requirement`](Self::body_requirement); route-aware transforms can keep unrelated
+    /// responses streaming by opting into buffering only after their request-side half matched.
+    fn body_requirement_for(&self, _cx: &RequestContext) -> BodyRequirement {
+        self.body_requirement()
+    }
+
     /// Whether this transform can enforce its behavior one streaming chunk at a time.
     fn supports_streaming(&self) -> bool {
         false
@@ -181,6 +205,19 @@ pub trait ResponseTransform: Send + Sync + std::fmt::Debug {
     fn rewrite_chunk(&self, _host: &str, _chunk: &str) -> Option<String> {
         None
     }
+
+    /// A per-response session for stateful SSE rewriting (LLM dialect translation).
+    ///
+    /// Returning `Some` is how a transform opts out of the host-and-chunk [`rewrite_chunk`]
+    /// path for this response. The session sees every event the proxy has already delimited.
+    fn stream_session(&self, _cx: &RequestContext) -> Option<Box<dyn SseRewriter>> {
+        None
+    }
+}
+
+/// Incremental rewrite of one SSE response. Constructed once per streamed body.
+pub trait SseRewriter: Send + Sync {
+    fn rewrite(&mut self, chunk: &str) -> String;
 }
 
 /// A response marshal produces itself, instead of forwarding the request.

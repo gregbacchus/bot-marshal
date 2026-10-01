@@ -26,7 +26,9 @@ use hyper::{Request, Response, StatusCode};
 use marshal_core::{
     Action, AuditRecord, AuditSink, Authority, BodyHandle, BodyRequirement, Evidence, Identity,
     IngressMode, Reason, RequestContext, RequestTransform, ResponseParts, ResponseTransform,
+    SseRewriter,
 };
+use marshal_http::UpstreamGuard;
 use marshal_policy::Chain;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -51,6 +53,8 @@ pub enum MitmError {
     Http(#[from] hyper::Error),
     #[error("invalid upstream name `{0}`")]
     InvalidServerName(String),
+    #[error("upstream guard: {0}")]
+    Guard(String),
 }
 
 /// Everything the interception path needs, built once at startup.
@@ -134,24 +138,28 @@ pub struct MitmHandler {
     /// attributed in the audit trail.
     pub attributed: bool,
     pub resolver: Option<String>,
+    /// Used when a request transform retargets the origin, so intercept can open a new
+    /// checked connection rather than reuse the CONNECT peer.
+    pub guard: Arc<UpstreamGuard>,
+    pub tls: Arc<TlsEngine>,
 }
 
 impl MitmHandler {
     /// The strongest body requirement across the chain and the transforms.
-    fn body_requirement(&self) -> BodyRequirement {
+    fn body_requirement(&self, uri: &http::Uri) -> BodyRequirement {
         self.request_transforms
             .iter()
-            .map(|t| t.body_requirement())
+            .map(|t| t.body_requirement_for(&self.authority, uri))
             .chain(self.responders.iter().map(|r| r.body_requirement()))
             .fold(self.chain.body_requirement(), |acc, r| acc.combine(r))
     }
 
     /// What the response side needs. Kept separate from the request side so a transform that
     /// rewrites responses does not force request bodies to be buffered as well.
-    fn response_body_requirement(&self) -> BodyRequirement {
+    fn response_body_requirement(&self, cx: &RequestContext) -> BodyRequirement {
         self.response_transforms
             .iter()
-            .map(|t| t.body_requirement())
+            .map(|t| t.body_requirement_for(cx))
             .fold(BodyRequirement::Streaming, |acc, r| acc.combine(r))
     }
 }
@@ -162,13 +170,91 @@ impl std::fmt::Debug for MitmHandler {
     }
 }
 
+type OriginSender = hyper::client::conn::http1::SendRequest<ProxyBody>;
+
+struct OriginSlot {
+    authority: Authority,
+    sender: OriginSender,
+}
+
+/// Connections to the origin this tunnel actually talks to — the CONNECT peer, or a mapped
+/// host after the LLM router rewrites `cx.authority`.
+struct OriginPool {
+    slot: tokio::sync::Mutex<Option<OriginSlot>>,
+}
+
+impl OriginPool {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { slot: tokio::sync::Mutex::new(None) })
+    }
+
+    async fn send(
+        &self,
+        handler: &MitmHandler,
+        authority: &Authority,
+        req: Request<ProxyBody>,
+    ) -> Result<Response<hyper::body::Incoming>, MitmError> {
+        {
+            let mut slot = self.slot.lock().await;
+            if let Some(existing) = slot.as_mut()
+                && existing.authority == *authority
+                && existing.sender.is_ready()
+            {
+                return existing.sender.send_request(req).await.map_err(MitmError::Http);
+            }
+        }
+        let sender = handshake_origin(&handler.tls, handler.guard.as_ref(), authority).await?;
+        let mut slot = self.slot.lock().await;
+        *slot = Some(OriginSlot { authority: authority.clone(), sender });
+        slot.as_mut()
+            .expect("just inserted")
+            .sender
+            .send_request(req)
+            .await
+            .map_err(MitmError::Http)
+    }
+}
+
+async fn handshake_origin(
+    engine: &TlsEngine,
+    guard: &UpstreamGuard,
+    authority: &Authority,
+) -> Result<OriginSender, MitmError> {
+    let tcp = guard.connect(authority).await.map_err(|e| MitmError::Guard(e.to_string()))?;
+    handshake_tcp(engine, &authority.host, tcp).await
+}
+
+async fn handshake_tcp(
+    engine: &TlsEngine,
+    host: &str,
+    tcp: TcpStream,
+) -> Result<OriginSender, MitmError> {
+    let server_name = ServerName::try_from(host.to_owned())
+        .map_err(|_| MitmError::InvalidServerName(host.to_owned()))?;
+    let connector = TlsConnector::from(Arc::clone(&engine.client_config));
+    let upstream_tls = connector.connect(server_name, tcp).await?;
+    let (sender, conn) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(upstream_tls)).await?;
+    tokio::spawn(async move {
+        let _ = conn.with_upgrades().await;
+    });
+    Ok(sender)
+}
+
+/// Whether any request transform may send this CONNECT host somewhere else, so the tunnel
+/// must not TCP-connect to the CONNECT name yet.
+pub(crate) fn defers_connect(transforms: &[Arc<dyn RequestTransform>], host: &str) -> bool {
+    transforms.iter().any(|t| t.defers_connect(host))
+}
+
 /// Intercept one CONNECT tunnel.
 ///
-/// `client` is the raw stream after `200 Connection Established`; `upstream` is the TCP
-/// connection the guard already checked and opened.
+/// `upstream` is `Some` when the guard already opened a socket to the CONNECT host. `None`
+/// when a transform may retarget: origin TLS waits until the first forwarded request names
+/// the real authority.
 pub async fn intercept<C>(
     client: C,
-    upstream: TcpStream,
+    upstream: Option<TcpStream>,
     engine: Arc<TlsEngine>,
     handler: Arc<MitmHandler>,
 ) -> Result<(), MitmError>
@@ -181,43 +267,24 @@ where
     let acceptor = TlsAcceptor::from(engine.server_config(&host));
     let client_tls = acceptor.accept(client).await?;
 
-    // Upstream side, verified against the real web PKI.
-    let server_name = ServerName::try_from(host.clone())
-        .map_err(|_| MitmError::InvalidServerName(host.clone()))?
-        .to_owned();
-    let connector = TlsConnector::from(Arc::clone(&engine.client_config));
-    let upstream_tls = connector.connect(server_name, upstream).await?;
-
-    let (sender, conn) =
-        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(upstream_tls)).await?;
-
-    let sender = Arc::new(tokio::sync::Mutex::new(sender));
+    let pool = OriginPool::new();
+    if let Some(tcp) = upstream {
+        let sender = handshake_tcp(&engine, &host, tcp).await?;
+        *pool.slot.lock().await = Some(OriginSlot { authority: handler.authority.clone(), sender });
+    }
 
     let service = hyper::service::service_fn(move |req: Request<Incoming>| {
         let handler = Arc::clone(&handler);
-        let sender = Arc::clone(&sender);
-        async move { handle_request(req, handler, sender).await }
+        let pool = Arc::clone(&pool);
+        async move { handle_request(req, handler, pool).await }
     });
 
-    let serve = hyper::server::conn::http1::Builder::new()
+    if let Err(e) = hyper::server::conn::http1::Builder::new()
         .serve_connection(hyper_util::rt::TokioIo::new(client_tls), service)
-        .with_upgrades();
-
-    // Both connection futures are driven to completion together, and deliberately *not* with
-    // `select!`. After a 101 the upstream future finishes almost immediately, and cancelling
-    // the client future at that moment drops it mid-upgrade — the client then never receives
-    // its half of the handshake and reports an unexpected EOF. Whichever side happened to
-    // finish first decided whether the upgrade worked.
-    //
-    // Joining terminates cleanly in both directions: when the client goes away the service is
-    // dropped, which drops the last `SendRequest` and ends the upstream connection; when the
-    // upstream goes away the next request fails and hyper closes the client connection.
-    let (served, upstream_done) = tokio::join!(serve, conn.with_upgrades());
-    if let Err(e) = served {
+        .with_upgrades()
+        .await
+    {
         tracing::debug!(error = %e, "client connection ended");
-    }
-    if let Err(e) = upstream_done {
-        tracing::debug!(error = %e, "upstream connection ended");
     }
     Ok(())
 }
@@ -225,7 +292,7 @@ where
 async fn handle_request(
     req: Request<Incoming>,
     handler: Arc<MitmHandler>,
-    sender: Arc<tokio::sync::Mutex<hyper::client::conn::http1::SendRequest<ProxyBody>>>,
+    pool: Arc<OriginPool>,
 ) -> Result<Response<ProxyBody>, MitmError> {
     let started = std::time::Instant::now();
 
@@ -242,7 +309,7 @@ async fn handle_request(
     // Buffer only if something actually asks for it. Buffering by default would quietly stop
     // uploads streaming, and an upgrade has no body to buffer in the first place.
     let requirement =
-        if is_upgrade { BodyRequirement::Streaming } else { handler.body_requirement() };
+        if is_upgrade { BodyRequirement::Streaming } else { handler.body_requirement(&parts.uri) };
     let (body_handle, forward_body) = materialise(incoming, requirement).await?;
 
     // Whether this is a JSON-RPC call is a property of the request, so it is read here rather
@@ -273,6 +340,7 @@ async fn handle_request(
         headers: parts.headers.clone(),
         body: body_handle,
         evidence: Evidence::new(),
+        llm_route: None,
     };
 
     let outcome = handler.chain.evaluate(&cx).await;
@@ -373,6 +441,7 @@ async fn handle_request(
 
     parts.uri = origin_form(&cx.uri);
     parts.headers = cx.headers.clone();
+    set_host_header(&mut parts.headers, &cx.authority);
     strip_hop_by_hop(&mut parts.headers, is_upgrade);
 
     // A transform may have rewritten a buffered body; if so, send what it produced.
@@ -395,9 +464,25 @@ async fn handle_request(
 
     let upstream_req = Request::from_parts(parts, forward_body);
 
-    let mut response = {
-        let mut sender = sender.lock().await;
-        sender.send_request(upstream_req).await?
+    let mut response = match pool.send(&handler, &cx.authority, upstream_req).await {
+        Ok(r) => r,
+        Err(MitmError::Guard(message)) => {
+            let reason = Reason::new("upstream_guard", "upstream_unreachable", message);
+            emit(
+                &handler,
+                &cx,
+                &reason,
+                Action::Deny,
+                outcome.evidence,
+                None,
+                started,
+                false,
+                None,
+            )
+            .await;
+            return Ok(upstream_failure_response(&reason));
+        }
+        Err(e) => return Err(e),
     };
 
     let status = response.status();
@@ -464,11 +549,11 @@ async fn handle_request(
         // connection down mid-body. Dropping it moves the response to chunked encoding,
         // which is what a stream of unknown length needs anyway.
         parts.headers.remove(hyper::header::CONTENT_LENGTH);
-        let filtered = filter_event_stream(body, Arc::clone(&handler), cx.authority.host.clone());
+        let filtered = filter_event_stream(body, Arc::clone(&handler), &cx);
         return Ok(Response::from_parts(parts, filtered));
     }
 
-    let (body_handle, forward) = materialise(body, handler.response_body_requirement()).await?;
+    let (body_handle, forward) = materialise(body, handler.response_body_requirement(&cx)).await?;
     let mut resp =
         ResponseParts { status: parts.status, headers: parts.headers, body: body_handle };
 
@@ -533,19 +618,37 @@ const MAX_PENDING_SSE_EVENT_BYTES: usize = 1024 * 1024;
 /// rest of it arrives rather than being parsed as truncated JSON. Whatever is still held when
 /// the stream ends is flushed unmodified — a stream that stops mid-event is the upstream's
 /// business, and dropping those bytes would silently truncate the response.
-fn filter_event_stream(body: Incoming, handler: Arc<MitmHandler>, host: String) -> ProxyBody {
+fn filter_event_stream(
+    body: Incoming,
+    handler: Arc<MitmHandler>,
+    cx: &RequestContext,
+) -> ProxyBody {
     use http_body_util::BodyStream;
+
+    enum Step {
+        Session(Box<dyn SseRewriter>),
+        Chunk(Arc<dyn ResponseTransform>),
+    }
+
+    let host = handler.authority.host.clone();
+    let mut steps: Vec<Step> = Vec::new();
+    for transform in &handler.response_transforms {
+        match transform.stream_session(cx) {
+            Some(session) => steps.push(Step::Session(session)),
+            None => steps.push(Step::Chunk(Arc::clone(transform))),
+        }
+    }
 
     struct State {
         stream: BodyStream<Incoming>,
         pending: String,
         done: bool,
+        steps: Vec<Step>,
     }
 
-    let state = State { stream: BodyStream::new(body), pending: String::new(), done: false };
+    let state = State { stream: BodyStream::new(body), pending: String::new(), done: false, steps };
 
     let stream = futures::stream::unfold(state, move |mut state| {
-        let handler = Arc::clone(&handler);
         let host = host.clone();
         async move {
             use futures::StreamExt;
@@ -569,7 +672,17 @@ fn filter_event_stream(body: Incoming, handler: Arc<MitmHandler>, host: String) 
                         else {
                             continue;
                         };
-                        let out = rewrite(&handler, &host, ready);
+                        let mut out = ready;
+                        for step in &mut state.steps {
+                            match step {
+                                Step::Session(session) => out = session.rewrite(&out),
+                                Step::Chunk(transform) => {
+                                    if let Some(rewritten) = transform.rewrite_chunk(&host, &out) {
+                                        out = rewritten;
+                                    }
+                                }
+                            }
+                        }
                         return Some((Ok(hyper::body::Frame::data(Bytes::from(out))), state));
                     }
                     None => {
@@ -577,7 +690,6 @@ fn filter_event_stream(body: Incoming, handler: Arc<MitmHandler>, host: String) 
                         if state.pending.is_empty() {
                             return None;
                         }
-                        // Flush the partial event verbatim rather than discarding it.
                         let tail = std::mem::take(&mut state.pending);
                         return Some((Ok(hyper::body::Frame::data(Bytes::from(tail))), state));
                     }
@@ -612,13 +724,15 @@ fn next_sse_chunk(pending: &mut String, cap: usize) -> Option<String> {
     None
 }
 
-fn rewrite(handler: &MitmHandler, host: &str, mut chunk: String) -> String {
-    for transform in &handler.response_transforms {
-        if let Some(rewritten) = transform.rewrite_chunk(host, &chunk) {
-            chunk = rewritten;
-        }
+pub(crate) fn set_host_header(headers: &mut hyper::HeaderMap, authority: &Authority) {
+    let value = if authority.port == 443 || authority.port == 80 {
+        authority.host.clone()
+    } else {
+        format!("{}:{}", authority.host, authority.port)
+    };
+    if let Ok(v) = hyper::header::HeaderValue::from_str(&value) {
+        headers.insert(hyper::header::HOST, v);
     }
-    chunk
 }
 
 /// Turn an incoming body into what policy sees plus what gets forwarded.
@@ -760,6 +874,23 @@ fn denial_response(
         .header("proxy-agent", "bot-marshal")
         .body(Full::new(bytes).map_err(|e: std::convert::Infallible| match e {}).boxed())
         .expect("a static denial response is always valid")
+}
+
+fn upstream_failure_response(reason: &Reason) -> Response<ProxyBody> {
+    let bytes = Bytes::from(
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "error": "upstream_unreachable",
+            "proxy": "bot-marshal",
+            "reason": reason,
+        }))
+        .unwrap_or_default(),
+    );
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header("content-type", "application/json")
+        .header("proxy-agent", "bot-marshal")
+        .body(Full::new(bytes).map_err(|e: std::convert::Infallible| match e {}).boxed())
+        .expect("a static upstream failure response is always valid")
 }
 
 /// Turn a responder's answer into a response for the client.
@@ -917,5 +1048,13 @@ mod tests {
         assert_eq!(origin_form(&u).to_string(), "/repos/x?y=1");
         let u: hyper::Uri = "/already".parse().unwrap();
         assert_eq!(origin_form(&u).to_string(), "/already");
+    }
+
+    #[test]
+    fn mapped_origin_connection_failure_is_a_bad_gateway_not_a_policy_denial() {
+        let reason = Reason::new("upstream_guard", "upstream_unreachable", "connection refused");
+        let response = upstream_failure_response(&reason);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.headers()["proxy-agent"], "bot-marshal");
     }
 }

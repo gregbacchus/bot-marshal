@@ -269,6 +269,7 @@ mod tests {
             },
             body: BodyHandle::Empty,
             evidence: Evidence::new(),
+            llm_route: None,
         }
     }
 

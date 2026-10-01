@@ -18,6 +18,7 @@ audited separately.
 | M6 | Transparent (nftables) and DNS interception | done, later partially reverted¹ |
 | M7 | Management API, hot reload, warn mode, metrics | done² |
 | M8 | OAuth2 credential acquisition | done³ |
+| M9 | LLM model routing and OpenAI/Anthropic dialect translation | done |
 
 ¹ Transparent (nftables REDIRECT) capture was removed after M6 — see
 [Removed](#removed) below. DNS interception is unaffected.
@@ -102,6 +103,7 @@ without a network.
 | `marshal-policy` | chain runner and the denylist, allowlist, rules, dlp, mcp layers |
 | `marshal-secrets` | env/file/oauth2 sources, TTL cache, token store, in-band and bootstrap capture, injection and redaction |
 | `marshal-judge` | the LLM judge layer: providers, structured verdicts, cache, breaker |
+| `marshal-llm` | model-table routing and OpenAI Chat Completions/Anthropic Messages JSON and SSE translation |
 | `marshal-launch` | `marshal run`: netns and cgroup isolation, identity registration |
 | `marshal-http` | the upstream guard, and the one-shot client for calls marshal makes as itself |
 | `marshal-proxy` | listeners, CONNECT, SOCKS5, MITM, streaming |

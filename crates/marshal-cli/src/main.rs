@@ -675,10 +675,21 @@ fn build_runtime(
             let resolved = marshal_policy::resolve_profile(&cfg, profile)?;
             let (injector, brokers) = build_secrets(&resolved, &cfg, &deps)?;
 
+            // One shared router carries both halves of the translation contract: the request
+            // establishes `llm_route`, then the response side reads it to translate JSON or
+            // create a stateful SSE session. It must precede secret injection so client-side
+            // credentials are removed before the mapped origin's credential is added.
+            let mut responders: Vec<Arc<dyn marshal_core::RequestResponder>> = Vec::new();
+            if let Some(spec) = &resolved.request_transforms.llm_router {
+                let router = Arc::new(marshal_llm::LlmRouter::new(spec.clone()));
+                request.push(Arc::clone(&router) as Arc<dyn marshal_core::RequestTransform>);
+                response.insert(0, Arc::clone(&router) as Arc<dyn marshal_core::ResponseTransform>);
+                responders.push(router as Arc<dyn marshal_core::RequestResponder>);
+            }
+
             // Before the injector: the broker rewrites an authorization request, and injecting a
             // credential into that request first would be setting a header on the one request in
             // the flow that is specifically not authenticated yet.
-            let mut responders: Vec<Arc<dyn marshal_core::RequestResponder>> = Vec::new();
             for broker in brokers {
                 request.push(Arc::clone(&broker) as Arc<dyn marshal_core::RequestTransform>);
                 response.push(Arc::clone(&broker) as Arc<dyn marshal_core::ResponseTransform>);
@@ -3444,6 +3455,7 @@ profile:
             headers: Default::default(),
             body: marshal_core::BodyHandle::Empty,
             evidence: marshal_core::Evidence::new(),
+            llm_route: None,
         };
 
         for transform in &runtime.request_transforms["profile-a"] {
@@ -3451,6 +3463,48 @@ profile:
         }
 
         assert_eq!(request.headers["accept"], "application/json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn configured_llm_router_is_wired_into_all_three_runtime_phases() {
+        let dir = std::env::temp_dir()
+            .join(format!("marshal-build-runtime-llm-router-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = write_two_profile_config(&dir);
+        std::fs::write(
+            dir.join("profiles/profile-a.yaml"),
+            r#"
+default_action: deny
+request_transforms:
+  llm_router:
+    listen: [{ dialect: openai, hosts: ["llm.example.com"] }]
+    models:
+      smart: { model: "claude-origin", dialect: anthropic, host: "api.anthropic.com" }
+"#,
+        )
+        .unwrap();
+
+        let (runtime, _, _) = build_runtime(
+            &config,
+            Some("profile-a".to_string()),
+            &marshal_core::Redactor::default(),
+        )
+        .expect("config builds");
+        let profile: Arc<str> = Arc::from("profile-a");
+        assert!(
+            runtime.request_transforms[&profile].iter().any(|t| t.name() == "llm_router"),
+            "request half was not installed"
+        );
+        assert!(
+            runtime.response_transforms[&profile].iter().any(|t| t.name() == "llm_router"),
+            "response half was not installed"
+        );
+        assert!(
+            runtime.responders[&profile].iter().any(|t| t.name() == "llm_router"),
+            "model-catalog responder was not installed"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

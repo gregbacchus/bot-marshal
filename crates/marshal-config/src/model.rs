@@ -347,6 +347,94 @@ pub struct RequestTransforms {
     /// Placeholder-to-real credential swaps, so the agent never holds the real secret.
     #[serde(default)]
     pub secrets: Vec<serde_json::Value>,
+    /// Map inbound LLM model names onto an origin dialect, host, and model id.
+    #[serde(default)]
+    pub llm_router: Option<LlmRouterConfig>,
+}
+
+/// Inbound dialects the LLM router will rewrite, and the model table that names the origin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmRouterConfig {
+    pub listen: Vec<LlmListen>,
+    #[serde(default)]
+    pub models: std::collections::BTreeMap<String, LlmModelTarget>,
+    #[serde(default)]
+    pub unmapped: LlmUnmapped,
+    #[serde(default = "default_llm_body_cap")]
+    pub max_request_bytes: usize,
+    #[serde(default = "default_llm_response_cap")]
+    pub max_response_bytes: usize,
+}
+
+fn default_llm_body_cap() -> usize {
+    1024 * 1024
+}
+
+fn default_llm_response_cap() -> usize {
+    8 * 1024 * 1024
+}
+
+fn default_https_port() -> u16 {
+    443
+}
+
+/// A client-facing dialect and the hosts that speak it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmListen {
+    pub dialect: LlmDialect,
+    pub hosts: Vec<String>,
+    /// Paths that count as this dialect's chat endpoint. Empty means the dialect default
+    /// (`/v1/chat/completions` or `/v1/messages`).
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// Wire format, not a vendor hostname.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmDialect {
+    Openai,
+    Anthropic,
+}
+
+impl LlmDialect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Openai => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+
+    pub fn default_chat_path(self) -> &'static str {
+        match self {
+            Self::Openai => "/v1/chat/completions",
+            Self::Anthropic => "/v1/messages",
+        }
+    }
+}
+
+/// Where an inbound model name is sent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmModelTarget {
+    pub model: String,
+    pub dialect: LlmDialect,
+    pub host: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_https_port")]
+    pub port: u16,
+}
+
+/// What to do when a request matches a listen host but the `model` is not in the table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmUnmapped {
+    #[default]
+    Deny,
+    Pass,
 }
 
 /// Headers whose meaning belongs to connection routing or HTTP framing rather than the

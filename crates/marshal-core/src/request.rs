@@ -97,6 +97,23 @@ pub struct RequestContext {
     /// Evidence accumulated so far. Layers receive this read-only and return additions via
     /// [`Verdict::Pass`](crate::verdict::Verdict::Pass); the chain runner merges.
     pub evidence: Evidence,
+    /// Set by the LLM router after it rewrites a request, so the matching response transform
+    /// can translate back into the dialect the client spoke. Absent when no router ran.
+    pub llm_route: Option<LlmRoute>,
+}
+
+/// How the LLM router sent this request, for the response side and the audit trail.
+///
+/// Dialects are wire formats (`openai`, `anthropic`), not hostnames. `to_host` is the origin
+/// the operator mapped to, which may differ from [`RequestContext::authority`] as the client
+/// wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmRoute {
+    pub client_dialect: String,
+    pub origin_dialect: String,
+    pub from_model: String,
+    pub to_model: String,
+    pub to_host: String,
 }
 
 /// The response side, as seen by response-phase policy layers and response transforms.

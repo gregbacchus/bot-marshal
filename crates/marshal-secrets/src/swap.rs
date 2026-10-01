@@ -524,6 +524,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             body: BodyHandle::Empty,
             evidence: marshal_core::Evidence::new(),
+            llm_route: None,
         }
     }
 
@@ -597,6 +598,7 @@ mod tests {
             headers,
             body: BodyHandle::Empty,
             evidence: marshal_core::Evidence::new(),
+            llm_route: None,
         };
 
         sign_sigv4(
