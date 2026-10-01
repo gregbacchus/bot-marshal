@@ -51,6 +51,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0038](0038-a-second-source-can-read-another-swaps-id-token.md) | A second source can read another swap's ID token | Accepted |
 | [0039](0039-oauth2-can-exchange-a-token-before-caching-it.md) | OAuth2 can exchange a token before caching it | Accepted |
 | [0040](0040-header-filtering-is-allow-or-deny-never-both.md) | Header filtering is allow or deny, never both — and never touches wire framing | Accepted |
+| [0041](0041-llm-router-may-connect-to-a-mapped-origin.md) | The LLM router rewrites destination after allow; intercept may connect to a mapped origin | Accepted |
 
 ## Writing a new one
 

@@ -609,6 +609,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             body: BodyHandle::Empty,
             evidence: Evidence::new(),
+            llm_route: None,
         };
 
         filter().apply(&cx, &mut resp).await.unwrap();

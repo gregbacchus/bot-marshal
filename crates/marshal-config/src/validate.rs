@@ -48,6 +48,11 @@ pub fn validate(cfg: &Config) -> Vec<Diagnostic> {
     }
     for (name, bundle) in &cfg.transforms {
         check_request_headers(&format!("transforms.{name}"), &bundle.request_transforms, &mut out);
+        check_llm_router(
+            &format!("transforms.{name}.request_transforms.llm_router"),
+            &bundle.request_transforms.llm_router,
+            &mut out,
+        );
         check_header_filter(
             &format!("transforms.{name}.request_transforms.headers"),
             &bundle.request_transforms.headers,
@@ -204,6 +209,11 @@ fn check_profile(
     out: &mut Vec<Diagnostic>,
 ) {
     check_request_headers(at, &profile.request_transforms, out);
+    check_llm_router(
+        &format!("{at}.request_transforms.llm_router"),
+        &profile.request_transforms.llm_router,
+        out,
+    );
     check_header_filter(
         &format!("{at}.request_transforms.headers"),
         &profile.request_transforms.headers,
@@ -367,7 +377,8 @@ fn check_profile(
     if !profile.transforms.is_empty() {
         let has_inline_request = profile.request_transforms.headers.is_some()
             || !profile.request_transforms.set_headers.is_empty()
-            || !profile.request_transforms.secrets.is_empty();
+            || !profile.request_transforms.secrets.is_empty()
+            || profile.request_transforms.llm_router.is_some();
         let has_inline_response = profile.response_transforms.headers.is_some()
             || !profile.response_transforms.body.is_empty();
         if has_inline_request || has_inline_response {
@@ -382,6 +393,7 @@ fn check_profile(
 
         let mut request_headers_from: Option<&str> = None;
         let mut response_headers_from: Option<&str> = None;
+        let mut llm_router_from: Option<&str> = None;
         for name in &profile.transforms {
             let Some(bundle) = cfg.transforms.get(name) else {
                 out.push(Diagnostic {
@@ -419,7 +431,171 @@ fn check_profile(
                 }
                 response_headers_from.get_or_insert(name);
             }
+            if bundle.request_transforms.llm_router.is_some() {
+                if let Some(first) = llm_router_from {
+                    out.push(Diagnostic {
+                        severity: Severity::Error,
+                        location: format!("{at}.transforms"),
+                        message: format!(
+                            "both `{first}` and `{name}` set request_transforms.llm_router — \
+                             at most one bundle in the list may; combining two mapping tables \
+                             silently would be a guess, not a decision"
+                        ),
+                    });
+                }
+                llm_router_from.get_or_insert(name);
+            }
         }
+    }
+}
+
+fn check_llm_router(
+    location: &str,
+    spec: &Option<crate::model::LlmRouterConfig>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(spec) = spec else { return };
+    let valid_host = |host: &str| {
+        let ip_literal = host.parse::<std::net::IpAddr>().is_ok()
+            || host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .is_some_and(|h| h.parse::<std::net::IpAddr>().is_ok());
+        !host.trim().is_empty()
+            && host == host.trim()
+            && !host.contains("://")
+            && !host.contains('/')
+            && !host.chars().any(char::is_whitespace)
+            && (ip_literal || !host.contains(':'))
+    };
+    let valid_listen_path =
+        |path: &str| path.starts_with('/') && !path.contains('?') && !path.contains('#');
+    let valid_target_path = |path: &str| path.starts_with('/') && !path.contains('#');
+    let mut endpoints = std::collections::BTreeMap::<(String, String), usize>::new();
+    if spec.listen.is_empty() {
+        out.push(Diagnostic {
+            severity: Severity::Error,
+            location: location.into(),
+            message: "`listen` is empty — name at least one dialect and host the client \
+                      CONNECTs to"
+                .into(),
+        });
+    }
+    for (i, listen) in spec.listen.iter().enumerate() {
+        if listen.hosts.is_empty() {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{location}.listen[{i}].hosts"),
+                message: "empty — a listen entry needs at least one host".into(),
+            });
+        }
+        for (j, host) in listen.hosts.iter().enumerate() {
+            if !valid_host(host) {
+                out.push(Diagnostic {
+                    severity: Severity::Error,
+                    location: format!("{location}.listen[{i}].hosts[{j}]"),
+                    message: "must be a bare host name or IP literal, without a scheme, path, \
+                              port, or surrounding whitespace"
+                        .into(),
+                });
+            }
+        }
+        for (j, path) in listen.paths.iter().enumerate() {
+            if !valid_listen_path(path) {
+                out.push(Diagnostic {
+                    severity: Severity::Error,
+                    location: format!("{location}.listen[{i}].paths[{j}]"),
+                    message: "must be an absolute path without a query or fragment".into(),
+                });
+            }
+        }
+        let paths: Vec<&str> = if listen.paths.is_empty() {
+            vec![listen.dialect.default_chat_path()]
+        } else {
+            listen.paths.iter().map(String::as_str).collect()
+        };
+        for host in &listen.hosts {
+            for path in &paths {
+                let key = (host.trim_end_matches('.').to_ascii_lowercase(), (*path).to_owned());
+                if let Some(first) = endpoints.insert(key, i) {
+                    out.push(Diagnostic {
+                        severity: Severity::Error,
+                        location: format!("{location}.listen[{i}]"),
+                        message: format!(
+                            "duplicates a host/path endpoint already claimed by listen[{first}] — \
+                             the inbound dialect would be ambiguous"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    if spec.models.is_empty() {
+        out.push(Diagnostic {
+            severity: Severity::Error,
+            location: format!("{location}.models"),
+            message: "empty — map at least one inbound model name to an origin".into(),
+        });
+    }
+    for (name, target) in &spec.models {
+        let at = format!("{location}.models.{name}");
+        if name.trim().is_empty() || name != name.trim() {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{location}.models"),
+                message: "contains an empty model name or one with surrounding whitespace".into(),
+            });
+        }
+        if target.model.trim().is_empty() || target.model != target.model.trim() {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{at}.model"),
+                message: "must be non-empty and have no surrounding whitespace".into(),
+            });
+        }
+        if !valid_host(&target.host) {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{at}.host"),
+                message: "must be a bare host name or IP literal, without a scheme, path, \
+                          port, or surrounding whitespace"
+                    .into(),
+            });
+        }
+        if let Some(path) = &target.path
+            && !valid_target_path(path)
+        {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{at}.path"),
+                message: "must be an absolute path without a fragment".into(),
+            });
+        }
+        if target.port == 0 {
+            out.push(Diagnostic {
+                severity: Severity::Error,
+                location: format!("{at}.port"),
+                message: "port 0 is not a usable origin".into(),
+            });
+        }
+    }
+    if spec.max_request_bytes == 0 {
+        out.push(Diagnostic {
+            severity: Severity::Error,
+            location: format!("{location}.max_request_bytes"),
+            message: "must be greater than zero — the router buffers the JSON body up to this \
+                      cap"
+            .into(),
+        });
+    }
+    if spec.max_response_bytes == 0 {
+        out.push(Diagnostic {
+            severity: Severity::Error,
+            location: format!("{location}.max_response_bytes"),
+            message: "must be greater than zero — non-streaming JSON responses are buffered up \
+                      to this cap for dialect translation"
+                .into(),
+        });
     }
 }
 
@@ -743,6 +919,66 @@ mod tests {
                 && d.location == "profiles.p.request_transforms.set_headers.Content-Length"
                 && d.message.contains("managed by the proxy")
         }));
+    }
+
+    #[test]
+    fn llm_router_rejects_ambiguous_endpoints_and_non_origin_config_values() {
+        let profile: Profile = serde_yaml_ng::from_str(
+            r#"
+default_action: deny
+request_transforms:
+  llm_router:
+    listen:
+      - { dialect: openai, hosts: ["https://api.example.com"], paths: ["chat"] }
+      - { dialect: anthropic, hosts: ["API.EXAMPLE.COM"], paths: ["/v1/chat/completions"] }
+      - { dialect: openai, hosts: ["api.example.com"], paths: ["/v1/chat/completions"] }
+    models:
+      alias:
+        model: origin-model
+        dialect: anthropic
+        host: "origin.example.com/path"
+        path: "v1/messages"
+        port: 443
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = validate(&cfg_with(profile));
+        for location in [
+            "profiles.p.request_transforms.llm_router.listen[0].hosts[0]",
+            "profiles.p.request_transforms.llm_router.listen[0].paths[0]",
+            "profiles.p.request_transforms.llm_router.listen[2]",
+            "profiles.p.request_transforms.llm_router.models.alias.host",
+            "profiles.p.request_transforms.llm_router.models.alias.path",
+        ] {
+            assert!(
+                diagnostics.iter().any(|d| d.severity == Severity::Error && d.location == location),
+                "missing diagnostic for {location}: {diagnostics:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_complete_cross_dialect_llm_router_is_valid() {
+        let profile: Profile = serde_yaml_ng::from_str(
+            r#"
+default_action: deny
+request_transforms:
+  llm_router:
+    listen:
+      - { dialect: openai, hosts: ["api.openai.com"] }
+      - { dialect: anthropic, hosts: ["api.anthropic.com"] }
+    models:
+      fast: { model: "gpt-5-mini", dialect: openai, host: "api.openai.com" }
+      smart: { model: "claude-sonnet-4-5", dialect: anthropic, host: "api.anthropic.com" }
+"#,
+        )
+        .unwrap();
+
+        assert!(
+            !validate(&cfg_with(profile)).iter().any(|d| d.severity == Severity::Error),
+            "valid router config was rejected"
+        );
     }
 
     #[test]

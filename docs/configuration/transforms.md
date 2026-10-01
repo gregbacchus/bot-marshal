@@ -4,10 +4,21 @@ Transforms decide **how** an allowed request is rewritten. They run only after t
 [policy chain](policy-layers.md) has allowed, and the two directions are independent:
 
 * **`request_transforms`** rewrite a request on its way out — setting and filtering headers,
-  injecting a credential at the boundary so the agent never holds it.
+  routing an LLM model, injecting a credential at the boundary so the agent never holds it.
 * **`response_transforms`** rewrite what comes back — redacting a secret the upstream echoed,
   limiting a body that would overload the agent's context, compacting a body too large to be
   useful.
+
+## LLM routing and model mapping
+
+`request_transforms.llm_router` maps stable client-facing model aliases onto an origin host,
+path, model id and either the OpenAI Chat Completions or Anthropic Messages wire format. It can
+keep the dialect or translate in either direction, including streaming SSE and tool calls. The
+request half runs before secret injection; the paired response half translates back into the
+client's dialect.
+
+This transform has enough configuration and security consequences to warrant its own page:
+[LLM routing](llm-routing.md).
 
 ## Header transforms
 

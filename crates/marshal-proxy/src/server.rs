@@ -390,12 +390,20 @@ impl Server {
             return Ok(());
         }
 
-        let mut upstream = match self.guard.connect(&authority).await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = socks5::reply(&mut client, guard_reply(&e)).await;
-                self.emit_guard_failure(&attribution, &cx, &e, outcome.evidence, started).await;
-                return Ok(());
+        let intercepting = self.intercepts(&authority, &runtime);
+        let defer =
+            intercepting && mitm::defers_connect(&attribution.request_transforms, &authority.host);
+
+        let upstream = if defer {
+            None
+        } else {
+            match self.guard.connect(&authority).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    let _ = socks5::reply(&mut client, guard_reply(&e)).await;
+                    self.emit_guard_failure(&attribution, &cx, &e, outcome.evidence, started).await;
+                    return Ok(());
+                }
             }
         };
 
@@ -405,7 +413,7 @@ impl Server {
         // host is a deliberate `tls.passthrough` exception, in which case the plain relay
         // still runs the SNI cross-check. A SOCKS5 tunnel is exactly as capable of the
         // shared-IP/SNI trick as an HTTP CONNECT tunnel, so it gets exactly the same defence.
-        if self.intercepts(&authority, &runtime) {
+        if intercepting {
             self.emit_audit(
                 &attribution,
                 &cx,
@@ -418,21 +426,7 @@ impl Server {
             )
             .await;
 
-            let handler = Arc::new(MitmHandler {
-                chain: Arc::clone(&attribution.chain),
-                audit: Arc::clone(&self.audit),
-                authority: authority.clone(),
-                ingress: cx.ingress,
-                identity: cx.identity.clone(),
-                profile: attribution.resolved.profile_label(),
-                client_addr: peer,
-                request_transforms: attribution.request_transforms.clone(),
-                responders: attribution.responders.clone(),
-                stats: Arc::clone(&self.stats),
-                response_transforms: attribution.response_transforms.clone(),
-                attributed: attribution.resolved.attributed,
-                resolver: attribution.resolved.resolver.clone(),
-            });
+            let handler = self.mitm_handler(&attribution, &cx, peer, authority.clone());
 
             if let Err(e) =
                 mitm::intercept(client.into_inner(), upstream, Arc::clone(&runtime.tls), handler)
@@ -443,6 +437,8 @@ impl Server {
             }
             return Ok(());
         }
+
+        let mut upstream = upstream.expect("passthrough always connects before relaying");
 
         self.emit_audit(
             &attribution,
@@ -667,18 +663,9 @@ impl Server {
             // Unconditional, not gated on a transform being configured: a proxy credential
             // must never reach the upstream regardless of whether the matched profile
             // happens to declare any request_transforms.
+            mitm::set_host_header(&mut cx.headers, &cx.authority);
             mitm::strip_hop_by_hop(&mut cx.headers, false);
         }
-
-        let mut upstream = match self.guard.connect(&request.authority).await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ =
-                    httpfront::write_status(&mut client, "502 Bad Gateway", &e.to_string()).await;
-                self.emit_guard_failure(&attribution, &cx, &e, outcome.evidence, started).await;
-                return Ok(());
-            }
-        };
 
         if request.is_connect {
             client
@@ -711,21 +698,29 @@ impl Server {
                 )
                 .await;
 
-                let handler = Arc::new(MitmHandler {
-                    chain: Arc::clone(&attribution.chain),
-                    audit: Arc::clone(&self.audit),
-                    authority: authority.clone(),
-                    ingress: cx.ingress,
-                    identity: cx.identity.clone(),
-                    profile: attribution.resolved.profile_label(),
-                    client_addr: peer,
-                    request_transforms: attribution.request_transforms.clone(),
-                    responders: attribution.responders.clone(),
-                    stats: Arc::clone(&self.stats),
-                    response_transforms: attribution.response_transforms.clone(),
-                    attributed: attribution.resolved.attributed,
-                    resolver: attribution.resolved.resolver.clone(),
-                });
+                let defer = mitm::defers_connect(&attribution.request_transforms, &authority.host);
+                let upstream = if defer {
+                    None
+                } else {
+                    match self.guard.connect(&authority).await {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            tracing::debug!(peer = %peer, authority = %authority, error = %e,
+                                "origin connect after CONNECT failed");
+                            self.emit_guard_failure(
+                                &attribution,
+                                &cx,
+                                &e,
+                                Evidence::new(),
+                                started,
+                            )
+                            .await;
+                            return Ok(());
+                        }
+                    }
+                };
+
+                let handler = self.mitm_handler(&attribution, &cx, peer, authority.clone());
 
                 if let Err(e) = mitm::intercept(stream, upstream, engine, handler).await {
                     tracing::debug!(peer = %peer, authority = %authority, error = %e,
@@ -733,6 +728,14 @@ impl Server {
                 }
                 return Ok(());
             }
+
+            let mut upstream = match self.guard.connect(&authority).await {
+                Ok(s) => s,
+                Err(e) => {
+                    self.emit_guard_failure(&attribution, &cx, &e, outcome.evidence, started).await;
+                    return Ok(());
+                }
+            };
 
             // Not intercepting. Cross-check the TLS SNI against the authority the client
             // asked us to allow: a tunnel opened to an allowlisted host that then presents
@@ -775,14 +778,23 @@ impl Server {
                 .await;
             }
             return Ok(());
-        } else {
-            // Always rebuilt from `cx.headers`, never replayed from the raw bytes the client
-            // sent: hop-by-hop headers (including `Proxy-Authorization`) were stripped above
-            // regardless of whether a transform is configured, and replaying the original
-            // bytes here would put them back.
-            let head = transformed_origin_form(&request, &cx);
-            upstream.write_all(&head).await?;
         }
+
+        let mut upstream = match self.guard.connect(&cx.authority).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ =
+                    httpfront::write_status(&mut client, "502 Bad Gateway", &e.to_string()).await;
+                self.emit_guard_failure(&attribution, &cx, &e, outcome.evidence, started).await;
+                return Ok(());
+            }
+        };
+        // Always rebuilt from `cx.headers`, never replayed from the raw bytes the client
+        // sent: hop-by-hop headers (including `Proxy-Authorization`) were stripped above
+        // regardless of whether a transform is configured, and replaying the original
+        // bytes here would put them back.
+        let head = transformed_origin_form(&request, &cx);
+        upstream.write_all(&head).await?;
 
         self.emit_audit(
             &attribution,
@@ -797,6 +809,33 @@ impl Server {
         .await;
         let _ = tunnel::relay(&mut client, &mut upstream).await;
         Ok(())
+    }
+
+    fn mitm_handler(
+        &self,
+        attribution: &Attribution,
+        cx: &RequestContext,
+        peer: std::net::SocketAddr,
+        authority: Authority,
+    ) -> Arc<MitmHandler> {
+        let runtime = self.runtime.load();
+        Arc::new(MitmHandler {
+            chain: Arc::clone(&attribution.chain),
+            audit: Arc::clone(&self.audit),
+            authority,
+            ingress: cx.ingress,
+            identity: cx.identity.clone(),
+            profile: attribution.resolved.profile_label(),
+            client_addr: peer,
+            request_transforms: attribution.request_transforms.clone(),
+            responders: attribution.responders.clone(),
+            stats: Arc::clone(&self.stats),
+            response_transforms: attribution.response_transforms.clone(),
+            attributed: attribution.resolved.attributed,
+            resolver: attribution.resolved.resolver.clone(),
+            guard: Arc::clone(&self.guard),
+            tls: Arc::clone(&runtime.tls),
+        })
     }
 
     /// Whether this destination will have its TLS intercepted.
@@ -842,6 +881,7 @@ impl Server {
             headers: http::HeaderMap::new(),
             body: BodyHandle::Empty,
             evidence: Evidence::new(),
+            llm_route: None,
         }
     }
 
@@ -1028,6 +1068,7 @@ mod tests {
             headers,
             body: BodyHandle::Empty,
             evidence: Evidence::new(),
+            llm_route: None,
         }
     }
 
@@ -1044,6 +1085,20 @@ mod tests {
         assert!(out.contains("host: example.com\r\n"));
         assert!(out.contains("x-k: v\r\n"));
         assert!(out.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_retargeted_plain_request_serialises_the_mapped_host_header() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("host", "client-facing.example".parse().unwrap());
+        let req = test_request(http::HeaderMap::new());
+        let mut cx = test_context(headers);
+        cx.authority = Authority { host: "mapped-origin.example".into(), port: 8443 };
+
+        mitm::set_host_header(&mut cx.headers, &cx.authority);
+        let out = String::from_utf8(transformed_origin_form(&req, &cx)).unwrap();
+        assert!(out.contains("host: mapped-origin.example:8443\r\n"), "{out}");
+        assert!(!out.contains("client-facing.example"), "{out}");
     }
 
     #[test]

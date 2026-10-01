@@ -25,13 +25,13 @@ boundary has to understand HTTP, not just IPs.
                                  DENY ─► 403│ ALLOW
                                             ▼
                     ┌──────── request_transforms (decide HOW) ─────┐
-                    │ header filter → secret injection → rewrites  │
+                    │ header filter → LLM route → secret injection │
                     └───────────────────────┬──────────────────────┘
                                             ▼
                             upstream guard (post-resolution IP check)
                                             ▼
                     ┌──────── response chain + response_transforms ────────┐
-                    │ size caps → MCP tools/list filter → redaction        │
+                    │ LLM translate → size caps → MCP filter → redaction   │
                     └───────────────────────┬──────────────────────────────┘
                                             ▼
                                        audit record
@@ -85,14 +85,16 @@ Deciding *whether* is separate from deciding *how*, and the two directions are s
 each other. [Transforms](configuration/transforms.md) run only after the chain has allowed:
 
 * **`request_transforms`** rewrite an allowed request on its way out — header filtering,
-  swapping a placeholder for a real credential so the agent never holds it.
+  [LLM model routing](configuration/llm-routing.md), swapping a placeholder for a real
+  credential so the agent never holds it.
 * **Responders** are the third thing that can happen to an allowed request. A
   [`RequestResponder`](../crates/marshal-core/src/policy.rs) runs last, on the finished request,
   and may **answer** it rather than let it reach the upstream — used by in-band OAuth2 capture
   to complete a protocol exchange marshal has taken over. Every synthesized response carries
   `proxy-agent: bot-marshal`. See [ADR-0031](adr/0031-a-responder-may-answer-a-request.md).
 * **`response_transforms`** rewrite what comes back — redacting a secret the upstream echoed,
-  summarising or compacting a body too large to be useful to an agent.
+  translating a routed LLM response, summarising or compacting a body too large to be useful
+  to an agent.
 
 ## Bodies stream by default
 
@@ -100,7 +102,8 @@ A transform declares whether it needs the body buffered, and that declaration is
 rather than advisory: bodies stream by default, and a transform that rewrites content cannot
 run over a stream. Declaring a body transform is therefore a statement that the responses it
 applies to are no longer streamable, so `marshal config check` warns and the profile should
-scope it away from SSE and WebSocket endpoints.
+scope it away from SSE and WebSocket endpoints. The LLM router is route-aware: it buffers only
+a matched, non-streaming JSON response, and translates SSE one complete event at a time.
 
 This is why interception does not break streaming: SSE arrives event by event, request bodies
 forward as they are written rather than being collected first, protocol upgrades become raw

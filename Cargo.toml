@@ -25,6 +25,7 @@ marshal-proxy = { path = "crates/marshal-proxy" }
 marshal-dns = { path = "crates/marshal-dns" }
 marshal-audit = { path = "crates/marshal-audit" }
 marshal-http = { path = "crates/marshal-http" }
+marshal-llm = { path = "crates/marshal-llm" }
 
 # runtime
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "io-std", "macros", "signal", "time", "sync", "fs"] }

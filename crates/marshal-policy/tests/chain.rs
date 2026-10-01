@@ -29,6 +29,7 @@ fn request(host: &str) -> RequestContext {
         headers: http::HeaderMap::new(),
         body: BodyHandle::Empty,
         evidence: Evidence::new(),
+        llm_route: None,
     }
 }
 
@@ -211,6 +212,7 @@ profile:
                 headers: Some(HeaderFilterSpec { allow: vec!["accept".into()], deny: vec![] }),
                 set_headers: Default::default(),
                 secrets: vec![],
+                llm_router: None,
             },
             response_transforms: ResponseTransforms {
                 headers: Some(HeaderFilterSpec {

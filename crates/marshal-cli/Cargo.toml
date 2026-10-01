@@ -33,6 +33,7 @@ hickory-resolver.workspace = true
 marshal-judge.workspace = true
 marshal-proxy.workspace = true
 marshal-http.workspace = true
+marshal-llm.workspace = true
 async-trait.workspace = true
 rustls.workspace = true
 marshal-audit.workspace = true

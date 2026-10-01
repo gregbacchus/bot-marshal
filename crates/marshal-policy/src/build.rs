@@ -181,6 +181,9 @@ pub fn resolve_profile(
             }
             request.set_headers.extend(bundle.request_transforms.set_headers.clone());
             request.secrets.extend(bundle.request_transforms.secrets.iter().cloned());
+            if bundle.request_transforms.llm_router.is_some() {
+                request.llm_router = bundle.request_transforms.llm_router.clone();
+            }
             if bundle.response_transforms.headers.is_some() {
                 response.headers = bundle.response_transforms.headers.clone();
             }

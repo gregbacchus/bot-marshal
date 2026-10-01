@@ -63,6 +63,8 @@ proposing a change to it.
 * **Identity is derived from the connection, never asserted by the client.** ([ADR-0009](docs/adr/0009-identity-is-derived-from-the-connection.md))
 * **Resolve once, check every address, connect to the checked address.** ([ADR-0010](docs/adr/0010-resolve-once-connect-to-the-checked-address.md)) Never re-resolve
   between the upstream guard's check and the connect — that is the DNS-rebinding hole.
+* **An LLM model map may retarget only after policy allows, and the mapped socket still goes
+  through the upstream guard.** ([ADR-0041](docs/adr/0041-llm-router-may-connect-to-a-mapped-origin.md)) Policy judges the client-facing host/model; the operator-owned map authorizes the origin.
 * **Secrets never reach a log, an audit record, or the judge.** ([ADR-0011](docs/adr/0011-secrets-are-injected-at-the-boundary.md), [ADR-0012](docs/adr/0012-the-judge-sees-data-never-instructions.md)) The judge sees method, host,
   path and header *names* only. The `Redactor` enforces this at the emission boundary, and its
   set is **not** sealed at startup ([ADR-0029](docs/adr/0029-the-redaction-set-is-learned-at-runtime.md)): any code that obtains a credential at runtime must
