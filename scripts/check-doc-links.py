@@ -15,7 +15,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Everything that participates in the cross-linked doc set.
-FILES = sorted(ROOT.glob("docs/**/*.md")) + [ROOT / "AGENTS.md", ROOT / "README.md"]
+FILES = (sorted(ROOT.glob("docs/**/*.md")) + sorted(ROOT.glob("examples/**/*.md"))
+         + [ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "site/README.md"])
 
 
 def slug(heading: str) -> str:
@@ -39,10 +40,10 @@ def main() -> int:
     for path, _ in anchors.items():
         for match in re.finditer(r"\[[^\]]*\]\(([^)#\s]*)(#[^)\s]*)?\)", path.read_text()):
             target, anchor = match.group(1), (match.group(2) or "")[1:]
-            # A bare `#anchor` link, or an external URL: not ours to check.
-            if not target or target.startswith(("http://", "https://", "mailto:")):
+            # External URLs are outside this check. A bare anchor targets this page.
+            if target.startswith(("http://", "https://", "mailto:")):
                 continue
-            resolved = (path.parent / target).resolve()
+            resolved = (path.parent / target).resolve() if target else path.resolve()
             rel = path.relative_to(ROOT)
             if not resolved.exists():
                 problems.append(f"{rel}: `{target}` does not exist")

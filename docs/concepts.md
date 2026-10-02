@@ -15,7 +15,7 @@ boundary has to understand HTTP, not just IPs.
 ```
                  ┌── explicit: CONNECT / SOCKS5 ──┐
  agent traffic ──┤                                ├──► identity ──► profile
-                 └── dns: A record → proxy IP ────┘                    │
+                 └── Unix HTTP proxy forwarder ───┘                    │
                                                                        ▼
                     ┌──────────── policy chain (decides WHETHER) ───────────┐
                     │ denylist → allowlist → rules → mcp → dlp → judge      │
@@ -31,26 +31,28 @@ boundary has to understand HTTP, not just IPs.
                             upstream guard (post-resolution IP check)
                                             ▼
                     ┌──────── response chain + response_transforms ────────┐
-                    │ LLM translate → size caps → MCP filter → redaction   │
+                    │ LLM translate → size caps → MCP filter               │
                     └───────────────────────┬──────────────────────────────┘
                                             ▼
                                        audit record
 ```
 
-Both [capture modes](capture.md) converge on one request representation, and everything
-downstream is mode-agnostic. That convergence is the most important structural property of the
-design: policy is written once, not once per way traffic arrived.
+The HTTP proxy and SOCKS5 frontends converge on one request representation, so policy is
+written once. The optional DNS server supplies answers but does not provide direct HTTP/TLS
+ingress; see [Capture](capture.md#dns).
 
 ## Identity selects the profile
 
 Which policy applies depends on *which agent* is connecting. Identity is **derived from the
-connection, never asserted by the client** — DNS capture gives a client no channel to present a
-credential even if you wanted it to.
+connection rather than trusted solely because the client claims it**. Resolver strength
+depends on the transport and deployment; client-supplied proxy credentials are the weakest option.
 
 [Resolvers](configuration/identity.md) are tried in order and are not equal in strength: a
 kernel-supplied uid cannot be forged, a `Proxy-Authorization` header trivially can. Anything
-unresolved gets a synthetic identity and the most restrictive profile, flagged
-`attributed: false` in every audit record — never a silent inheritance of a permissive one.
+unresolved gets a synthetic identity and the configured fallback profile, flagged
+`attributed: false` in every audit record. Keep that fallback restrictive: marshal does not
+compare profiles or enforce that it is the least permissive. It can also be redirected to a
+named profile, or unattributed traffic can be refused outright.
 
 ## Profiles hold the policy
 
@@ -85,16 +87,17 @@ Deciding *whether* is separate from deciding *how*, and the two directions are s
 each other. [Transforms](configuration/transforms.md) run only after the chain has allowed:
 
 * **`request_transforms`** rewrite an allowed request on its way out — header filtering,
-  [LLM model routing](configuration/llm-routing.md), swapping a placeholder for a real
-  credential so the agent never holds it.
+  [LLM model routing](configuration/llm-routing.md), and unconditional credential injection.
+  The client needs no placeholder; keep the real credential outside its environment and
+  accessible filesystem.
 * **Responders** are the third thing that can happen to an allowed request. A
   [`RequestResponder`](../crates/marshal-core/src/policy.rs) runs last, on the finished request,
   and may **answer** it rather than let it reach the upstream — used by in-band OAuth2 capture
   to complete a protocol exchange marshal has taken over. Every synthesized response carries
   `proxy-agent: bot-marshal`. See [ADR-0031](adr/0031-a-responder-may-answer-a-request.md).
-* **`response_transforms`** rewrite what comes back — redacting a secret the upstream echoed,
-  translating a routed LLM response, summarising or compacting a body too large to be useful
-  to an agent.
+* **`response_transforms`** rewrite what comes back — translating a routed LLM response or applying a response size
+  limit. Response-body redaction, summarization and compaction are declared config shapes
+  but are not implemented; log/audit credential redaction is a separate emission boundary.
 
 ## Bodies stream by default
 
@@ -138,7 +141,7 @@ where `rules` and `dlp` make the real call on the actual request.
 Otherwise the natural configuration is impossible — a short-circuiting chain means an
 allowlist with `on_match: allow` terminates before those layers run, while `on_match: pass`
 leaves nothing to permit the tunnel. Nothing reaches the upstream until a request-level
-verdict allows it. The only way a connection is *not* eventually judged on the real request is
+verdict allows it. For intercepted TLS, the exception to real-request evaluation is
 `tls.passthrough`, where the CONNECT verdict is the sole decision point and `default_action`
 governs it strictly — the same trade a certificate-pinned client always makes by opting out
 of interception.

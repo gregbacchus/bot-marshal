@@ -35,10 +35,8 @@ package manager and version manager.
 Unlike a bundle, whose worst case is an over-broad network allow, a bind group that lists too
 much or too widely-shared a path grants **read-write** filesystem access to every profile that
 references it — the same read-write bind `--bind` already grants, since a bind group is sugar
-over `--bind`'s bind list, not a new capability or a new trust tier. `marshal config check`
-and `marshal run --dry-run` both resolve a bind group to its concrete path list rather than
-leaving `bind_groups: [claude]` opaque in review — treat that resolved list as what you are
-actually reviewing, not the name.
+over `--bind`'s bind list, not a new capability or a new trust tier. `marshal config check` validates group references; `marshal run --dry-run` expands and prints
+the concrete paths. Review that printed list rather than just the group name.
 
 Only `--isolation netns` has anything to bind into — `cgroup` and `none` ignore
 `sandbox.bind_groups`/`sandbox.extra_binds`/`--bind`/`--bind-group` entirely, the same way they

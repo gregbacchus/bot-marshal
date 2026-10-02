@@ -54,7 +54,8 @@ sudo -u bot-marshal marshal --config /etc/bot-marshal/config.yaml ca init
 ### `state_dir`
 
 `/var/lib/bot-marshal` is also where `state_dir` belongs — the one directory marshal *writes*
-rather than reads. Today it holds OAuth2 refresh tokens obtained by
+rather than reads. Persistent credential state lives in the configured subdirectory, including OAuth2 refresh
+tokens obtained by
 [`marshal secrets oauth login`](cli.md#marshal-secrets-oauth-login-name---open---timeout-duration).
 
 Marshal creates `<state_dir>/oauth/` mode `0700` and each grant file `0600`, and **refuses to
@@ -72,6 +73,24 @@ Two operational consequences:
 
 `marshal secrets oauth status` reports which credentials are enrolled and how long ago, which is
 the check to run after a restore.
+
+## Keep proxy credentials outside agent access
+
+Run the agent as a different account from the proxy when credentials must survive an agent
+compromise. Unix mode bits protect nothing from another process running as the same owner.
+Keep the CA key, OAuth state and secret files out of the agent's workspace and extra bind
+paths; the sandbox's read-only system mounts can still expose files that its user can read.
+Keep real tokens out of the shell environment used to launch agents, especially with
+`--isolation none`, which inherits it. The env-file overlay is not inherited, but an agent
+able to read the env file can still obtain its contents.
+
+The example socket under `/var/lib/bot-marshal` is inside a `0700` directory and is reachable
+only by the service user. For cross-account Unix access, place it in a separate controlled
+runtime directory and arrange its directory/socket permissions for the intended agent users;
+do not open the credential-state directory. Marshal creates the socket using normal process
+permissions, not a dedicated socket-authorization configuration. Alternatively use the TCP
+explicit proxy with an appropriate identity resolver and network access controls. Verify the
+actual connection and audit attribution as that agent account.
 
 ## systemd unit
 
@@ -127,6 +146,8 @@ Under systemd, `EnvironmentFile=` and the [env file](configuration/README.md#the
 the same job, and the environment wins where both set a variable. Pick one — two places to look
 is how a rotated token ends up applied in the one that loses. The env file is read once at
 startup, so either way a change needs a restart, not `POST /v1/reload`.
+
+See [Operations](operations.md#what-reload-changes) for settings that require restart.
 
 ## The service-account gotcha
 

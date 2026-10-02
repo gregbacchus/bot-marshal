@@ -21,7 +21,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0008](0008-interception-is-mandatory.md) | TLS interception is mandatory, not a fallback | Accepted |
 | [0009](0009-identity-is-derived-from-the-connection.md) | Identity is derived from the connection, never asserted | Accepted |
 | [0010](0010-resolve-once-connect-to-the-checked-address.md) | Resolve once, check every address, connect to the checked one | Accepted |
-| [0011](0011-secrets-are-injected-at-the-boundary.md) | Secrets are injected at the boundary, not held by the agent | Accepted |
+| [0011](0011-secrets-are-injected-at-the-boundary.md) | Secrets are injected at the boundary, not held by the agent | Accepted; placeholder model superseded by [0027](0027-secret-injection-is-unconditional-only.md) |
 | [0012](0012-the-judge-sees-data-never-instructions.md) | The judge sees a reduced request as data, never as instruction | Accepted |
 | [0013](0013-mcp-denials-are-protocol-errors.md) | MCP denials are protocol errors, and `tools/list` is filtered | Accepted |
 | [0014](0014-netns-isolation-without-cap-net-admin.md) | Network-namespace isolation without `CAP_NET_ADMIN` | Accepted |

@@ -19,10 +19,12 @@ const REPO = 'https://github.com/gregbacchus/bot-marshal/blob/main';
 // search results, so a missing one is a visible gap rather than a nicety.
 const DESCRIPTIONS = {
   'overview': 'Default-deny egress control for AI agents: policy, credential injection, and a complete audit trail.',
-  'getting-started': 'Build it, write a minimal config, generate a CA, and put a request through it.',
+  'getting-started': 'Install it, write a minimal config, generate a CA, and put a request through it.',
   'concepts': 'How a request travels from capture through identity, policy and transforms.',
   'cli': 'Every subcommand and global flag.',
-  'capture': 'Explicit proxy and DNS interception.',
+  'capture': 'Explicit proxy ingress, the DNS resolver, and upstream destination checks.',
+  'troubleshooting': 'Diagnose startup, trust, attribution, policy and OAuth failures.',
+  'configuration/llm-routing': 'Model aliases and OpenAI/Anthropic JSON and SSE routing.',
   'observability': 'Logs, the audit trail, and what to watch.',
   'operations': 'The management API, hot reload, and rolling out default-deny.',
   'production': 'Service layout, systemd, and file permissions.',

@@ -1,6 +1,6 @@
 # ADR 0011: Secrets are injected at the boundary, not held by the agent
 
-* **Status:** Accepted
+* **Status:** Accepted — placeholder model superseded by [ADR-0027](0027-secret-injection-is-unconditional-only.md)
 * **Date:** 2026-09-02
 
 ## Context

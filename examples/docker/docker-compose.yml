@@ -1,12 +1,5 @@
-# An agent captured without being configured.
-#
-# The client container sets no proxy environment variables and knows nothing about
-# bot-marshal. Its resolver points at the proxy, so every hostname resolves to the proxy's
-# address and connections arrive there on their own.
-#
-# Identity comes from the source address: each container has its own, and the `source_ip`
-# resolver maps it to a profile. That is why they are given static addresses rather than
-# whatever the network hands out.
+# Explicit proxy example: two clients, attributed by static source address.
+# Proxy variables route cooperative clients; network policy must enforce containment.
 
 services:
   proxy:
@@ -16,9 +9,13 @@ services:
     command: ["serve", "--config", "/etc/marshal/marshal.yaml"]
     environment:
       MARSHAL_LOG: info
+      MARSHAL_LOG_SINK: stdout
+      MARSHAL_LOG_FORMAT: json
+      MARSHAL_LOG_DETAIL: audit
     volumes:
       - ./marshal.yaml:/etc/marshal/marshal.yaml:ro
-      - ./ca:/etc/marshal/ca
+      - ./profiles:/etc/marshal/profiles:ro
+      - ./ca:/etc/marshal/ca:ro
     networks:
       demo:
         ipv4_address: 172.28.0.2
@@ -27,13 +24,15 @@ services:
   agent-a:
     image: curlimages/curl:latest
     depends_on: [proxy]
-    dns: [172.28.0.2]
-    # No *_PROXY variables anywhere: capture comes from DNS, not cooperation.
     volumes:
-      - ./ca:/ca:ro
+      - ./ca/ca.crt:/ca/ca.crt:ro
     environment:
       CURL_CA_BUNDLE: /ca/ca.crt
-    command: ["sleep", "infinity"]
+      HTTP_PROXY: http://172.28.0.2:8080
+      HTTPS_PROXY: http://172.28.0.2:8080
+      NO_PROXY: ""
+    entrypoint: ["sleep"]
+    command: ["infinity"]
     networks:
       demo:
         ipv4_address: 172.28.0.10
@@ -42,12 +41,15 @@ services:
   agent-b:
     image: curlimages/curl:latest
     depends_on: [proxy]
-    dns: [172.28.0.2]
     volumes:
-      - ./ca:/ca:ro
+      - ./ca/ca.crt:/ca/ca.crt:ro
     environment:
       CURL_CA_BUNDLE: /ca/ca.crt
-    command: ["sleep", "infinity"]
+      HTTP_PROXY: http://172.28.0.2:8080
+      HTTPS_PROXY: http://172.28.0.2:8080
+      NO_PROXY: ""
+    entrypoint: ["sleep"]
+    command: ["infinity"]
     networks:
       demo:
         ipv4_address: 172.28.0.11

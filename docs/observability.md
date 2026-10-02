@@ -49,7 +49,7 @@ Every field lands as a real, structured journal field (`identity` → `F_IDENTIT
 ```bash
 journalctl -u bot-marshal -f                                       # follow, human-readable (systemd service)
 journalctl -u bot-marshal -o json -f | jq -c 'select(.TARGET=="access")'
-journalctl -u bot-marshal FIELD=F_HOST=api.github.com               # everything for one host
+journalctl -u bot-marshal F_HOST=api.github.com               # everything for one host
 ```
 
 `-u bot-marshal` only works when `marshal` is running as the `bot-marshal` systemd unit
@@ -147,9 +147,11 @@ the record says so in `reason`:
               "message": "marshal completed this OAuth2 exchange itself ..." } }
 ```
 
-`reason.code` is the field to key on. Today `oauth2_terminated` is the only one, emitted when
-[in-band capture](configuration/oauth2.md#in-band-capture) answers a token request rather
-than forwarding it. Every such response also carries `proxy-agent: bot-marshal` on the wire.
+`reason.code` identifies the answer: `oauth2_terminated` is emitted when
+[in-band capture](configuration/oauth2.md#in-band-capture) answers a token request;
+`model_catalog` identifies the [LLM router](configuration/llm-routing.md) answering model
+discovery. These allowed responses do not imply an upstream request was forwarded.
+Synthesized responses carry `proxy-agent: bot-marshal` on the wire.
 
 ### OAuth2 log lines
 

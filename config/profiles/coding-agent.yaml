@@ -1,6 +1,6 @@
-# The intended shape, and not yet runnable: `dlp`, `rules` and `judge` arrive in M3 and
-# M4.5. Starting with this profile fails loudly rather than silently running a chain more
-# permissive than the one written here.
+# Reference-only coding-agent profile: policy layers are implemented, but response `redact`
+# is not. `serve` refuses this profile even with its judge API credential configured.
+# Use docs/getting-started.md for a runnable minimal configuration.
 default_action: deny
 policy:
   - layer: denylist

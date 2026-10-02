@@ -1,8 +1,8 @@
 # Identity
 
 Which policy applies depends on *which agent* is connecting. Identity is derived from the
-connection rather than asserted by the client — DNS [capture](../capture.md) gives a client no
-way to present a credential.
+connection rather than asserted by the client. Choose a resolver whose trust assumptions
+match your [capture and containment setup](../capture.md).
 
 ## Resolvers are not equal
 
@@ -63,7 +63,7 @@ identities:
           profile: coding-agent
 
   unidentified:                       # nothing matched — falls through to the base config's
-    action: allow_with_profile        # embedded `profile:` (the most restrictive one) by
+    action: allow_with_profile        # embedded `profile:` (keep it restrictive) by
                                       # default; or `deny`, for a hard-fail posture
 ```
 
@@ -112,14 +112,17 @@ Every audit record carries the resolved `identity`, which `resolver` matched, an
 `attributed: false` when none did. That's what makes `attributed: false` a hard signal rather
 than noise: it means every resolver missed and the request got the fallback profile.
 
-Anything unresolved gets a synthetic identity, the embedded (most restrictive) profile, and
-`attributed: false` — never a silent inheritance of a permissive one.
+Anything unresolved gets a synthetic identity, the configured fallback profile, and
+`attributed: false`. The embedded profile is the default fallback, but
+`identities.unidentified.profile` or `serve --profile` can select a named one. Restrictiveness
+is an operator choice, not a comparison marshal performs between profiles.
 
 ## `SO_PEERCRED` and the Unix listener
 
 ```yaml
 listeners:
   explicit:
+    listen: "127.0.0.1:8080"
     unix_socket: "/run/user/1000/marshal.sock"
 ```
 

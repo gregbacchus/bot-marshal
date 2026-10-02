@@ -51,7 +51,7 @@ non-Turing-complete, so an expression cannot hang the request path.
 ```yaml
 - layer: rules
   expressions:
-    - when: 'req.method in ["GET", "HEAD"] && ev.facts["domain.bundle"] == "github"'
+    - when: 'req.method in ["GET", "HEAD"] && "domain.bundle" in ev.facts && ev.facts["domain.bundle"] == "github"'
       verdict: allow
     - when: 'req.method in ["POST", "PATCH", "DELETE"]'
       verdict: pass
@@ -62,6 +62,36 @@ non-Turing-complete, so an expression cannot hang the request path.
 `req` carries method, host, path and header names. `ev` carries the facts and flags earlier
 layers contributed. `annotate` adds to that evidence without deciding, which is how a cheap
 layer marks something for an expensive one to reason over.
+
+### CEL inputs and evaluation
+
+| value | type | meaning |
+|---|---|---|
+| `req.method` | string | HTTP method |
+| `req.host` | string | client-facing destination hostname |
+| `req.port` | integer | destination port |
+| `req.path` | string | URI path, without query |
+| `req.has_query` | boolean | whether a query exists, without its contents |
+| `req.headers` | list of strings | lowercase header names, not values |
+| `ev.facts` | map | accumulated layer facts |
+| `ev.flags` | list of strings | accumulated flags |
+
+Rules are tested in list order. A matching `allow` or `deny` ends evaluation; a matching
+`pass` adds its annotation and continues to the next expression. If none terminates, the
+layer passes. Guard access to optional facts with a membership check before indexing:
+
+```yaml
+- layer: rules
+  expressions:
+    - when: '"domain.bundle" in ev.facts && ev.facts["domain.bundle"] == "github" && req.method == "GET"'
+      verdict: allow
+```
+
+Malformed expressions fail when the chain is built. An evaluation error or a non-boolean
+result refuses the request; it is not treated as a non-match. `config check` validates the
+configuration model but does not compile the policy chain, so also start `serve` before
+assuming an expression is usable. CEL's bounded language avoids general-purpose loops;
+expressions still consume CPU on the request path.
 
 ## `mcp`
 
@@ -90,6 +120,42 @@ error is something an LLM-driven agent retries and works around, whereas a tool 
 produces no intent at all. Filtering works on JSON responses and on SSE, and the SSE path
 rewrites event by event rather than buffering, so MCP's streamable transport keeps streaming.
 
+### MCP fields and constraints
+
+| field | default | meaning |
+|---|---|---|
+| `max_body_bytes` | 1 MiB | request inspection and tools-list response cap |
+| `servers` | `[]` | server scopes and permitted tools |
+| `servers[].name` | unset | optional descriptive name |
+| `servers[].rules` | `[]` | host patterns or CIDRs matching that server |
+| `servers[].tools` | `[]` | permitted tool-name globs and argument constraints |
+| `tools[].when` | `[]` | constraints; all must hold for this tool entry |
+
+Each constraint has a dotted `path` into the arguments and one or more checks: `equals`
+(JSON equality), `in` (a list of permitted JSON values), or `matches` (a regular expression on
+a string). A missing argument fails a constraint. Checks on one constraint combine; separate
+tool entries can provide alternative ways to permit the same tool.
+
+```yaml
+- layer: mcp
+  max_body_bytes: 1048576
+  servers:
+    - name: repository-tools
+      rules: [{ host: "mcp.example.com" }]
+      tools:
+        - name: create_issue
+          when:
+            - { path: owner, in: ["example-org", "example-team"] }
+            - { path: "repo.name", matches: "^public-" }
+```
+
+A tool passing MCP policy still needs a later `allow` or `default_action: allow`; the MCP
+layer passes accepted calls rather than granting all egress. Keep an allowlist before it set
+to `on_match: pass`, or that allowlist short-circuits tool checking. Other JSON-RPC methods
+and non-JSON-RPC requests pass through this layer and remain subject to the rest of the chain.
+Oversize governed requests are refused; JSON tools-list responses are bounded, and SSE lists
+are rewritten event by event.
+
 ## `dlp`
 
 The inverse of secret injection: catches a real credential the agent obtained some other way
@@ -107,6 +173,29 @@ and is trying to send *out* — something destination filtering cannot see.
 Scanning a body means requests this layer applies to **stop streaming**, which is why the cap
 and the oversize rule are explicit rather than defaulted silently. `on_oversize` chooses
 between refusing and forwarding unscanned; there is no silent truncation.
+
+### DLP fields and limitations
+
+| field | default | meaning |
+|---|---|---|
+| `scan_request` | `false` | buffer and scan the UTF-8 request body |
+| `scan_response` | `false` | declared schema field; currently not implemented and does not enable response scanning |
+| `patterns` | `[]` | named built-in detectors; no configured patterns means no pattern matches |
+| `on_match` | `deny` | `deny`, `allow` or `pass`; `allow` terminates the chain |
+| `annotate.flags` | `[]` | flags added to passed evidence when a pattern matches |
+| `max_body_bytes` | 1 MiB | request buffering cap |
+| `on_oversize` | `deny` | `deny` or `pass_unscanned` |
+
+Header values and the query string are always scanned; `scan_request` adds body scanning.
+Bodies are checked as UTF-8 text, not decoded archives or arbitrary binary formats. This is
+pattern detection, not proof that a request contains no confidential data. `pass_unscanned`
+permits an oversize body while recording `BodyNotScanned` and `dlp.body_scanned: false`.
+Keep `deny` when body inspection is a required control.
+
+Built-in names: `aws-access-key`, `github-pat`, `github-fine-grained`, `slack-token`,
+`openai-key`, `anthropic-key`, `google-api-key`, `stripe-key`, `private-key-pem`, and `jwt`.
+Unknown names fail when the chain is built. Findings identify the pattern and location,
+not the matched credential value. No custom-pattern schema is available here.
 
 ## `judge`
 

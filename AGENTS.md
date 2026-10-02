@@ -5,7 +5,7 @@ Guidance for AI agents and humans working on the `bot-marshal` codebase.
 ## What this is
 
 An egress firewall for AI agents: a MITM proxy that enforces default-deny per-request policy,
-injects credentials at the boundary, and audits everything. Rust workspace, twelve crates.
+injects credentials at the boundary, and audits everything. Rust workspace, thirteen crates.
 See [docs/concepts.md](docs/concepts.md) for the model, and
 [docs/roadmap.md](docs/roadmap.md#architecture) for what each crate does.
 
@@ -69,7 +69,7 @@ proposing a change to it.
   path and header *names* only. The `Redactor` enforces this at the emission boundary, and its
   set is **not** sealed at startup ([ADR-0029](docs/adr/0029-the-redaction-set-is-learned-at-runtime.md)): any code that obtains a credential at runtime must
   call `Redactor::learn` *before* that value can reach a sink. Forgetting to is silent.
-* **The three capture modes converge on one request representation.** ([ADR-0008](docs/adr/0008-interception-is-mandatory.md)) Do not special-case the
+* **The explicit HTTP proxy and SOCKS5 frontends converge on one request representation.** ([ADR-0008](docs/adr/0008-interception-is-mandatory.md)) Do not special-case the
   ingress mode downstream of that convergence.
 
 ## Conventions

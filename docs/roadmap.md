@@ -15,13 +15,13 @@ audited separately.
 | M4 | Identity resolution, profiles, `marshal run` | done |
 | M4.5 | LLM judge layer | done |
 | M5 | MCP tool-level policy | done |
-| M6 | Transparent (nftables) and DNS interception | done, later partially reverted¹ |
+| M6 | Transparent capture and DNS resolver | done, later partially reverted¹ |
 | M7 | Management API, hot reload, warn mode, metrics | done² |
 | M8 | OAuth2 credential acquisition | done³ |
 | M9 | LLM model routing and OpenAI/Anthropic dialect translation | done |
 
 ¹ Transparent (nftables REDIRECT) capture was removed after M6 — see
-[Removed](#removed) below. DNS interception is unaffected.
+[Removed](#removed) below. The DNS resolver remains; its direct HTTP/TLS ingress limitation is listed below.
 
 ² OpenTelemetry export is not implemented — see below.
 
@@ -51,9 +51,8 @@ simpler path: `listeners.explicit.listen` accepts a list of addresses, each runn
 policy pipeline (not a raw relay) — see [Identity](configuration/identity.md#listener_port) and
 [ADR-0023](adr/0023-multi-port-explicit-listeners.md).
 
-For a workload that cannot be configured to use a proxy at all, [DNS capture](capture.md#dns)
-is the supported option now — weaker, but honest about that weakness rather than silently
-under-enforcing while appearing to intercept.
+Workloads must use the explicit proxy protocol. [DNS answers](capture.md#dns) do not supply
+a replacement HTTP/TLS ingress for clients that cannot use a proxy.
 
 ## Not built
 
@@ -70,24 +69,29 @@ in without touching the chain.
 **Rate limits and budgets.** Per-identity counters exist and are exported, which is the
 groundwork; enforcement does not.
 
-**Response body transforms — `summarize`, `compact`.** Declared as config shapes since M3
+**Response body transforms — `redact`, `summarize`, `compact`.** Declared as config shapes since M3
 (they determine whether a response can stream, which the rest of the design has to respect) but
 never implemented. A profile naming one fails to start rather than serving a response that was
-supposed to be rewritten, unrewritten — which is why the shipped `coding-agent` profile does
-not start end to end as written.
+supposed to be rewritten, unrewritten. The shipped `coding-agent` profile declares `redact` and therefore remains a reference
+example that cannot start as written, even with its judge API credential. Use the minimal
+getting-started configuration for a runnable example. Log/audit credential redaction is
+implemented independently of response-body redaction.
 
 **Rego rules via `regorus`.** The `rules` layer is CEL only. Rego is designed for as an opt-in
 for anyone already running OPA policy.
 
-**A config shape for an already-enrolled credential.** A swap written after
-`oauth login --wait`/`--run` needs only `token_endpoint` and `client_id` to keep minting, but
-`grant: authorization_code` still requires `authorization_endpoint` and `redirect_uri` because
-`config check` cannot know the credential is already enrolled. The fix is a static variant
-alongside `capture: in_band`'s existing exemption — deliberately *not* a runtime check of
-`state_dir`, which would make `config check` pass or fail depending on the machine it runs on
-and break it as a CI gate.
+**DLP response scanning.** `scan_response` exists in the schema but is not wired into the
+runtime. Request header/query scanning and optional request-body scanning are implemented.
 
+**Direct HTTP/TLS ingress after DNS resolution.** The DNS server supplies proxy addresses,
+static records and passthrough answers, but there is no direct origin-HTTP/TLS listener that
+intercepts ordinary clients sent to those addresses. DNS alone is not a complete capture path;
+use an explicit proxy. See [Capture](capture.md#dns).
 
+Already-enrolled authorization-code credentials are supported: the builder checks the stored
+grant and permits omitting `authorization_endpoint` and `redirect_uri`. Consequently that
+configuration's validation depends on the machine's credential state; keep the endpoint fields
+for a portable configuration, or validate bootstrap output on its enrolled host.
 
 ## Architecture
 

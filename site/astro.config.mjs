@@ -29,6 +29,24 @@ export default defineConfig({
           ],
         },
         {
+          // Absolute URLs preserve section anchors through Starlight's path formatter.
+          label: 'Explore features',
+          items: [
+            { label: 'Request rules', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#rules' },
+            { label: 'Secret injection', link: 'https://gregbacchus.github.io/bot-marshal/configuration/transforms/#secret-injection' },
+            { slug: 'configuration/oauth2', label: 'OAuth login and renewal' },
+            { slug: 'configuration/llm-routing', label: 'Model and provider routing' },
+            { label: 'MCP tool controls', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#mcp' },
+            { label: 'Credential leak detection', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#dlp' },
+            { label: 'Agent identity and isolation', link: 'https://gregbacchus.github.io/bot-marshal/configuration/identity/' },
+            { label: 'AI request judge', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#judge' },
+            { label: 'Header rewriting', link: 'https://gregbacchus.github.io/bot-marshal/configuration/transforms/#header-transforms' },
+            { label: 'Response size limits', link: 'https://gregbacchus.github.io/bot-marshal/configuration/transforms/#response-size-limits' },
+            { label: 'Management API and reload', link: 'https://gregbacchus.github.io/bot-marshal/operations/' },
+            { label: 'Audit trail', link: 'https://gregbacchus.github.io/bot-marshal/observability/#the-audit-log' },
+          ],
+        },
+        {
           label: 'Configuration',
           items: [
             { slug: 'configuration' },
@@ -37,7 +55,6 @@ export default defineConfig({
             { slug: 'configuration/bundles' },
             { slug: 'configuration/bind-groups' },
             { slug: 'configuration/transforms' },
-            { slug: 'configuration/oauth2' },
             { slug: 'configuration/identity' },
             { slug: 'configuration/secret-injection-examples' },
           ],
@@ -50,6 +67,7 @@ export default defineConfig({
             { slug: 'observability' },
             { slug: 'operations' },
             { slug: 'production' },
+            { slug: 'troubleshooting' },
           ],
         },
         {

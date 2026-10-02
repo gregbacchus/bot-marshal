@@ -1,15 +1,8 @@
-# Config for the compose example: DNS interception plus source-address identity.
+# Explicit proxy with source-address identity.
 
 listeners:
   explicit:
     listen: "0.0.0.0:8080"
-  dns:
-    enabled: true
-    listen: "0.0.0.0:53"
-    # What every intercepted name resolves to: the proxy's address on the demo network.
-    proxy_ip: "172.28.0.2"
-    passthrough:
-      - "*.internal.corp"
 
 tls:
   ca_cert: "/etc/marshal/ca/ca.crt"
@@ -19,8 +12,8 @@ upstream:
   deny_cidrs:
     - "169.254.0.0/16"
     - "127.0.0.0/8"
-  # The containers are on a private network, and the proxy must reach the internet past it.
-  allow_private: true
+  # Public upstream APIs do not require private destination access.
+  allow_private: false
 
 # Anything unattributed. Embedded, not named, and deliberately permits nothing — see
 # profiles/github-only.yaml and profiles/llm-only.yaml for the two named profiles the

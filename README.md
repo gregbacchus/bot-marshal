@@ -60,8 +60,9 @@ Full documentation lives in **[docs/](docs/)**, published at
 | [Getting started](docs/getting-started.md) | build, configure, first request |
 | [Concepts](docs/concepts.md) | capture → identity → policy chain → transforms → audit |
 | [CLI](docs/cli.md) | every subcommand and flag |
-| [Configuration](docs/configuration/) | [profiles](docs/configuration/profiles.md) · [policy layers](docs/configuration/policy-layers.md) · [bundles](docs/configuration/bundles.md) · [transforms](docs/configuration/transforms.md) · [identity](docs/configuration/identity.md) · [secret injection examples](docs/configuration/secret-injection-examples.md) |
-| [Capture](docs/capture.md) | explicit, DNS |
+| [Configuration](docs/configuration/) | [profiles](docs/configuration/profiles.md) · [policy layers](docs/configuration/policy-layers.md) · [bundles](docs/configuration/bundles.md) · [transforms](docs/configuration/transforms.md) · [identity](docs/configuration/identity.md) · [bind groups](docs/configuration/bind-groups.md) · [LLM routing](docs/configuration/llm-routing.md) · [OAuth2](docs/configuration/oauth2.md) · [secret injection examples](docs/configuration/secret-injection-examples.md) |
+| [Capture](docs/capture.md) | explicit proxy, DNS resolver limitations |
+| [Troubleshooting](docs/troubleshooting.md) | startup, trust, identity and OAuth failures |
 | [Observability](docs/observability.md) | logs, audit trail, metrics |
 | [Operations](docs/operations.md) | management API, hot reload, warn-mode rollout |
 | [Production](docs/production.md) | dedicated service user, systemd |
@@ -73,7 +74,7 @@ Full documentation lives in **[docs/](docs/)**, published at
 ```
                  ┌── explicit: CONNECT / SOCKS5 ──┐
  agent traffic ──┤                                ├──► identity ──► profile
-                 └── dns: A record → proxy IP ────┘                    │
+                 └── Unix HTTP proxy forwarder ───┘                    │
                                                                        ▼
                     ┌──────────── policy chain (decides WHETHER) ───────────┐
                     │ denylist → allowlist → rules → mcp → dlp → judge      │
@@ -104,9 +105,9 @@ Full documentation lives in **[docs/](docs/)**, published at
 ## Repository layout
 
 ```
-crates/          twelve crates; marshal-core holds the traits and depends on no other
+crates/          thirteen crates; marshal-core holds the traits and depends on no other
 config/          a fuller example config, with profiles/, bundles/ and transforms/
-examples/docker/ compose: two containers captured with no proxy env vars at all
+examples/docker/ compose: two explicit-proxy clients with source-address identity
 docs/            documentation, including architecture decision records
 scripts/         checks CI runs that aren't cargo's
 site/            the published documentation site, built from docs/

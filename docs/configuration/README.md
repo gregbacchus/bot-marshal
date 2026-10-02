@@ -59,7 +59,7 @@ upstream:
   max_response_bytes: 0
 
 state_dir: "~/.local/state/bot-marshal"   # optional; only OAuth2 enrolment needs it
-env_file: ".env"         # optional; the default, loaded only if it exists — see below
+env_file: false          # optional; disable file loading here — see the default below
 
 profile:                   # the embedded fallback — required, see Profiles
   default_action: deny
@@ -136,8 +136,18 @@ SERVICE_API_KEY }` — which leaves the variable itself to be set somehow. `env_
 somehow: a `KEY=value` file, resolved against the config file's own directory, read at startup.
 
 ```yaml
-env_file: ".env"          # the default: loaded if it exists, ignored if not
+env_file: true            # the default: loaded if it exists, ignored if not
+```
+
+Or require a named file:
+
+```yaml
 env_file: "secrets.env"   # a named file — must exist, or startup fails
+```
+
+Or disable file loading:
+
+```yaml
 env_file: false           # load nothing
 ```
 
@@ -226,9 +236,10 @@ directory underneath a running process would be worse than making the operator s
 | CA private key | `tls.ca_key` | created by `ca init` at mode `0600`; whoever holds it can impersonate every site the agent talks to |
 | Unix socket | `listeners.explicit.unix_socket` | recreated on every start — a leftover socket from a previous run is removed automatically, never left to block a restart |
 | Audit log | `--audit-log <path>`, optional | JSON lines, append mode, created if missing; never truncated or rotated by bot-marshal itself |
+| Discovered transform bundle | `<transforms_path>/<name>.yaml` | bootstrap login writes it if absent; edit the API host before attaching it to a profile |
 | OAuth2 refresh tokens | `<state_dir>/oauth/<name>.json`, optional | mode `0600` in a `0700` directory; written by `marshal secrets oauth login` and rewritten whenever a provider rotates the token |
 
-That is the complete list. There is no database and no cache directory — `/v1/identities` and
+Bootstrap discovery is configuration written by a CLI command; `serve` does not update it. There is no database and no cache directory — `/v1/identities` and
 `/v1/metrics` counters, the judge's response cache, and OAuth2 *access* tokens all live in
 memory and reset on restart. Files a `file`-type secret source or a `tls.upstream_ca_certs`
 entry points at are read, never written.

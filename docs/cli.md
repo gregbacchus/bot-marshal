@@ -45,8 +45,8 @@ marshal config check
 ## `marshal secrets oauth <subcommand>`
 
 Enrolment and inspection for `{ type: oauth2 }` secret sources. Only the two interactive
-grants need any of this: `client_credentials` and `refresh_token` authenticate from
-configuration alone.
+grants need enrolment: `client_credentials`, `refresh_token` and `jwt_bearer` authenticate
+from configuration alone.
 
 ### `marshal secrets oauth login <name> [--open] [--timeout <duration>]`
 
@@ -90,8 +90,8 @@ Bootstrap a credential whose OAuth application you do **not** control — a vend
 subscription login, where the `client_id` and endpoints belong to them and are not published.
 
 Instead of driving a flow it already knows, marshal starts an intercepting proxy and learns the
-credential from the token exchange the tool itself performs. Nothing needs to be configured
-beforehand: here `<name>` is only the storage key the result is filed under, not a reference to
+credential from the token exchange the tool itself performs. No OAuth source needs to be
+declared beforehand; the base config, CA and `state_dir` are still required: here `<name>` is only the storage key the result is filed under, not a reference to
 a swap. For what this proxy actually matches on, and why matching on shape alone is safe here
 but would not be as a standing part of `serve`, see
 [OAuth2 credentials § Bootstrap capture](configuration/oauth2.md#bootstrap-capture).
@@ -114,8 +114,9 @@ transform bundle is written to `transforms_path` (default `transforms/`) as `<na
 `token_endpoint`, `client_id`, `redirect_uri`, everything but the `rules` host, which bootstrap
 has no way to know: it learns where the *token* endpoint is, not which API the credential is
 for. Add `<name>` to whichever profile's `transforms:` list needs it (`transforms: [<name>]` if
-it has none yet), fill in that one field, and it's live — no copying a multi-line block by
-hand. An existing file at that path is never overwritten; the full block is printed instead,
+it has none yet), fill in that one field, allow the API host in policy, then reload or restart
+the proxy. Follow the [bootstrap walkthrough](configuration/oauth2.md#from-bootstrap-to-an-authenticated-request)
+for the complete sequence. An existing file at that path is never overwritten; the full block is printed instead,
 exactly as before this existed.
 
 ```bash
@@ -136,23 +137,15 @@ Everything after `--` reaches the command untouched, its own flags included.
 and has the same prerequisites — `netns` is the only one that actually prevents the command
 routing around the proxy.
 
-**`--isolation netns` does not work for a flow that opens a browser and waits on a loopback
-callback.** Not just the callback port — the browser the tool spawns to show the login page is
-a separate process that inherits the same network namespace, so it has no route out either,
-and most browsers do not honour `HTTP_PROXY`-style environment variables even if it did. The
-callback server binds a loopback address *inside* that namespace, which is not the same
-loopback the browser (or anything else outside it) can reach, and the port is chosen by the
-tool at runtime — there's no fixed port to forward even if the namespace were otherwise
-bridged. Marshal does not attempt to bridge it: the port is arbitrary and only known once the
-tool has already bound it, and building a general host↔namespace relay for a port discovered
-that late is a lot of machinery for a case `--isolation cgroup` already sidesteps entirely by
-not isolating the network at all.
+**For a login that opens a browser and waits on a loopback callback, use `--isolation cgroup`
+or `--wait`.** A `netns` callback is inside the isolated network namespace, so the host browser
+cannot reach it; a browser launched inside the namespace may also lack working proxy routing.
+Marshal does not forward arbitrary callback ports between namespaces.
 
-Use `--isolation cgroup` for this shape of flow, or `--wait`, which sandboxes nothing. Both
-still identify the process for the token exchange to be captured; what they give up is `netns`'s
-enforcement — a hostile process really could route around the proxy under `cgroup`. That's an
-acceptable trade here specifically: bootstrap capture's whole premise is a human deliberately
-supervising a one-time login, not an untrusted agent this needs to cage.
+`cgroup` leaves host networking available; `--wait` launches no sandbox. Neither prevents
+bypassing the proxy, so use them for a supervised login. See the
+[bootstrap walkthrough](configuration/oauth2.md#from-bootstrap-to-an-authenticated-request)
+for the command and its credential-handling consequences.
 
 `--bind <path>`/`--bind-group <name>` work exactly as they do for `marshal run`, for whatever
 the tool's login needs beyond the workspace and standard system paths — a package manager
@@ -191,8 +184,8 @@ before logging anything about that request (ADR-0029), and it's meaningless with
 `--wait`/`--run` since there's no bootstrap session to log otherwise. Every record also carries
 [`request_headers`/`response_headers`](observability.md#request_headers-and-response_headers)
 — `content-type`/`content-encoding` on both sides is usually the fastest way to see why a
-response that reached the exchange still wasn't captured (a compressed body this cannot yet
-decode, an unexpected content type), without ever showing a header this doesn't recognise as
+response that reached the exchange still wasn't captured (an unsupported or malformed
+encoding, an unexpected content type), without ever showing a header this doesn't recognise as
 safe, `authorization` and `cookie` included.
 
 Where per-request *console* output should go depends on which of `--wait`/`--run` you used,
@@ -213,8 +206,8 @@ the more reliable choice for `--run` for exactly that reason, and unlike journal
 you named yourself and can delete once you're done with it:
 
 ```bash
-marshal --audit-log /tmp/bootstrap-debug.jsonl \
-  secrets oauth login CLAUDE_SUBSCRIPTION --run -- some-vendor-cli login
+marshal secrets oauth login CLAUDE_SUBSCRIPTION \
+  --audit-log /tmp/bootstrap-debug.jsonl --run -- some-vendor-cli login
 ```
 
 If you'd rather watch live instead, journald works too, tailed from a second terminal or pane:
@@ -247,16 +240,19 @@ same swap name share one stored grant, deliberately.
 
 ### `marshal secrets oauth refresh <name>`
 
-Discards the cached access token and requests a new one immediately. The way to check a
-credential works without waiting for an agent to need it. The token itself is **not** printed:
+Requests a new access token in this CLI process to check that a credential works without
+waiting for an agent to need it. This does not invalidate the running proxy's separate
+in-memory cache; restart `serve` if that cache must be discarded. The token itself is **not** printed:
 putting a live credential into a terminal, a scrollback buffer and a shell history undoes what
 boundary injection is for.
 
 ### `marshal secrets oauth logout <name>`
 
-Forgets the stored grant. The next request needing that credential is refused until it is
-enrolled again. This does **not** revoke anything at the provider — do that there too if the
-credential may have leaked.
+Removes the stored grant on disk. A fresh proxy process cannot use that grant until it is
+enrolled again, but a running proxy may still hold the grant and access token in memory.
+Stop/restart it to discard those copies. This does **not** revoke anything at the provider —
+do that there too if the credential may have leaked. See
+[OAuth2 cache behavior](configuration/oauth2.md#what-this-costs).
 
 ## `marshal ca init [--common-name <name>] [--days <n>]`
 

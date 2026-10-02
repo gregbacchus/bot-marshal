@@ -17,7 +17,7 @@ default_action: deny
 policy:
   - layer: allowlist
     allow:
-      domains: ["llm.local"]
+      domains: ["llm.local", "claude.llm.local"]
     on_match: allow
     on_miss: pass
 

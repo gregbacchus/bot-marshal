@@ -1,31 +1,34 @@
 # Capture
 
-Two ways traffic reaches the proxy, in decreasing order of how much the client must cooperate:
-
-| mode | client must | strength |
-|---|---|---|
-| explicit | set `HTTP_PROXY` / use SOCKS5 | relies entirely on cooperation |
-| DNS | point its resolver at the proxy | a convenience, not a boundary |
-
-Both converge on one request representation, so policy is written once rather than once per
-mode.
+Clients reach marshal through an **explicit HTTP proxy or SOCKS5 connection**. Set
+`HTTP_PROXY`/`HTTPS_PROXY`, or configure SOCKS5 in the client. These settings rely on client
+cooperation; [`marshal run --isolation netns`](configuration/identity.md#netns-enforces-rather-than-identifies)
+adds a network boundary that prevents direct egress.
 
 ## Explicit
 
-HTTP `CONNECT` and SOCKS5 on the same port; the protocol is sniffed from the first byte.
+HTTP `CONNECT`, absolute-form HTTP and SOCKS5 share a TCP port; marshal sniffs the protocol
+from the first byte. HTTPS CONNECT and SOCKS5 tunnels are intercepted using the configured CA.
+Plain HTTP requests receive request policy and request transforms, but their responses are
+relayed without the TLS interception response pipeline. Use HTTPS when you need response
+inspection or rewriting.
 
 ```yaml
 listeners:
   explicit:
     listen: "127.0.0.1:8080"
-    unix_socket: "/run/user/1000/marshal.sock"   # unlocks SO_PEERCRED identity
+    unix_socket: "/run/user/1000/marshal.sock"
 ```
 
-The Unix socket is what makes `SO_PEERCRED` reachable — see
-[Identity](configuration/identity.md#so_peercred-and-the-unix-listener). It is also how a
-`--isolation netns` agent reaches the proxy from inside a namespace with no network.
+The Unix socket supports HTTP proxy connections and
+[`SO_PEERCRED` identity](configuration/identity.md#so_peercred-and-the-unix-listener).
+It also carries a `netns` agent's egress through the in-namespace forwarder. Unlike the TCP
+listener, it does not accept SOCKS5.
 
 ## DNS
+
+The optional DNS server can return a configured proxy address, pass selected names to its
+upstream resolver, or serve fixed address records:
 
 ```yaml
 listeners:
@@ -34,69 +37,63 @@ listeners:
     listen: "127.0.0.1:5353"
     proxy_ip: "127.0.0.1"
     passthrough: ["*.internal.corp", "localhost"]
+    records:
+      - name: "build.internal.corp"
+        value: ["192.168.10.20"]
 ```
 
-DNS mode resolves every name to the proxy so unconfigured workloads arrive on their own.
-Static records beat passthrough, which beats interception; TTLs are short so a stale answer
-cannot outlive a policy change.
+| field | default | meaning |
+|---|---|---|
+| `enabled` | `false` | start the DNS server |
+| `listen` | required when the block exists | DNS bind address and port |
+| `proxy_ip` | required | address returned for intercepted names |
+| `passthrough` | `[]` | hostname patterns resolved normally |
+| `records` | `[]` | fixed records; each has `name` and a list `value` (`values` is an alias) |
 
-`examples/docker/` shows two containers captured with no proxy environment variables at all,
-told apart purely by source address.
+Fixed records take precedence over passthrough, which takes precedence over the proxy answer.
+The listener serves DNS over UDP and TCP. A nonstandard port such as `5353` needs a resolver
+client that can select that port.
 
-**Be clear about what DNS mode is not.** A client that ships its own resolver, uses
-DNS-over-HTTPS, or connects to a literal address never asks us. It is for workloads that cannot
-be configured. Where bypass actually matters, use
-[`marshal run --isolation netns`](configuration/identity.md#netns-enforces-rather-than-identifies),
-or the firewall rules.
+**DNS answers alone do not capture ordinary HTTP/HTTPS traffic in this release.** An HTTPS
+client still connects to port `443` and starts TLS directly. Marshal's explicit listener
+expects CONNECT or SOCKS5 first, and there is no direct TLS/origin-HTTP ingress listener that
+turns those DNS-directed connections into intercepted requests. Changing the explicit port to
+`443` does not change its protocol. Use explicit proxy configuration for working egress;
+the DNS service is a resolver feature, not a complete proxy-free capture workflow.
+
+A client using another resolver, DNS-over-HTTPS, or literal IP addresses can also avoid this
+DNS service. Network enforcement belongs to `netns` isolation or an operator-managed firewall.
 
 ## Transparent capture is not supported
 
-An nftables/iptables-REDIRECT capture mode existed through M6 and was removed. It recovered
-the hostname from TLS SNI or the HTTP `Host` header but never verified the redirected
-destination actually belonged to it, and it byte-relayed the connection rather than
-intercepting — so `rules`, `dlp`, `mcp`, `judge`, and every transform never ran on it. That is
-the same gap [interception being mandatory](concepts.md#why-interception-is-mandatory) exists
-to close for explicit traffic, so rather than rebuild transparent capture on top of the same
-interception pipeline explicit traffic already gets, it was dropped. See
-[ADR-0022](adr/0022-remove-transparent-capture.md).
+The nftables/iptables REDIRECT capture mode was removed after M6. It did not run the full
+interception pipeline and did not verify that the redirected destination belonged to the
+hostname used for policy. See [ADR-0022](adr/0022-remove-transparent-capture.md).
 
-For a workload that cannot be configured to use a proxy, DNS mode above is the supported
-option — weaker (nothing stops a client with its own resolver from bypassing it), but honest
-about that weakness rather than silently under-enforcing while appearing to intercept.
+Marshal has no supported transparent ingress for workloads that cannot use an explicit proxy.
+Firewall rules may block bypass traffic, but redirecting raw HTTP/TLS into the explicit proxy
+listener does not convert it into supported traffic.
 
 ## Containers (Docker/Podman)
 
-Marshal has no container-specific code — a container is just another client — so both modes
-above apply unchanged, and either works the same under Podman as under Docker (the compose
-file in `examples/docker/` has nothing Docker-specific in it; `podman compose up` or
-`podman-compose up` runs it as-is).
+The [container example](../examples/docker/README.md) configures explicit proxy variables,
+mounts the CA certificate and attributes two clients by their static source addresses. It
+keeps `upstream.allow_private: false` because its upstream APIs are public.
 
-* **DNS capture, marshal as a sidecar** — the pattern in `examples/docker/`. The client
-  container sets no proxy variables and knows nothing about marshal; its `dns:` entry (or the
-  network's default resolver) points at marshal, so hostnames resolve to marshal's address and
-  connections arrive on their own. Identity comes from `source_ip`, so give each container a
-  static address — see [Identity](configuration/identity.md). Set `upstream.allow_private:
-  true` since marshal must route out of the container network to the real internet, and mount
-  marshal's CA cert into the client container for TLS interception.
-* **Explicit proxy, marshal on the host** — set `HTTP_PROXY`/`HTTPS_PROXY` in the container to
-  marshal's `listeners.explicit` address and mount the CA cert. If the container runs with
-  `--network host`, it shares the host's network namespace, so `listeners.explicit.unix_socket`
-  can be bind-mounted in and `peer_cred` identity (strongest — kernel-supplied uid/gid, see
-  [Identity](configuration/identity.md#so_peercred-and-the-unix-listener)) works exactly as it
-  would for a bare host process; with bridge networking, `source_ip` is the available resolver
-  instead.
+For a proxy running on the host, use an address reachable from the container; its loopback is
+usually different from the host's. Bind marshal to a suitable host interface and restrict
+access to the intended clients. `source_ip` attribution depends on the source address marshal
+actually sees after container routing or NAT.
 
-**Routing a container's egress through marshal with `iptables -m owner --uid-owner` plus
-`REDIRECT` does not work, for two separate reasons.** First, `-m owner` matches the *local*
-process that owns the socket at the point the rule evaluates it; a bridge-networked container's
-packets are NAT'd/forwarded through a veth from a different network namespace, so the host's
-uid-owner rule never sees the container process's uid at all — only host-network containers
-expose a matchable uid. Second, and more fundamentally, even a REDIRECT that did match is the
-transparent-capture mode described above, which marshal does not accept: it byte-relays rather
-than terminating the connection, so `rules`, `dlp`, `mcp`, `judge`, and every transform never
-run, regardless of what selected which packets to redirect. Use one of the two patterns above
-instead — DNS capture needs no host firewall rule at all, and the explicit-proxy pattern gets
-you the same per-uid identity a `uid-owner` rule was trying to provide, without the redirect.
+A bind-mounted Unix socket is another route where the client supports HTTP proxying over a
+Unix socket. Its peer credentials are supplied by the kernel, subject to the container's user
+namespace mappings; sharing the host network namespace is not required for a Unix socket.
+Mount only the CA certificate into clients, not the private key or marshal's credential state.
+
+Proxy variables are not containment. A container can ignore them and connect directly unless
+its network/firewall policy prevents that. Host `iptables -m owner` rules do not identify
+bridge-container processes from their forwarded packets. Use network-level controls suited to
+your container runtime; marshal does not ship a firewall installation recipe.
 
 ## The upstream guard
 
@@ -124,8 +121,10 @@ the whole attempt still fails, it is retried once with a fresh resolution, since
 hiccup or a momentarily-unreachable address is common enough to be worth one retry; a blocked
 address is never retried, since that is a policy decision rather than a network condition.
 
-`allow_private: true` is needed when the proxy and its clients are on a private network the
-proxy must also route out of — the docker example sets it for exactly that reason.
+`allow_private: true` permits **private upstream destinations**. It is not needed just because
+marshal or its clients run on a private/container network: a public API still resolves to a
+public destination, even when the route to it crosses a private gateway. Keep it `false` for
+public-only egress. Explicit `deny_cidrs` still apply when private destinations are allowed.
 
 `max_response_bytes` is a deployment-wide fallback ceiling on response size, `0` meaning
 uncapped. It only fills a gap: a profile that declares its own `response_transforms.body`

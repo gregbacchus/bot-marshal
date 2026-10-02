@@ -2,11 +2,13 @@
 
 A cookbook of `request_transforms.secrets` swaps for real APIs — mainly LLM providers, since
 that's what most agents spend their egress on, plus a handful of others that come up constantly.
-Each one is a complete, copy-pasteable `secrets:` entry. See [Transforms](transforms.md) for
+The YAML examples are profile fragments: place them inside a full profile or transform
+bundle, and replace provider-specific values before use. See [Transforms](transforms.md) for
 what `source`, `inject` and `rules` mean and the full list of injection kinds; this page is
 "what shape does provider X want", not the mechanism.
 
-Every snippet here has been run through `marshal config check` and loads cleanly. None of them
+The concrete YAML fragments are checked within a base config containing `profile:`.
+Validation checks marshal's schema, not provider permissions or credential validity. None of them
 is a recommendation to trust these hosts with more than the policy chain in front of them
 grants — `rules` is the entire trust boundary for a swap (see
 [ADR-0027](../adr/0027-secret-injection-is-unconditional-only.md)), so scope it as narrowly as
@@ -96,14 +98,16 @@ subscription case, which is a different credential shape entirely.
 
 ### Google Gemini API
 
-Gemini takes the key as a query parameter, not a header — a clean example of `type: query`.
+Gemini accepts API keys in the `x-goog-api-key` header; a query `key` is another
+authentication form. This example uses a header, avoiding credentials in URL query strings.
+See [Google's API-key guide](https://ai.google.dev/gemini-api/docs/api-key).
 
 ```yaml
 request_transforms:
   secrets:
     - name: GEMINI
       source: { type: env, var: GEMINI_API_KEY }
-      inject: { type: query, name: "key" }
+      inject: { type: header, name: "x-goog-api-key" }
       rules: [{ host: "generativelanguage.googleapis.com" }]
 ```
 
@@ -125,8 +129,8 @@ request_transforms:
 ### Google Vertex AI (service account, no static key at all)
 
 Vertex AI authenticates with a Google service account rather than a long-lived key —
-`grant: jwt_bearer` (RFC 7523) is built for exactly this, and it's the one entry here with no
-static secret anywhere: marshal signs a fresh assertion and exchanges it for an access token on
+`grant: jwt_bearer` (RFC 7523) is built for exactly this, and it uses a private signing key
+instead of a static API token: marshal signs a fresh assertion and exchanges it for an access token on
 every mint. See [OAuth2 credentials](oauth2.md) for the field reference.
 
 ```yaml
@@ -175,36 +179,26 @@ watch a real login and learn them:
 marshal secrets oauth login CLAUDE_SUBSCRIPTION --wait
 ```
 
-That prints a proxy address and a CA path. Export them in the terminal where you run
-`claude login`, log in as usual, and marshal captures the credential from the token exchange
-Claude Code itself performs — printing the `token_endpoint`, `client_id` and `redirect_uri` it
-discovered, ready to paste into a profile for unattended use.
+Bootstrap needs a base configuration, CA and `state_dir`; follow the
+[complete enrolment workflow](oauth2.md#from-bootstrap-to-an-authenticated-request).
+Run the tool's login in a separate terminal with the printed proxy/trust settings. The browser
+itself does not need proxying for bootstrap: marshal watches the tool's token exchange.
 
-Or let marshal launch it, confined so its egress cannot avoid the proxy:
+For a tool that opens a browser and waits on loopback, use `--wait` or launch with
+`--isolation cgroup`, which identifies without network containment:
 
 ```bash
-marshal secrets oauth login CLAUDE_SUBSCRIPTION --run -- claude login
+marshal secrets oauth login CLAUDE_SUBSCRIPTION --run --isolation cgroup -- claude login
 ```
 
-The browser never needs to be proxied — only Claude Code's own network calls, which is where
-the exchange happens. See
-[`marshal secrets oauth login --wait`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd)
-for `--mode`, `--isolation`, and the rest.
-
-Once enrolled, the permanent swap uses the values it reported:
-
-```yaml
-      source:
-        type: oauth2
-        grant: authorization_code
-        token_endpoint: <printed by the bootstrap run>
-        authorization_endpoint: <printed by the bootstrap run>
-        client_id: <printed by the bootstrap run>
-        redirect_uri: <printed by the bootstrap run>
-        client_auth: none
-      inject: { type: bearer }
-      rules: [{ host: "api.anthropic.com" }]
-```
+After success, edit the generated `transforms/CLAUDE_SUBSCRIPTION.yaml`: replace the `rules`
+host with the API host and attach the bundle to the intended profile. It contains the token
+endpoint and client ID discovered from the exchange; **bootstrap does not discover the
+authorization endpoint**. An already-enrolled authorization-code source needs neither that
+endpoint nor a redirect URI to refresh. Keep the stored grant under the same `state_dir` and
+run `config check` on the machine holding it. Do not replace generated values with guessed
+provider URLs. In default `observe` mode the tool also keeps its own credential; use `steal`
+only after reading the [capture tradeoff](oauth2.md#bootstrap-capture).
 
 If instead you want Claude Code to drive its *own* login through the proxy every time and never
 hold anything, that is `capture: in_band`
@@ -225,7 +219,8 @@ hunting for them:
 
 ```bash
 marshal secrets oauth login CODEX_SUBSCRIPTION --wait
-# or: marshal secrets oauth login CODEX_SUBSCRIPTION --run -- codex login
+# browser/loopback flow: identify without netns isolation
+marshal secrets oauth login CODEX_SUBSCRIPTION --run --isolation cgroup -- codex login
 ```
 
 ---

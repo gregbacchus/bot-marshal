@@ -7,18 +7,19 @@ and endpoints), and **who is driving the login**, marshal or the agent/tool.
 | | you control the OAuth application | you don't (a vendor's own client) |
 |---|---|---|
 | **no interactive login needed** | a `{ type: oauth2 }` source with `grant: client_credentials`, `refresh_token`, or `jwt_bearer` — authenticates from config alone, below | — |
-| **a human logs in once, marshal drives it** | `grant: authorization_code`/`device_code` + `marshal secrets oauth login <name>`, below | [§ Bootstrap capture](#bootstrap-capture) — marshal discovers the application from the exchange itself, no config needed |
+| **a human logs in once, marshal drives it** | `grant: authorization_code`/`device_code` + `marshal secrets oauth login <name>`, below | [§ Bootstrap capture](#bootstrap-capture) — marshal discovers the application from the exchange itself; no OAuth source declaration needed |
 | **an agent drives the login unattended** | `source.capture: in_band`, [§ In-band capture](#in-band-capture) — marshal takes the flow over so the agent gets nothing | not possible — capture needs the authorization endpoint declared in advance |
 
-The first two rows are a `{ type: oauth2 }` secret source declared in a profile, and are what
+The configured-grant and marshal-driven enrolment cases use a `{ type: oauth2 }` secret
+source declared in a profile, and are what
 the rest of this page covers up to and including [§ In-band capture](#in-band-capture).
-[§ Bootstrap capture](#bootstrap-capture) is the fourth row: a CLI command with **no source
+[§ Bootstrap capture](#bootstrap-capture) is the separate CLI workflow: a CLI command with **no source
 declaration at all**.
 
 Every other source hands back a credential somebody else obtained. `oauth2` *obtains* one:
 marshal calls a token endpoint, caches the access token for its stated lifetime, and mints a
-new one when it expires. The agent holds nothing — and unlike a long-lived API key, there is
-nothing long-lived for it to hold in the first place.
+new one when it expires. The injected access token stays at marshal's boundary. Protect the underlying client
+credential or refresh token from the agent as you would any other secret source.
 
 ```yaml
 request_transforms:
@@ -47,7 +48,7 @@ marshal needs it before the credential exists — there is nothing to derive it 
 | `client_id` | |
 | `grant` | `client_credentials` (default), `refresh_token`, `jwt_bearer`, `authorization_code`, `device_code` |
 | `client_auth` | `client_secret_basic` (default), `client_secret_post`, `private_key_jwt`, `none` |
-| `client_secret` | itself a source — `{ type: env, ... }` or `{ type: file, ... }`. Required unless `client_auth: none` |
+| `client_secret` | itself a source — `{ type: env, ... }` or `{ type: file, ... }`. Required for `client_secret_basic` and `client_secret_post`; not used by `none` or `private_key_jwt` |
 | `refresh_token` | a source. Required by `grant: refresh_token`; meaningless for the others |
 | `scope` | a list, joined with spaces per RFC 6749 |
 | `audience` | sent as `audience=` when set |
@@ -58,7 +59,8 @@ marshal needs it before the credential exists — there is nothing to derive it 
 ## Grants
 
 **`client_credentials`** is machine-to-machine and needs nothing but the client credential. It
-is the only grant that works with no state and no enrolment.
+needs no state or enrolment; `refresh_token` and `jwt_bearer` can also operate without
+marshal-owned persistent state.
 
 **`refresh_token`** presents a long-lived refresh token that something outside marshal manages:
 
@@ -270,8 +272,8 @@ its `client_id`, its endpoints. Bootstrap capture is for the case it doesn't, wh
 common one for a vendor's own CLI subscription login: the application belongs to the vendor,
 is not published, and there is no `{ type: oauth2 }` source to declare in the first place.
 
-There is **no config for this at all** beyond a top-level `state_dir:`. It is a command, not a
-secret source:
+Bootstrap needs **no OAuth source declaration**. It uses the base config, CA and top-level
+`state_dir:` described in the [walkthrough below](#from-bootstrap-to-an-authenticated-request):
 
 ```bash
 marshal secrets oauth login CLAUDE_SUBSCRIPTION --mode steal --run -- some-vendor-cli login
@@ -314,6 +316,66 @@ callback, and what to use instead — see
 [`marshal secrets oauth login <name> --wait`/`--run`](../cli.md#marshal-secrets-oauth-login-name---wait----run----cmd).
 See also [ADR-0034](../adr/0034-bootstrap-capture-reads-the-token-exchange.md).
 
+## From bootstrap to an authenticated request
+
+Use this sequence for a vendor CLI whose application details you do not control. Do the
+supervised login as a trusted operator. Its default `observe` mode leaves a working credential
+in the tool's own store too; do not treat that tool environment as credential-free afterward.
+
+1. Start with a base config, a generated CA and a private `state_dir`. The
+   [getting-started config](../getting-started.md#write-a-config) supplies the first two;
+   add `state_dir: "~/.local/state/bot-marshal"` at the base-file level. Use the same config
+   path and account for bootstrap and the eventual proxy, or the stored grant may be missing.
+2. Run `marshal secrets oauth login SERVICE --wait`. In the tool's terminal, apply the
+   printed proxy/trust settings and run its login. Alternatively use `--run --isolation
+   cgroup` for browser/loopback flows on Linux. Do not use default `netns` for that shape.
+3. On success, open `transforms/SERVICE.yaml` beside the config (or in `transforms_path`).
+   Replace its `rules` host `"..."` with the resource API host. Bootstrap knows the token
+   endpoint, not the API destination. If the file already existed it was not overwritten;
+   apply the printed configuration to it deliberately.
+4. Attach `transforms: [SERVICE]` to a profile and allow the API host in its policy. A profile
+   cannot combine named bundles with embedded request/response transforms: move existing
+   inline transforms into a named bundle and list both bundles if needed.
+5. Run `marshal config check` on this enrolled host. A bootstrap-generated authorization-code
+   source can omit the authorization endpoint only while its stored grant exists. A clean
+   CI machine has no grant: use a separately declared portable config with endpoint/loopback
+   redirect fields for validation, or validate the generated file on its enrolled host.
+6. Start `serve`, or reload an already-running proxy if only reloadable configuration changed.
+   A changed env file, `state_dir` or forwarding guard requires restart. Send an allowed API
+   request through the proxy with a client that trusts the CA. Inspect the audit reason,
+   upstream status and secret-injection facts; a schema check alone is not authentication.
+
+For a concrete resource example, once `SERVICE` has been captured and its bundle's host is
+`api.example.com`, this is a complete named profile:
+
+```yaml
+# profiles/service-agent.yaml
+default_action: deny
+transforms: [SERVICE]
+policy:
+  - layer: allowlist
+    allow: { domains: ["api.example.com"] }
+    on_match: allow
+    on_miss: pass
+```
+
+Run it through the fallback only if that is intentional; attributed clients need a resolver
+mapping to `service-agent`. A shell request with no resolver continues to use the embedded
+profile. For a smoke test of this named profile, temporarily use `serve --profile
+service-agent` to select it for unattributed connections, then restore your intended fallback.
+Use the provider's real resource host and path in place of `api.example.com`:
+
+```bash
+marshal serve --profile service-agent --audit-log /tmp/service-audit.jsonl
+# second terminal:
+curl --cacert ~/.config/bot-marshal/ca.crt -x http://127.0.0.1:8080 https://api.example.com/
+```
+
+The agent need not present the real credential: marshal injects it after policy allows. An
+upstream auth error can still mean insufficient scope, a missing companion claim header, or a
+required `token_exchange`; configure those from the provider's requirements. Review the audit
+file without printing live tokens, and remove the scratch audit when finished.
+
 ## An ID token claim as a second header
 
 Most providers put everything a resource server needs to authorize a request in the access
@@ -325,7 +387,9 @@ even though the token is live, current, and correctly scoped, because from the r
 server's side there is no account to authorize against until it sees that header too.
 
 `type: oauth2_claim` reads a value out of another `oauth2` swap's ID token rather than minting
-one of its own:
+one of its own. This example assumes an already enrolled bootstrap grant: its recorded
+provider callback is not loopback, so it cannot be used to start `oauth login` directly.
+The CLI-driven authorization-code flow requires a loopback redirect URI.
 
 ```yaml
 request_transforms:
@@ -382,6 +446,9 @@ on a token that is perfectly live and correctly obtained.
 `token_exchange` runs this as a second call, immediately after every mint, and it is the
 *exchanged* token that gets cached and injected — not the grant's own:
 
+This source fragment also assumes the previously enrolled bootstrap grant; its provider
+callback cannot start the CLI loopback login flow.
+
 ```yaml
 source:
   type: oauth2
@@ -421,8 +488,12 @@ a request whose credential cannot be minted is refused, with the provider's own 
 
 **A revoked token is not noticed until it expires.** Nothing invalidates a cached token when an
 upstream rejects it, so a credential revoked at the provider ahead of its stated expiry goes on
-being presented until the cached copy ages out. `marshal secrets oauth refresh <name>` forces a
-new one.
+being presented until the cached copy ages out. `marshal secrets oauth refresh <name>` mints
+a token in the CLI process to test the credential; it does not clear the running proxy's
+in-memory cache. Restart `serve` to discard its cached access tokens. Similarly, `logout`
+removes the stored grant on disk but does not erase a grant or access token already cached by
+a running proxy. For a suspected leak, revoke the credential at the provider and stop/restart
+the proxy; logout is not provider revocation.
 
 **Concurrent requests on an expired token mint once**, not once each — some providers
 invalidate the previous refresh token on every use, which turns a concurrent double refresh

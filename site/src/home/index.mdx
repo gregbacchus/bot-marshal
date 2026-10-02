@@ -1,14 +1,18 @@
 ---
 title: bot-marshal
-description: An egress firewall for AI agents — default-deny per-request policy, credentials injected at the boundary, and a complete audit trail.
+description: Control where your AI agents connect, what they can do, and which credentials they use.
 template: splash
 editUrl: false
 hero:
-  tagline: An egress firewall for AI agents, coding bots, and other untrusted automation. Default-deny per request, credentials injected at the boundary, and everything audited.
+  tagline: Let your AI agents use the services they need. Control each HTTP request, inject credentials without giving them to the agent, and explain every refusal.
   actions:
     - text: Get started
       link: /bot-marshal/getting-started/
       icon: right-arrow
+    - text: Explore the features
+      link: "#what-you-can-do"
+      icon: right-arrow
+      variant: secondary
     - text: View on GitHub
       link: https://github.com/gregbacchus/bot-marshal
       icon: external
@@ -17,63 +21,164 @@ hero:
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-<div class="bm-eyebrow">Single binary · Rust · default-deny</div>
+<div class="bm-eyebrow">Single binary · Local or CI · Deny unless allowed</div>
 
-<div class="bm-flow">
-  <span>capture</span><i>→</i>
-  <span>identity</span><i>→</i>
-  <span>policy chain</span><i>→</i>
-  <span>transforms</span><i>→</i>
-  <span>upstream</span><i>·</i>
-  <span class="deny">403 + reason</span>
-</div>
+## Give agents useful access with clear boundaries
 
-## Why
+Your coding agent needs GitHub, package registries and model APIs. Allowing an entire host
+also allows requests you may never have intended: a repository write, an unsafe tool call,
+or a request carrying a leaked credential.
 
-An agent on a developer machine or in CI has unrestricted outbound access. It can exfiltrate
-secrets, fetch and execute arbitrary content, or be steered by a prompt injection into
-contacting attacker infrastructure. Firewall rules are too coarse to help: agents legitimately
-need GitHub, npm, PyPI and LLM APIs, and those same hosts are exfiltration channels. The
-boundary has to understand HTTP, not just IPs.
+bot-marshal is an HTTP proxy you run between your agents and those services. It inspects
+requests, applies your rules, adds the credentials an allowed request needs, and records the
+result. You can permit GitHub reads while refusing writes, restrict a tool to selected
+repositories, or choose which model provider an agent uses.
+
+## How it fits into your setup
+
+Run marshal on your developer machine, in CI, or as a dedicated service. Configure clients
+to use its HTTP or SOCKS5 proxy and trust its generated certificate authority (CA), so it can
+inspect HTTPS requests. On Linux, `marshal run` can launch an agent in an isolated network
+namespace with no direct route around the proxy. Other deployments need external network
+controls for enforced containment; proxy settings alone route cooperative clients.
+
+[Installation and platform support →](/bot-marshal/getting-started/#platform-prerequisites) ·
+[Client and container routing →](/bot-marshal/capture/)
+
+## What you can do
 
 <CardGrid>
-  <Card title="Default-deny, per request" icon="approve-check">
-    Policy is a short-circuiting chain of layers — `denylist`, `allowlist`, `rules`, `dlp`,
-    `mcp`, `judge`. The `allow` default has to be opted into, in config, in writing.
+  <Card title="Permit reads, refuse unwanted writes" icon="approve-check">
+    Decide by destination, HTTP method and path, rather than trusting every request to an
+    allowed host. With an enforcing deny-by-default profile, each request needs explicit
+    permission. Refusals include a
+    structured reason the agent can act on.
 
-    [Policy layers →](/bot-marshal/configuration/policy-layers/)
+    [How policy works →](/bot-marshal/concepts/#the-policy-chain-decides-whether) ·
+    [Configure request rules →](/bot-marshal/configuration/policy-layers/#rules)
   </Card>
-  <Card title="The agent never holds the key" icon="seti:lock">
-    Credentials are injected at the boundary and are unconditional per destination. They never
-    reach a log, an audit record, or the judge.
+  <Card title="Use API keys without handing them to the agent" icon="seti:lock">
+    Keep real credentials in marshal's protected environment or files. Marshal adds them to
+    allowed requests for the destinations you choose and redacts learned secrets from its
+    logs. Keep those sources outside the agent's environment and filesystem access.
 
-    [Secret injection →](/bot-marshal/configuration/transforms/)
+    [Configure secret injection →](/bot-marshal/configuration/transforms/#secret-injection) ·
+    [Provider examples →](/bot-marshal/configuration/secret-injection-examples/)
   </Card>
-  <Card title="Streaming stays streaming" icon="rocket">
-    Bodies stream by default. A transform that needs the body buffered declares it, with a cap
-    — so SSE, WebSockets and large uploads keep working.
+  <Card title="Manage OAuth login and token renewal" icon="seti:lock">
+    Enrol a credential once and let marshal refresh access tokens as needed. For a vendor
+    CLI, supervised login capture can discover its OAuth configuration; capture mode decides
+    whether the tool also receives a working credential.
 
-    [Concepts →](/bot-marshal/concepts/)
+    [Choose a login workflow →](/bot-marshal/configuration/oauth2/) ·
+    [Login capture walkthrough →](/bot-marshal/configuration/oauth2/#from-bootstrap-to-an-authenticated-request)
   </Card>
-  <Card title="A trail you can answer questions with" icon="open-book">
-    Every request produces an append-only evidence trail: which layer decided, on what facts,
-    and what the agent was told.
+  <Card title="Choose models without changing every client" icon="rocket">
+    Give agents stable model names such as `fast` and `smart`, then map them to providers
+    or your own compatible server. Translate between OpenAI Chat Completions and Anthropic
+    Messages, including streaming responses and tool calls.
 
-    [Observability →](/bot-marshal/observability/)
+    [Model routing and complete configuration →](/bot-marshal/configuration/llm-routing/)
+  </Card>
+  <Card title="Control individual MCP tools" icon="approve-check">
+    Model Context Protocol (MCP) calls share an endpoint, but need different permissions.
+    Permit selected tools and constrain their arguments—for example, issue creation only
+    in approved repositories. Filter tool listings so agents see the tools they may use.
+
+    [MCP controls and configuration →](/bot-marshal/configuration/policy-layers/#mcp)
+  </Card>
+  <Card title="Detect credentials leaving in requests" icon="seti:lock">
+    Scan headers and query strings for known credential patterns, and optionally inspect
+    request bodies with an explicit size cap. Refuse matches before forwarding. This is
+    pattern detection; response scanning is not implemented.
+
+    [Leak detection and its limits →](/bot-marshal/configuration/policy-layers/#dlp)
+  </Card>
+  <Card title="Give each agent its own permissions" icon="approve-check">
+    A release bot and a research assistant need different access. Select a named policy
+    profile using connection identity, and launch Linux agents with `marshal run` to enforce
+    proxy routing. Choose an identity resolver appropriate to your deployment.
+
+    [Configure agent identity →](/bot-marshal/configuration/identity/) ·
+    [Linux containment →](/bot-marshal/configuration/identity/#netns-enforces-rather-than-identifies)
+  </Card>
+  <Card title="Add an AI judge where static rules fall short" icon="open-book">
+    Put hard rules first, then ask an LLM to judge requests that need additional context.
+    The judge receives method, host, path and header names; it receives neither bodies nor
+    header values. Its verdict remains subject to the ordering you configure.
+
+    [Judge configuration and failure behavior →](/bot-marshal/configuration/policy-layers/#judge)
+  </Card>
+  <Card title="Keep streamed responses responsive" icon="rocket">
+    Bodies stream by default, including server-sent events (SSE), WebSockets and large
+    uploads. Features that inspect a whole body require explicit, bounded buffering, so
+    you can choose inspection costs deliberately.
+
+    [Streaming and buffering →](/bot-marshal/concepts/#bodies-stream-by-default) ·
+    [Response size limits →](/bot-marshal/configuration/transforms/#response-size-limits)
+  </Card>
+  <Card title="See what happened and why" icon="open-book">
+    Follow each request's agent identity, policy decision and accumulated evidence. Use
+    structured audit records and metrics to investigate refusals, and warn mode to discover
+    an existing agent's needs before enforcing a new policy.
+
+    [Audit records →](/bot-marshal/observability/#the-audit-log) ·
+    [Roll out with warn mode →](/bot-marshal/operations/#rolling-it-out)
   </Card>
 </CardGrid>
+
+Headers and response sizes are configurable too: [set or filter request headers](/bot-marshal/configuration/transforms/#header-transforms)
+and [cap response bodies](/bot-marshal/configuration/transforms/#response-size-limits). For service
+operation, use the [management API and reload guide](/bot-marshal/operations/) to inspect
+health, change policies and identify settings that require a restart.
+
+## Follow a request
+
+Once a client is routed through marshal, its connection identity selects a policy profile.
+An allowed request gets its configured rewrites and credentials before being forwarded or
+answered locally, as in OAuth capture. A refused request gets a reason; every outcome leaves
+an audit record.
+
+<div class="bm-flow">
+  <span>agent request</span><i>→</i>
+  <span>identify agent</span><i>→</i>
+  <span>check policy</span><i>→</i>
+  <span>add credentials</span><i>→</i>
+  <span>service</span><i>·</i>
+  <span class="deny">refusal + reason</span>
+</div>
+
+[The full request lifecycle →](/bot-marshal/concepts/#the-path-a-request-takes)
 
 ## Try it
 
 ```bash
-cargo build --release
-alias marshal=./target/release/marshal
-
-marshal config check
-marshal ca init
-marshal serve --listen 127.0.0.1:8080
+brew install gregbacchus/tap/bot-marshal
+mkdir -p ~/.config/bot-marshal
+cat > ~/.config/bot-marshal/config.yaml <<'CFG'
+tls:
+  ca_cert: "~/.config/bot-marshal/ca.crt"
+  ca_key: "~/.config/bot-marshal/ca.key"
+profile:
+  default_action: deny
+  policy:
+    - layer: allowlist
+      allow: { domains: ["api.github.com"] }
+      on_match: allow
+      on_miss: pass
+CFG
+marshal --config ~/.config/bot-marshal/config.yaml config check
+marshal --config ~/.config/bot-marshal/config.yaml ca init
+marshal --config ~/.config/bot-marshal/config.yaml serve --listen 127.0.0.1:8080
 ```
 
-Point an agent at `http://127.0.0.1:8080` and watch it get told exactly why it was refused.
+In another terminal, send a request while trusting the generated CA:
+
+```bash
+curl --cacert ~/.config/bot-marshal/ca.crt -x http://127.0.0.1:8080 https://api.github.com/zen
+```
+
+This allowlisted request should succeed. Follow the walkthrough for denied requests and
+Linux namespace isolation; proxy variables alone do not enforce containment.
 
 [Full walkthrough →](/bot-marshal/getting-started/) · [Documentation index →](/bot-marshal/overview/)

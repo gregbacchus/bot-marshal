@@ -13,6 +13,22 @@ brew install gregbacchus/tap/bot-marshal
 
 To build from source instead, see [Developing](https://github.com/gregbacchus/bot-marshal#developing).
 
+## Platform prerequisites
+
+| workflow | Linux | macOS |
+|---|---|---|
+| `serve`, CA management, configuration validation, explicit proxy clients | supported | supported |
+| `run --isolation none` | proxy variables only | proxy variables only |
+| `run --isolation cgroup` | systemd user session required | unavailable: no systemd cgroups |
+| `run --isolation netns` (default) | systemd user session, bubblewrap and usable unprivileged namespaces | unavailable: Linux namespace workflow |
+| container example | Docker Compose or compatible Podman provider | Docker/Podman Linux VM and compatible Compose provider |
+
+Installation does not create a configuration or start a daemon. Use explicit proxy variables
+for macOS clients; `netns` is a Linux enforcement feature. All `marshal run` modes currently
+require a `run` resolver in the configuration, including `none`; configuring the resolver does
+not make Linux cgroup attribution available on macOS. Inspect the audit record rather than
+assuming launch success means strong attribution. See [Identity](configuration/identity.md).
+
 ## Write a config
 
 With no `--config`, every subcommand looks in one default place:
@@ -93,17 +109,58 @@ detail levels and where else those lines can go.
 
 ## Point a real agent at it
 
-Configuring an agent by hand with `HTTPS_PROXY` and `SSL_CERT_FILE` works, but
-[`marshal run`](configuration/identity.md#launching-an-agent) is the intended path: it sets
-those variables, gives the agent its own identity, and can put it in a network namespace
-where the proxy is the *only* route out.
+A cooperative client can use the proxy on any supported host. Set trust/proxy variables in
+its own terminal, following the runtime-specific instructions from `ca init`. Do not put the
+proxy's real API credential in that terminal; keep it in marshal's env file or protected
+credential source. Some clients require an authentication setting before sending any traffic;
+consult their current client documentation rather than assuming proxy injection configures it.
 
-```bash
-marshal run --profile coding-agent -- claude
+For Linux network containment, extend the configuration from above. Stop the first `serve`
+with `Ctrl-C`, then add these blocks to the base file:
+
+```yaml
+listeners:
+  explicit:
+    listen: "127.0.0.1:8080"
+    unix_socket: "~/.config/bot-marshal/marshal.sock"
+identities:
+  resolvers:
+    - type: run
 ```
 
-That needs a named profile called `coding-agent`, which means splitting the config across
-files — see [Profiles](configuration/profiles.md).
+Create a named profile that permits the first smoke request:
+
+```bash
+mkdir -p ~/.config/bot-marshal/profiles
+cat > ~/.config/bot-marshal/profiles/coding-agent.yaml <<'CFG'
+default_action: deny
+policy:
+  - layer: allowlist
+    allow: { domains: ["api.github.com"] }
+    on_match: allow
+    on_miss: pass
+CFG
+marshal config check
+marshal serve
+```
+
+In a second terminal, verify Linux prerequisites and run a system-installed client:
+
+```bash
+marshal run --profile coding-agent --dry-run -- /usr/bin/curl https://api.github.com/zen
+marshal run --profile coding-agent -- /usr/bin/curl https://api.github.com/zen
+```
+
+Use your actual curl path if it differs. This checks namespace routing and trust before adding
+an agent's larger dependency set. The proxy must be running before either invocation: it
+creates the Unix socket. A successful request should be attributed to `pid-<pid>` by `run`.
+
+Then add the domains your agent requires and its install/config paths using
+[bind groups](configuration/bind-groups.md). A user-local `claude` binary, for example, is not
+visible inside `netns` unless its invocation path and symlink target are bound. Use
+[`--dry-run`](cli.md#marshal-run---profile-name---isolation-netnscgroupnone---proxy-url---bind-path---bind-group-name---dry-run----command)
+to inspect the bind list. The minimal profile above is a routing check, not a complete policy
+for an arbitrary coding agent. See [Troubleshooting](troubleshooting.md) for failures.
 
 ## The fuller example
 
@@ -113,4 +170,6 @@ and a judge-gated profile.
 One thing to know before running it as-is — **`serve` builds every profile in the config up
 front, not just the one `--profile` selects**, so a config containing a judge layer refuses to
 start at all without `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` set. Export those first, or read
-it as a reference rather than running it.
+it as a reference rather than running it. The shipped `coding-agent` profile also declares
+unimplemented response `redact`, so the complete shipped config cannot serve as written.
+Use the minimal config above; see [Roadmap](roadmap.md#not-built).

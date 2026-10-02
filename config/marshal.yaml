@@ -15,9 +15,9 @@ listeners:
     listen: "127.0.0.1:8080"          # HTTP CONNECT and SOCKS5, protocol sniffed
     unix_socket: "/run/user/1000/marshal.sock"   # unlocks SO_PEERCRED identity
 
-  # DNS interception: resolve every name to the proxy so unconfigured workloads arrive on
-  # their own. A convenience for clients that cannot be configured, not a containment
-  # boundary — anything with its own resolver never asks us.
+  # Optional DNS resolver: answers can point names at proxy_ip, but there is no direct
+  # origin HTTP/TLS listener. DNS alone does not capture requests; clients still need
+  # explicit proxy routing. See docs/capture.md.
   dns:
     enabled: false
     listen: "127.0.0.1:5353"
@@ -71,13 +71,13 @@ profile:
 
   transforms: [default-headers]
 
-# coding-agent and llm-agent (the intended shape for two real agent profiles — dlp, rules and
-# judge arrive in M3/M4.5) live under profiles/, one file each, since only this fallback needs
-# to be inline. See profiles/coding-agent.yaml and profiles/llm-agent.yaml.
+# Named profiles live under profiles/, one file each. coding-agent is a reference shape
+# containing an unimplemented response redact transform; llm-agent is runnable when its
+# judge and credentials are configured. See profiles/coding-agent.yaml and profiles/llm-agent.yaml.
 
 identities:
   # Tried in order; first match wins. Identity is derived from the connection, never asserted
-  # by the client — DNS ingress gives the client no way to present a credential. They are
+  # by the client. Resolver trust depends on the transport and deployment. They are
   # listed strongest-first, which is also the order they should be tried:
   #
   #   peer_cred uid  kernel-supplied, unspoofable; only separates agents running as
@@ -115,7 +115,7 @@ identities:
           profile: coding-agent
 
   # Nothing matched: synthetic identity, flagged unattributed in every audit record, served
-  # under the embedded `profile:` above (the most restrictive one) by default — set
+  # under the embedded `profile:` above (the configured fallback) by default — set
   # `profile: <name>` here to use a named one instead, or `action: deny` for a hard-fail
   # posture rather than falling back at all.
   unidentified:

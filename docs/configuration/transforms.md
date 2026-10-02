@@ -5,9 +5,9 @@ Transforms decide **how** an allowed request is rewritten. They run only after t
 
 * **`request_transforms`** rewrite a request on its way out — setting and filtering headers,
   routing an LLM model, injecting a credential at the boundary so the agent never holds it.
-* **`response_transforms`** rewrite what comes back — redacting a secret the upstream echoed,
-  limiting a body that would overload the agent's context, compacting a body too large to be
-  useful.
+* **`response_transforms`** rewrite what comes back — translating a routed LLM response or
+  enforcing a response size limit. Body redaction, summarization and compaction are
+  [not implemented](#unimplemented-body-transforms).
 
 ## LLM routing and model mapping
 
@@ -81,10 +81,14 @@ profile using both needs the agent to see it.
 
 ## Secret injection
 
-The real credential never exists in the agent's process, environment, or filesystem — so
-compromising the agent no longer costs a rotation. There is no placeholder for a client to
-hold or present, and no cooperation required from it: the client does not need to know the
-endpoint is authenticated in the first place.
+Marshal supplies the real credential at the proxy boundary; the client does not need a
+placeholder or a live credential to make an authenticated request. This protects a credential
+only when the agent cannot obtain it independently. Keep secrets out of the agent's inherited
+environment, workspace and extra bind paths, and use a separate proxy account where practical.
+`marshal run --isolation none` inherits its caller's environment; injection does not scrub it.
+The env-file overlay is not inherited, but its file is still readable if the agent can access
+that path. See [Production](../production.md) for account separation and
+[Identity](identity.md#netns-enforces-rather-than-identifies) for filesystem access.
 
 ```yaml
 request_transforms:
@@ -108,7 +112,7 @@ including nothing at all.
 
 | field | |
 |---|---|
-| `source` | where the credential comes from: `{ type: env, ... }`, `{ type: file, ... }`, or `{ type: oauth2, ... }` — required for every `inject.type` except `sigv4`, which carries its own sources instead |
+| `source` | where the credential comes from: `env`, `file`, `oauth2`, or `oauth2_claim` — required for every `inject.type` except `sigv4`, which carries its own sources instead |
 | `inject` | how, and where, to set the credential — see below |
 | `rules` | the hosts this swap applies to — a credential is never offered to a host that shouldn't see it |
 
@@ -145,6 +149,33 @@ to the config, `.env` by default. The environment wins where both have a value.
 
 The env file is read by marshal and is never loaded into the environment an agent could inherit,
 so a credential kept there stays as far from the agent as one kept in a `file` source.
+
+### File sources and rotation
+
+```yaml
+request_transforms:
+  secrets:
+    - name: SERVICE_TOKEN
+      source: { type: file, path: "/etc/bot-marshal/service-token.json", ttl: "5m", json_key: token }
+      inject: { type: bearer }
+      rules: [{ host: "api.example.com" }]
+```
+
+| field | default | meaning |
+|---|---|---|
+| `path` | required | file to read; leading `~/` expands against marshal's `$HOME` |
+| `ttl` | `5m` | how long a read value is cached; a later request rereads after expiry |
+| `json_key` | unset | a top-level JSON key whose value must be a string |
+
+Without `json_key`, surrounding whitespace is trimmed from the file's text. With it, the
+file must parse as JSON and contain the named string field; it is not a dotted path or JSON
+Pointer. Relative file paths resolve from marshal's working directory, unlike profile/bundle
+directories and `state_dir`, which resolve beside the base config. Prefer absolute paths for
+services. Validation builds the source but does not read its file; missing files and malformed
+content fail when resolved. Rotate by replacing the file securely and allow for its TTL.
+
+`oauth2_claim` is a fourth source type; it reads a claim from an earlier OAuth2 swap and is
+covered in [OAuth2 credentials](oauth2.md#an-id-token-claim-as-a-second-header).
 
 ### AWS SigV4
 
@@ -270,27 +301,22 @@ The deployment-wide `upstream.max_response_bytes` setting supplies a default `fa
 for profiles without an explicit `limit`; `0` means uncapped. An explicit profile limit
 replaces that default rather than combining with it.
 
-### Other body transforms
+### Unimplemented body transforms
 
-```yaml
-response_transforms:
-  body:
-    - transform: redact
-      patterns: ["github-pat"]
-```
+`redact`, `summarize` and `compact` are declared configuration shapes but **are not
+implemented**. A profile naming any of them is rejected when `serve` builds its chain.
+`config check` can parse these shapes and warn about buffering without proving they work.
+Do not rely on them to scrub a response or to preserve streaming.
 
-Redaction closes the loop on injection: never let an injected credential echo back to the
-agent through a response.
+For reference, `redact` declares `patterns` (default `[]`) and a `max_bytes` buffering cap
+(default 1 MiB). These fields are not an operational redaction guarantee. Marshal's learned
+credential redaction applies to logs/audit output, not to arbitrary upstream response bodies.
+See [Roadmap](../roadmap.md#not-built).
 
-**A body transform stops the response streaming.** Bodies stream by default, and a transform
-that rewrites content cannot run over a stream — so declaring one is a statement that the
-responses it applies to are no longer streamable. `marshal config check` warns. A buffering
-transform applied to SSE fails loudly with a structured `502` rather than being silently
-skipped; upgraded connections bypass response-body transforms. Keep profiles with body
-transforms away from SSE and WebSocket endpoints.
-
-> `summarize` and `compact` are declared as config shapes but **not implemented** — a profile
-> naming one fails to start. See [Roadmap](../roadmap.md#not-built).
+Implemented `limit` buffers the responses it governs. A buffering transform applied to SSE
+fails with a structured `502`; upgraded connections bypass response-body transforms. Body
+transforms have no per-host selector in this schema: use a separate profile without buffering
+body transforms for SSE endpoints. A named bundle is reuse, not a runtime scope restriction.
 
 ## Named transform bundles
 
@@ -311,14 +337,14 @@ the same profile:
 # profiles/llm-agent.yaml
 default_action: deny
 transforms: [default-headers]
-policy: [...]
+policy: []  # deny-all until you add an allow policy
 ```
 
 ```yaml
 # profiles/llm-agent.yaml, using two bundles together
 default_action: deny
 transforms: [default-headers, claude-subscription]
-policy: [...]
+policy: []  # deny-all until you add an allow policy
 ```
 
 Composing is concatenation, not replacement: `secrets` and response `body` transforms from
