@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.6.0](https://github.com/gregbacchus/bot-marshal/compare/ecb945b34dc37f965cc785793efa6b12ab549abd..v0.6.0) - 2026-10-02
+#### Features
+- add support for native decision APIs and System One dialect - ([d313cbe](https://github.com/gregbacchus/bot-marshal/commit/d313cbe6c9342dde0dfaa762f89c1652180b6a96)) - test
+#### Documentation
+- clarify capabilities and improve onboarding - ([ecb945b](https://github.com/gregbacchus/bot-marshal/commit/ecb945b34dc37f965cc785793efa6b12ab549abd)) - test, Codex
+
+- - -
+
 ## [v0.5.0](https://github.com/gregbacchus/bot-marshal/compare/195ab1eff244f290e8c7bf4531df45134f17384d..v0.5.0) - 2026-10-01
 #### Features
 - add LLM model routing - ([30e875c](https://github.com/gregbacchus/bot-marshal/commit/30e875c1d5460e276180945a4a3688c0c607aaf5)) - test, OpenAI Codex
