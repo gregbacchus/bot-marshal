@@ -230,6 +230,29 @@ async fn upstream_service(
                 .unwrap())
         }
 
+        // Native decision routing must preserve the request's bounded question and state.
+        "/v1/systemone" => {
+            let leaked_auth = req.headers().contains_key("authorization")
+                || req.headers().contains_key("x-api-key");
+            let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+            let doc: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            if leaked_auth
+                || doc["model"] != "decision-origin"
+                || doc["state"]["task"] != "hello"
+                || doc["questions"]["route"]["criteria"]["fast"] != "Simple"
+            {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(full(b"invalid native decision route".to_vec()))
+                    .unwrap());
+            }
+            let reply = serde_json::json!({"model": "decision-origin", "answers": {"route": {"type": "choice", "choice": "fast", "confidence": 0.95, "probabilities": {"fast": 0.98, "slow": 0.02}}}, "usage": {"input_tokens": 10, "output_tokens": 0}});
+            Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body(full(serde_json::to_vec(&reply).unwrap()))
+                .unwrap())
+        }
+
         // A strict Anthropic-shaped origin for the LLM router acceptance test. A response is
         // successful only when the request reached this mapped socket in translated form and
         // the client-side credential did not ride along.

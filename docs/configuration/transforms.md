@@ -12,13 +12,15 @@ Transforms decide **how** an allowed request is rewritten. They run only after t
 ## LLM routing and model mapping
 
 `request_transforms.llm_router` maps stable client-facing model aliases onto an origin host,
-path, model id and either the OpenAI Chat Completions or Anthropic Messages wire format. It can
-keep the dialect or translate in either direction, including streaming SSE and tool calls. The
+path, model id and OpenAI Chat Completions, Anthropic Messages or native System One wire format.
+It translates between the two chat formats, including streaming SSE and tool calls; native
+decision requests map only to native decision origins. The
 request half runs before secret injection; the paired response half translates back into the
 client's dialect.
 
 This transform has enough configuration and security consequences to warrant its own page:
-[LLM routing](llm-routing.md).
+[LLM routing](llm-routing.md). Native System One endpoints use the same router;
+see [Decision APIs](decision-apis.md) for decision-only mapping and limits.
 
 ## Header transforms
 

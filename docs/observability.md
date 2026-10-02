@@ -174,6 +174,11 @@ frequency means the cache is not holding —
 usually a provider that omits `expires_in`, which is never cached because treating a token with
 no stated lifetime as immortal would mean a revoked credential is never re-fetched.
 
+Native decision judge reasons summarize the chosen label, returned confidence and required
+threshold. They are not model-generated explanations. A low-confidence result records
+`judge.pass_reason` in evidence and proceeds to the next layer; see
+[Decision APIs](configuration/decision-apis.md#use-a-decision-model-as-the-judge).
+
 ## Metrics
 
 `GET /v1/metrics` on the [management listener](operations.md) exposes Prometheus counters:

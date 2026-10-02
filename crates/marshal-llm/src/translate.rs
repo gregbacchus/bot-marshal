@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 pub enum Dialect {
     Openai,
     Anthropic,
+    SystemOne,
 }
 
 impl From<marshal_config::LlmDialect> for Dialect {
@@ -13,6 +14,7 @@ impl From<marshal_config::LlmDialect> for Dialect {
         match d {
             marshal_config::LlmDialect::Openai => Self::Openai,
             marshal_config::LlmDialect::Anthropic => Self::Anthropic,
+            marshal_config::LlmDialect::SystemOne => Self::SystemOne,
         }
     }
 }
@@ -22,6 +24,7 @@ impl Dialect {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::SystemOne => "system_one",
         }
     }
 }
@@ -40,6 +43,15 @@ pub fn translate_request(
     mut body: Value,
     mapped_model: &str,
 ) -> Result<Value, TranslateError> {
+    if from == Dialect::SystemOne
+        && (!body.get("state").is_some_and(|v| v.is_string() || v.is_object() || v.is_array())
+            || body.get("questions").and_then(Value::as_object).is_none_or(|q| q.is_empty())
+            || body.get("stream").and_then(Value::as_bool) == Some(true))
+    {
+        return Err(TranslateError::Other(
+            "System One requires state and non-empty questions; streaming is not supported".into(),
+        ));
+    }
     if from == to {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("model".into(), json!(mapped_model));
@@ -49,7 +61,9 @@ pub fn translate_request(
     match (from, to) {
         (Dialect::Openai, Dialect::Anthropic) => openai_request_to_anthropic(body, mapped_model),
         (Dialect::Anthropic, Dialect::Openai) => anthropic_request_to_openai(body, mapped_model),
-        _ => unreachable!(),
+        _ => Err(TranslateError::Other(
+            "System One decision and chat dialects cannot be translated".into(),
+        )),
     }
 }
 
@@ -67,7 +81,11 @@ pub fn translate_response(
     let translated = match (from_origin, to_client) {
         (Dialect::Anthropic, Dialect::Openai) => anthropic_response_to_openai(body, client_model),
         (Dialect::Openai, Dialect::Anthropic) => openai_response_to_anthropic(body, client_model),
-        _ => unreachable!(),
+        _ => {
+            return Err(TranslateError::Other(
+                "System One decision and chat dialects cannot be translated".into(),
+            ));
+        }
     };
     Ok(translated)
 }

@@ -16,7 +16,9 @@ use crate::transforms::{
     HeaderFilterMode, McpToolFilter, RequestHeaderFilter, RequestHeaderSetter,
     ResponseHeaderFilter, ResponseLimiter,
 };
-use marshal_judge::{AnthropicProvider, CompiledScope, Judge, OpenAiProvider, Provider};
+use marshal_judge::{
+    AnthropicProvider, CompiledScope, Judge, OpenAiProvider, Provider, SystemOneProvider,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -311,6 +313,39 @@ pub fn build_chain(
                             source,
                         })?,
                     ),
+                    marshal_config::layer::Provider::SystemOne {
+                        model,
+                        api_key_env,
+                        base_url,
+                        min_confidence,
+                    }
+                    | marshal_config::layer::Provider::DecisionsApi {
+                        model,
+                        api_key_env,
+                        base_url,
+                        min_confidence,
+                    } => {
+                        let default_base = match &cfg.provider {
+                            marshal_config::layer::Provider::DecisionsApi { .. } => {
+                                "https://decisionapi.net"
+                            }
+                            _ => "https://api.typesafe.ai",
+                        };
+                        Arc::new(
+                            SystemOneProvider::from_env(
+                                model.clone(),
+                                api_key_env,
+                                base_url.as_deref().unwrap_or(default_base),
+                                *min_confidence,
+                            )
+                            .map_err(|source| {
+                                BuildError::JudgeProvider {
+                                    profile: profile_name.to_owned(),
+                                    source,
+                                }
+                            })?,
+                        )
+                    }
                 };
 
                 layers.push(Arc::new(Judge::new(

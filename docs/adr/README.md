@@ -22,7 +22,7 @@ later, so a future change is made knowingly rather than by accident.
 | [0009](0009-identity-is-derived-from-the-connection.md) | Identity is derived from the connection, never asserted | Accepted |
 | [0010](0010-resolve-once-connect-to-the-checked-address.md) | Resolve once, check every address, connect to the checked one | Accepted |
 | [0011](0011-secrets-are-injected-at-the-boundary.md) | Secrets are injected at the boundary, not held by the agent | Accepted; placeholder model superseded by [0027](0027-secret-injection-is-unconditional-only.md) |
-| [0012](0012-the-judge-sees-data-never-instructions.md) | The judge sees a reduced request as data, never as instruction | Accepted |
+| [0012](0012-the-judge-sees-data-never-instructions.md) | The judge sees a reduced request as data, never as instruction | Partially superseded by [0042](0042-native-decision-answers-may-replace-judge-tool-calls.md) |
 | [0013](0013-mcp-denials-are-protocol-errors.md) | MCP denials are protocol errors, and `tools/list` is filtered | Accepted |
 | [0014](0014-netns-isolation-without-cap-net-admin.md) | Network-namespace isolation without `CAP_NET_ADMIN` | Accepted |
 | [0015](0015-the-cgroup-name-is-the-registration.md) | The cgroup naming convention *is* the identity registration | Accepted (amended by [0037](0037-identity-and-profile-are-independent.md)) |
@@ -52,6 +52,8 @@ later, so a future change is made knowingly rather than by accident.
 | [0039](0039-oauth2-can-exchange-a-token-before-caching-it.md) | OAuth2 can exchange a token before caching it | Accepted |
 | [0040](0040-header-filtering-is-allow-or-deny-never-both.md) | Header filtering is allow or deny, never both — and never touches wire framing | Accepted |
 | [0041](0041-llm-router-may-connect-to-a-mapped-origin.md) | The LLM router rewrites destination after allow; intercept may connect to a mapped origin | Accepted |
+
+| [0042](0042-native-decision-answers-may-replace-judge-tool-calls.md) | Native decisions may replace judge tool calls; native decision routing stays within its family | Accepted |
 
 ## Writing a new one
 

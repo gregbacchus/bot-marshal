@@ -78,6 +78,18 @@ An early `allow` short-circuits later DLP/MCP/judge checks. For an allowlist tha
 destination prerequisite, use `on_match: pass` and provide a later terminal allow for legitimate
 requests. A chain of passes still ends at `default_action`.
 
+## A native decision judge passes or is unavailable
+
+A valid answer below `min_confidence` produces `pass`, so evaluation continues to the next
+layer or `default_action`. Inspect the judge evidence and confidence threshold; a pass does
+not approve the request. A malformed Choice answer, provider HTTP error or timeout follows
+`on_error`, and may produce `judge_unavailable` when that setting is `deny`.
+
+Check the configured model, service origin and `api_key_env`. Direct Jev and DecisionsApi
+have separate credentials. Native agent routes must use `system_one` on both sides;
+chat/decision conversion and native streaming are refused. See [Decision APIs](configuration/decision-apis.md)
+for supported answer shapes, confidence behavior and complete configurations.
+
 ## Streaming stops or a response is too large
 
 Inspect `response_transforms.body` and `upstream.max_response_bytes`. An implemented body

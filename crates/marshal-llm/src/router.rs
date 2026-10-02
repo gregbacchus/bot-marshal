@@ -47,6 +47,7 @@ impl LlmRouter {
         match value {
             "openai" => Ok(Dialect::Openai),
             "anthropic" => Ok(Dialect::Anthropic),
+            "system_one" => Ok(Dialect::SystemOne),
             other => Err(Error::Other(format!("unknown LLM dialect `{other}` in route state"))),
         }
     }
@@ -216,6 +217,9 @@ impl ResponseTransform for LlmRouter {
 
     fn stream_session(&self, cx: &RequestContext) -> Option<Box<dyn SseRewriter>> {
         let route = cx.llm_route.as_ref()?;
+        if route.client_dialect == "system_one" {
+            return None;
+        }
         Some(Box::new(DialectSse::new(
             Self::dialect(&route.origin_dialect).ok()?,
             Self::dialect(&route.client_dialect).ok()?,
@@ -244,8 +248,9 @@ impl RequestResponder for LlmRouter {
         let data: Vec<Value> = self
             .config
             .models
-            .keys()
-            .map(|model| json!({"id": model, "object": "model", "owned_by": "bot-marshal"}))
+            .iter()
+            .filter(|(_, target)| target.dialect != LlmDialect::SystemOne)
+            .map(|(model, _)| json!({"id": model, "object": "model", "owned_by": "bot-marshal"}))
             .collect();
         let body = Bytes::from(
             serde_json::to_vec(&json!({"object": "list", "data": data}))
@@ -498,6 +503,60 @@ mod tests {
         let unrelated = request("example.com", "/", json!({}));
         assert_eq!(
             ResponseTransform::body_requirement_for(&router, &unrelated),
+            marshal_core::BodyRequirement::Streaming
+        );
+    }
+    #[tokio::test]
+    async fn native_decision_routing_preserves_questions_and_strips_client_credentials() {
+        let config = serde_json::from_value(json!({
+            "listen": [{"dialect": "system_one", "hosts": ["decisions.test"]}],
+            "models": {"quick": {"model": "typesafe/jev-1.13", "dialect": "system_one", "host": "decisionapi.net"}}
+        })).unwrap();
+        let router = LlmRouter::new(config);
+        let questions = json!({"route": {"type": "choice", "instructions": "Pick a route", "criteria": {"fast": "Simple", "slow": "Complex"}}});
+        let state = json!({"task": "test", "nested": ["context"]});
+        let mut cx = request(
+            "decisions.test",
+            "/v1/systemone",
+            json!({"model": "quick", "state": state, "questions": questions}),
+        );
+        RequestTransform::apply(&router, &mut cx).await.unwrap();
+        assert_eq!(cx.authority.host, "decisionapi.net");
+        assert_eq!(cx.uri.path(), "/v1/systemone");
+        assert!(!cx.headers.contains_key("authorization"));
+        assert!(!cx.headers.contains_key("x-api-key"));
+        let body = json_body(&cx.body);
+        assert_eq!(body["model"], "typesafe/jev-1.13");
+        assert_eq!(body["state"], state);
+        assert_eq!(body["questions"], questions);
+        let answers = json!({"route": {"type": "choice", "choice": "fast", "confidence": 0.9, "probabilities": {"fast": 0.95, "slow": 0.05}}});
+        let mut response = ResponseParts { status: http::StatusCode::OK, headers: http::HeaderMap::new(), body: BodyHandle::Buffered(Bytes::from(serde_json::to_vec(&json!({"model": "typesafe/jev-1.13", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 0}})).unwrap())) };
+        ResponseTransform::apply(&router, &cx, &mut response).await.unwrap();
+        let output = json_body(&response.body);
+        assert_eq!(output["model"], "quick");
+        assert_eq!(output["answers"], answers);
+        assert!(ResponseTransform::stream_session(&router, &cx).is_none());
+    }
+    #[tokio::test]
+    async fn decision_routes_refuse_chat_conversion_invalid_input_and_streaming() {
+        let config: LlmRouterConfig = serde_json::from_value(json!({
+            "listen": [{"dialect": "system_one", "hosts": ["decisions.test"]}],
+            "models": {"quick": {"model": "jev-latest", "dialect": "system_one", "host": "api.typesafe.ai"}, "chat": {"model": "chat", "dialect": "openai", "host": "api.openai.com"}}
+        })).unwrap();
+        let router = LlmRouter::new(config);
+        for body in [
+            json!({"model":"quick","state":"x","questions":{}}),
+            json!({"model":"quick","state":"x","questions":{"x":{}},"stream":true}),
+            json!({"model":"chat","state":"x","questions":{"x":{}}}),
+        ] {
+            let mut cx = request("decisions.test", "/v1/systemone", body);
+            assert!(RequestTransform::apply(&router, &mut cx).await.is_err());
+            assert_eq!(cx.authority.host, "decisions.test");
+            assert!(cx.llm_route.is_none());
+        }
+        let ordinary = request("decisions.test", "/other", json!({}));
+        assert_eq!(
+            RequestTransform::body_requirement_for(&router, &ordinary.authority, &ordinary.uri),
             marshal_core::BodyRequirement::Streaming
         );
     }

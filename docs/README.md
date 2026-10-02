@@ -21,6 +21,7 @@ Start here if you are new; each page below stands on its own once you have.
 | Restrict tools and their arguments | [MCP tool controls](configuration/policy-layers.md#mcp) |
 | Detect credentials in outgoing requests | [DLP scanning](configuration/policy-layers.md#dlp) |
 | Give each agent its own access and enforce routing | [Identity](configuration/identity.md) and [Linux containment](configuration/identity.md#netns-enforces-rather-than-identifies) |
+| Use native decision models to judge or route requests | [Decision APIs](configuration/decision-apis.md) |
 | Judge requests with an LLM | [AI judge](configuration/policy-layers.md#judge) |
 | Investigate a decision or roll out a policy gradually | [Audit log](observability.md#the-audit-log) and [warn mode](operations.md#rolling-it-out) |
 | Set or filter request headers | [Header transforms](configuration/transforms.md#header-transforms) |
@@ -41,6 +42,7 @@ Start here if you are new; each page below stands on its own once you have.
     response rewriting.
   * [Bind groups](configuration/bind-groups.md) — shared sandbox filesystem access.
   * [LLM routing](configuration/llm-routing.md) — model aliases and dialect translation.
+  * [Decision APIs](configuration/decision-apis.md) — native judge providers and agent routing.
   * [OAuth2 credentials](configuration/oauth2.md) — enrolment, capture and token lifecycle.
   * [Secret injection examples](configuration/secret-injection-examples.md) — provider cookbook.
   * [Identity](configuration/identity.md) — which agent is connecting, and `marshal run`.

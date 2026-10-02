@@ -1,6 +1,6 @@
 # ADR 0012: The judge sees a reduced request as data, never as instruction
 
-* **Status:** Accepted
+* **Status:** Partially superseded by [ADR-0042](0042-native-decision-answers-may-replace-judge-tool-calls.md) (native answer and request representation only)
 * **Date:** 2026-09-02
 
 ## Context

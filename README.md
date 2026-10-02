@@ -60,7 +60,7 @@ Full documentation lives in **[docs/](docs/)**, published at
 | [Getting started](docs/getting-started.md) | build, configure, first request |
 | [Concepts](docs/concepts.md) | capture → identity → policy chain → transforms → audit |
 | [CLI](docs/cli.md) | every subcommand and flag |
-| [Configuration](docs/configuration/) | [profiles](docs/configuration/profiles.md) · [policy layers](docs/configuration/policy-layers.md) · [bundles](docs/configuration/bundles.md) · [transforms](docs/configuration/transforms.md) · [identity](docs/configuration/identity.md) · [bind groups](docs/configuration/bind-groups.md) · [LLM routing](docs/configuration/llm-routing.md) · [OAuth2](docs/configuration/oauth2.md) · [secret injection examples](docs/configuration/secret-injection-examples.md) |
+| [Configuration](docs/configuration/) | [profiles](docs/configuration/profiles.md) · [policy layers](docs/configuration/policy-layers.md) · [bundles](docs/configuration/bundles.md) · [transforms](docs/configuration/transforms.md) · [identity](docs/configuration/identity.md) · [bind groups](docs/configuration/bind-groups.md) · [LLM routing](docs/configuration/llm-routing.md) · [Decision APIs](docs/configuration/decision-apis.md) · [OAuth2](docs/configuration/oauth2.md) · [secret injection examples](docs/configuration/secret-injection-examples.md) |
 | [Capture](docs/capture.md) | explicit proxy, DNS resolver limitations |
 | [Troubleshooting](docs/troubleshooting.md) | startup, trust, identity and OAuth failures |
 | [Observability](docs/observability.md) | logs, audit trail, metrics |

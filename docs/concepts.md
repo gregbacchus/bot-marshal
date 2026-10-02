@@ -99,6 +99,11 @@ each other. [Transforms](configuration/transforms.md) run only after the chain h
   limit. Response-body redaction, summarization and compaction are declared config shapes
   but are not implemented; log/audit credential redaction is a separate emission boundary.
 
+Native [decision APIs](configuration/decision-apis.md) can supply the judge's bounded verdict
+without a tool call. They receive the same reduced metadata separately from operator policy;
+confidence below the configured threshold passes to later policy. Agent decision requests
+can also be routed, but carry their own state and questions.
+
 ## Bodies stream by default
 
 A transform declares whether it needs the body buffered, and that declaration is load-bearing

@@ -385,8 +385,8 @@ fn default_https_port() -> u16 {
 pub struct LlmListen {
     pub dialect: LlmDialect,
     pub hosts: Vec<String>,
-    /// Paths that count as this dialect's chat endpoint. Empty means the dialect default
-    /// (`/v1/chat/completions` or `/v1/messages`).
+    /// Paths that count as this dialect's inference endpoint. Empty means the dialect
+    /// default: `/v1/chat/completions`, `/v1/messages`, or `/v1/systemone`.
     #[serde(default)]
     pub paths: Vec<String>,
 }
@@ -397,6 +397,7 @@ pub struct LlmListen {
 pub enum LlmDialect {
     Openai,
     Anthropic,
+    SystemOne,
 }
 
 impl LlmDialect {
@@ -404,6 +405,7 @@ impl LlmDialect {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::SystemOne => "system_one",
         }
     }
 
@@ -411,6 +413,7 @@ impl LlmDialect {
         match self {
             Self::Openai => "/v1/chat/completions",
             Self::Anthropic => "/v1/messages",
+            Self::SystemOne => "/v1/systemone",
         }
     }
 }

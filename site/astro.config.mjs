@@ -39,6 +39,7 @@ export default defineConfig({
             { label: 'MCP tool controls', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#mcp' },
             { label: 'Credential leak detection', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#dlp' },
             { label: 'Agent identity and isolation', link: 'https://gregbacchus.github.io/bot-marshal/configuration/identity/' },
+            { slug: 'configuration/decision-apis', label: 'Native decision APIs' },
             { label: 'AI request judge', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#judge' },
             { label: 'Header rewriting', link: 'https://gregbacchus.github.io/bot-marshal/configuration/transforms/#header-transforms' },
             { label: 'Response size limits', link: 'https://gregbacchus.github.io/bot-marshal/configuration/transforms/#response-size-limits' },

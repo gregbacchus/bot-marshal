@@ -266,6 +266,21 @@ fn check_profile(
     // Cost ordering: cheapest first.
     let mut highest_seen = None;
     for (i, layer) in profile.policy.iter().enumerate() {
+        if let crate::layer::LayerConfig::Judge(judge) = layer {
+            match &judge.provider {
+                crate::layer::Provider::SystemOne { min_confidence, .. }
+                | crate::layer::Provider::DecisionsApi { min_confidence, .. }
+                    if !min_confidence.is_finite() || !(0.0..=1.0).contains(min_confidence) =>
+                {
+                    out.push(Diagnostic {
+                        severity: Severity::Error,
+                        location: format!("{at}.policy[{i}].provider.min_confidence"),
+                        message: "must be a finite number between 0 and 1".into(),
+                    });
+                }
+                _ => {}
+            }
+        }
         let cost = layer.cost();
         if let Some((prev_cost, prev_name)) = highest_seen
             && cost < prev_cost

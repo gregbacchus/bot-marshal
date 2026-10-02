@@ -1,14 +1,16 @@
 # LLM routing
 
 The LLM router gives an agent stable, client-facing model names while an operator chooses the
-real origin, provider dialect, path and model. It understands two wire formats:
+real origin, provider dialect, path and model. It understands three wire formats:
 
 * `openai` — OpenAI Chat Completions at `/v1/chat/completions`;
-* `anthropic` — Anthropic Messages at `/v1/messages` (the format used by Claude clients).
+* `anthropic` — Anthropic Messages at `/v1/messages` (the format used by Claude clients);
+* `system_one` — native decision state/questions at `/v1/systemone`; see [Decision APIs](decision-apis.md).
 
 Those names describe JSON and SSE shapes, not vendors. An `openai` target may be OpenAI,
 OpenRouter, Azure, vLLM or an internal compatible gateway. A mapping may keep the same dialect,
-or translate OpenAI to Anthropic and Anthropic to OpenAI in either direction.
+or translate OpenAI to Anthropic and Anthropic to OpenAI in either direction. System One
+maps only to System One; decision/chat translation is refused.
 
 ## A complete mapping
 
@@ -78,7 +80,7 @@ addresses.
 | field | default | meaning |
 |---|---:|---|
 | `models.<alias>.model` | required | model id written into the origin request |
-| `models.<alias>.dialect` | required | origin wire format: `openai` or `anthropic` |
+| `models.<alias>.dialect` | required | origin wire format: `openai`, `anthropic` or `system_one` |
 | `models.<alias>.host` | required | bare origin host, without scheme, path or port |
 | `models.<alias>.port` | `443` | origin TLS port |
 | `models.<alias>.path` | dialect default | origin-form request path; useful for gateways with a prefix |
@@ -86,9 +88,9 @@ addresses.
 | `max_request_bytes` | 1 MiB | cap for buffered request JSON; oversize is refused, never truncated |
 | `max_response_bytes` | 8 MiB | cap for non-streaming JSON that needs response translation |
 
-An alias is shared by every listen dialect. That is what permits both kinds of client to use
-the same stable names. Use different aliases when the client populations need different
-choices.
+Chat aliases can be shared by OpenAI and Anthropic clients. Native decision aliases must
+map to a System One origin; selecting a chat alias from a decision client (or the reverse)
+is refused. Use separate aliases for the two families.
 
 `listen.paths` replaces the dialect's default client path. It contains absolute paths only,
 with no query or fragment. The target `path` may include a query but not a fragment. `marshal
@@ -110,7 +112,7 @@ JSON length.
 
 ## What translation covers
 
-The router translates ordinary messages, system instructions, text content, token limits,
+Between the two chat dialects, the router translates ordinary messages, system instructions, text content, token limits,
 temperature, stop sequences, tool definitions, tool choice, tool calls/results, finish reasons,
 usage counts and provider error envelopes. For `stream: true`, it translates SSE events
 incrementally; it does not collect the stream before returning the first token.
@@ -118,11 +120,13 @@ incrementally; it does not collect the stream before returning the first token.
 The APIs are not identical. Provider-only options with no safe equivalent are not forwarded.
 If a workload depends on one, use a same-dialect mapping or a gateway that defines its
 translation. This feature targets OpenAI **Chat Completions**, not the Responses API. A
-non-chat path is outside the router and proceeds under the rest of the profile unchanged.
+path outside the configured inference endpoints is outside the router and proceeds under
+the rest of the profile unchanged. System One uses its separate native decision format;
+see [Decision APIs](decision-apis.md#route-an-agents-decision-requests).
 
 ## Model discovery and failures
 
-`GET /v1/models` on an OpenAI listen host is answered by marshal with the configured aliases,
+`GET /v1/models` on an OpenAI listen host is answered by marshal with the configured chat aliases (decision aliases are excluded),
 so a client can discover `fast`, `smart` and `local` without seeing origin model ids. It is a
 synthesized allowed response and is audited with reason code `model_catalog`.
 

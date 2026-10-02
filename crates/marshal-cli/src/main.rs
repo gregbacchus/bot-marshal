@@ -669,6 +669,21 @@ fn build_runtime(
     );
     let build_one =
         |label: &str, profile: &marshal_config::model::Profile| -> anyhow::Result<Built> {
+            // Native decision keys can be echoed by a failing service; teach the shared
+            // redactor before constructing a provider or emitting any request diagnostics.
+            for layer in &profile.policy {
+                if let marshal_config::layer::LayerConfig::Judge(judge) = layer {
+                    match &judge.provider {
+                        marshal_config::layer::Provider::SystemOne { api_key_env, .. }
+                        | marshal_config::layer::Provider::DecisionsApi { api_key_env, .. } => {
+                            if let Some(value) = marshal_core::env::var(api_key_env) {
+                                redactor.learn(api_key_env, &value);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let chain = Arc::new(build_chain(&cfg, label, profile, Arc::new(DenyingDecider))?);
             let mut response = marshal_policy::build_response_transforms(&cfg, label, profile)?;
             let mut request = marshal_policy::build_request_transforms(&cfg, label, profile)?;

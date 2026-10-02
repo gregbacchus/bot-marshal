@@ -238,6 +238,28 @@ pub enum Provider {
         #[serde(default)]
         base_url: Option<String>,
     },
+    SystemOne {
+        model: String,
+        api_key_env: String,
+        #[serde(default)]
+        base_url: Option<String>,
+        /// Below this native confidence the judge passes; it never guesses an allow.
+        #[serde(default = "default_decision_confidence")]
+        min_confidence: f64,
+    },
+    DecisionsApi {
+        model: String,
+        api_key_env: String,
+        #[serde(default)]
+        base_url: Option<String>,
+        /// Below this native confidence the judge passes; it never guesses an allow.
+        #[serde(default = "default_decision_confidence")]
+        min_confidence: f64,
+    },
+}
+
+fn default_decision_confidence() -> f64 {
+    0.9
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

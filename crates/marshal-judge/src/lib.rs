@@ -12,7 +12,8 @@
 //!
 //! See [`providers`] for the specific mechanisms: the untrusted content travels as explicitly
 //! delimited data rather than being concatenated into the system prompt, and the verdict
-//! comes back through a forced tool call rather than free-text parsing.
+//! comes back through a forced tool call or a validated native Choice answer rather than
+//! free-text parsing.
 
 pub mod breaker;
 pub mod judge;
@@ -24,6 +25,7 @@ pub use breaker::CircuitBreaker;
 pub use judge::Judge;
 pub use providers::{
     AnthropicProvider, Decision, JudgeVerdict, OpenAiProvider, Provider, ProviderError,
+    SystemOneProvider,
 };
 pub use request::JudgeRequest;
 pub use scope::CompiledScope;

@@ -18,7 +18,7 @@ audited separately.
 | M6 | Transparent capture and DNS resolver | done, later partially reverted¹ |
 | M7 | Management API, hot reload, warn mode, metrics | done² |
 | M8 | OAuth2 credential acquisition | done³ |
-| M9 | LLM model routing and OpenAI/Anthropic dialect translation | done |
+| M9 | LLM model routing, OpenAI/Anthropic translation and native decision APIs | done |
 
 ¹ Transparent (nftables REDIRECT) capture was removed after M6 — see
 [Removed](#removed) below. The DNS resolver remains; its direct HTTP/TLS ingress limitation is listed below.
@@ -107,10 +107,14 @@ without a network.
 | `marshal-policy` | chain runner and the denylist, allowlist, rules, dlp, mcp layers |
 | `marshal-secrets` | env/file/oauth2 sources, TTL cache, token store, in-band and bootstrap capture, injection and redaction |
 | `marshal-judge` | the LLM judge layer: providers, structured verdicts, cache, breaker |
-| `marshal-llm` | model-table routing and OpenAI Chat Completions/Anthropic Messages JSON and SSE translation |
+| `marshal-llm` | model-table routing, OpenAI/Anthropic JSON and SSE translation, and native System One decision routing |
 | `marshal-launch` | `marshal run`: netns and cgroup isolation, identity registration |
 | `marshal-http` | the upstream guard, and the one-shot client for calls marshal makes as itself |
 | `marshal-proxy` | listeners, CONNECT, SOCKS5, MITM, streaming |
 | `marshal-dns` | hickory authority: resolve-to-proxy, passthrough, static records |
 | `marshal-audit` | JSON records, tracing layer |
 | `marshal-cli` | the `marshal` binary |
+
+Native System One decisions are supported as judge providers (`system_one` and `decisions_api`)
+and as agent model routes. DecisionsApi is an independent service; an official OpenAI decision
+adapter awaits a published contract. See [Decision APIs](configuration/decision-apis.md).

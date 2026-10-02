@@ -1,4 +1,4 @@
-//! LLM dialect routing: OpenAI Chat Completions and Anthropic Messages as wire formats.
+//! LLM dialect routing: OpenAI/Anthropic chat translation and native System One decisions.
 //!
 //! No I/O. The proxy opens the mapped origin; this crate rewrites JSON, headers, and SSE.
 

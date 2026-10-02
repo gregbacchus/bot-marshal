@@ -224,7 +224,10 @@ caches and circuit-breaks.
 
 ### Providers
 
-`type: anthropic` or `type: openai`. Either takes an optional `base_url` — Azure OpenAI,
+`type: anthropic` or `type: openai` use forced tool calls. Native `system_one` and
+`decisions_api` providers use bounded Choice answers with a configurable confidence threshold;
+see [Decision APIs](decision-apis.md) for service origins, complete examples and maturity limits.
+Both chat providers take an optional `base_url` — Azure OpenAI,
 OpenRouter, a local vLLM or Ollama instance, an internal gateway. `scheme://host[:port]`, no
 path; `http://` is honoured for a local server, not upgraded to `https`.
 
@@ -234,7 +237,7 @@ provider: { type: openai, model: "...", api_key_env: OPENAI_API_KEY, base_url: "
 
 Adding a provider is additive by design: the scoping constraints below live in the layer
 itself, not in the provider, so a new implementation inherits them without rework. The two
-shipped providers' response shapes genuinely differ in a way worth knowing if you add a third:
+chat providers' response shapes genuinely differ in a way worth knowing if you add a third:
 Anthropic's tool-use `input` is a native JSON object, while OpenAI's `function.arguments` is a
 **JSON-encoded string** requiring a second decode — verified against OpenAI's published
 OpenAPI spec rather than assumed, specifically because guessing wrong here fails in a way that
@@ -251,9 +254,10 @@ ever necessary to answer a scoping question, so neither is offered the chance to
 
 ### Injection hardening
 
-The untrusted request travels inside explicit `<request>` tags in the message content, never
-concatenated into the system prompt, and the verdict comes back through a **forced tool call**
-— never parsed from prose. Those two close the mechanical injection surface: there is no
+For chat providers, the untrusted request travels inside explicit `<request>` tags in the
+message content, never concatenated into the system prompt, and the verdict comes back
+through a **forced tool call**. Native decision providers use separate request state and a
+validated Choice answer instead. Neither path parses a verdict from prose. Those two close the mechanical injection surface: there is no
 string an attacker controls that ever becomes an instruction, and no free text this layer ever
 interprets as a decision.
 

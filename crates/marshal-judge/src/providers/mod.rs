@@ -8,12 +8,14 @@
 //! that off structurally rather than by convention, and both apply to every provider, not
 //! just one:
 //!
-//! * The request is placed in the model's turn as clearly delimited data, inside explicit
-//!   `<request>` tags, never concatenated into the system prompt. The operator's instructions
+//! * Chat providers place the request in the model's turn inside explicit `<request>`
+//!   tags; native decision providers place it in separate state. Neither concatenates it
+//!   into operator instructions. The operator's instructions
 //!   and the untrusted content are never the same string.
-//! * The verdict comes back through a forced tool/function call, not by parsing prose. The
+//! * The verdict comes back through a forced tool/function call or a validated native
+//!   decision choice, not by parsing prose. The
 //!   model has exactly one way to answer, and this layer has exactly one way to read it:
-//!   deserialise the tool's arguments. There is no free-text path for an injected instruction
+//!   validate a bounded structured answer. There is no free-text path for an injected instruction
 //!   to influence, because none of the response is treated as instructions to begin with.
 //!
 //! What this does *not* guarantee: that the underlying model cannot be talked into answering
@@ -36,6 +38,8 @@ use serde::Deserialize;
 
 pub mod anthropic;
 pub mod openai;
+pub mod system_one;
+pub use system_one::SystemOneProvider;
 
 pub use anthropic::AnthropicProvider;
 pub use marshal_http::Endpoint;
@@ -61,6 +65,8 @@ pub struct JudgeVerdict {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    #[error("invalid native decision: {0}")]
+    InvalidDecision(String),
     #[error("resolving the provider host: {0}")]
     Resolve(#[source] std::io::Error),
     #[error("connecting to the provider: {0}")]

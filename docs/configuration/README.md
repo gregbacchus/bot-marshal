@@ -8,7 +8,8 @@ every restart.
 * [Bundles](bundles.md) — named, reusable allow-lists.
 * [Bind groups](bind-groups.md) — named, reusable `--isolation netns` bind paths.
 * [Transforms](transforms.md) — header setting/filtering, secret injection, response rewriting.
-* [LLM routing](llm-routing.md) — model aliases and OpenAI/Anthropic cross-dialect routing.
+* [LLM routing](llm-routing.md) — model aliases, OpenAI/Anthropic translation and native decision routing.
+* [Decision APIs](decision-apis.md) — native Jev/DecisionsApi judging and agent routing.
 * [OAuth2 credentials](oauth2.md) — grants, private-key auth, and an agent-driven flow marshal captures in band.
 * [Secret injection examples](secret-injection-examples.md) — worked configs for OpenAI, Anthropic, OpenRouter, Claude Code, Codex, GitHub, and others.
 * [Identity](identity.md) — which agent is connecting, and `marshal run`.
@@ -67,6 +68,7 @@ profile:                   # the embedded fallback — required, see Profiles
     set_headers:
       Accept: "application/json"
       Accept-Encoding: "identity"
+    # Native decision routing also uses llm_router with dialect: system_one; see Decision APIs.
     # llm_router:             # optional; see LLM routing for the full model-map example
     #   listen: [{ dialect: openai, hosts: ["llm.local"] }]
     #   models:
