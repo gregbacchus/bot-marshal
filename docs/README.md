@@ -10,6 +10,10 @@ Start here if you are new; each page below stands on its own once you have.
   request travels from capture through identity, the policy chain, and transforms, and where
   default-deny actually lives.
 
+## Practical guides
+
+* **[Read-only GitHub API access](guides/read-only-github.md)** — allow reads, refuse write methods, and inspect the policy decisions with curl.
+
 ## Find a feature
 
 | I want to… | Start here |

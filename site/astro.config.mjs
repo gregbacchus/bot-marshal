@@ -24,6 +24,7 @@ export default defineConfig({
           items: [
             { slug: 'overview', label: 'Documentation index' },
             { slug: 'getting-started' },
+            { slug: 'guides/read-only-github', label: 'Try read-only GitHub access' },
             { slug: 'concepts' },
           ],
         },

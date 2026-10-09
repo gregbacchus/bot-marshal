@@ -18,6 +18,7 @@ const REPO = 'https://github.com/gregbacchus/bot-marshal/blob/main';
 // A short, human subtitle per page. Starlight shows it under the title and in
 // search results, so a missing one is a visible gap rather than a nicety.
 const DESCRIPTIONS = {
+  'guides/read-only-github': 'Give AI agents read-only GitHub REST API access: a runnable proxy demo that allows GET requests, blocks write methods, and explains each decision.',
   'overview': 'Default-deny egress control for AI agents: policy, credential injection, and a complete audit trail.',
   'getting-started': 'Install bot-marshal, configure default-deny request rules, generate a TLS certificate authority, and connect your AI agent through the proxy.',
   'concepts': 'How a request travels from capture through identity, policy and transforms.',
