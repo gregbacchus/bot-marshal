@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.9.0](https://github.com/gregbacchus/bot-marshal/compare/e1f3caf000788e38630ae7478d79aad97777f909..v0.9.0) - 2026-10-09
+#### Features
+- add Google Analytics tracking script to enhance site analytics - ([e1f3caf](https://github.com/gregbacchus/bot-marshal/commit/e1f3caf000788e38630ae7478d79aad97777f909)) - test
+
+- - -
+
 ## [v0.8.0](https://github.com/gregbacchus/bot-marshal/compare/79d3ff4b168f6b414d80693b0b4dd4b1ffa440d0..v0.8.0) - 2026-10-09
 #### Features
 - add read-only GitHub access guide and update navigation links - ([79d3ff4](https://github.com/gregbacchus/bot-marshal/commit/79d3ff4b168f6b414d80693b0b4dd4b1ffa440d0)) - test
