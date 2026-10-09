@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.8.0](https://github.com/gregbacchus/bot-marshal/compare/79d3ff4b168f6b414d80693b0b4dd4b1ffa440d0..v0.8.0) - 2026-10-09
+#### Features
+- add read-only GitHub access guide and update navigation links - ([79d3ff4](https://github.com/gregbacchus/bot-marshal/commit/79d3ff4b168f6b414d80693b0b4dd4b1ffa440d0)) - test
+
+- - -
+
 ## [v0.7.0](https://github.com/gregbacchus/bot-marshal/compare/13089ba187fa0ace9db433f3d964b527673bb6f0..v0.7.0) - 2026-10-09
 #### Features
 - enhance SEO and discovery with structured data, update homepage metadata, and improve documentation - ([13089ba](https://github.com/gregbacchus/bot-marshal/commit/13089ba187fa0ace9db433f3d964b527673bb6f0)) - test
