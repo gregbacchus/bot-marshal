@@ -53,7 +53,7 @@ Then read **[Getting started](docs/getting-started.md)** for the walkthrough, an
 ## Documentation
 
 Full documentation lives in **[docs/](docs/)**, published at
-**<https://gregbacchus.github.io/bot-marshal/>**.
+**<https://bot-marshal.sh/>**.
 
 | | |
 |---|---|

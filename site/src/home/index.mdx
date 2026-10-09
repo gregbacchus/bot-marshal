@@ -7,7 +7,7 @@ hero:
   tagline: Let your AI agents use the services they need. Control each HTTP request, inject credentials without giving them to the agent, and explain every refusal.
   actions:
     - text: Get started
-      link: /bot-marshal/getting-started/
+      link: /getting-started/
       icon: right-arrow
     - text: Explore the features
       link: "#what-you-can-do"
@@ -42,8 +42,8 @@ inspect HTTPS requests. On Linux, `marshal run` can launch an agent in an isolat
 namespace with no direct route around the proxy. Other deployments need external network
 controls for enforced containment; proxy settings alone route cooperative clients.
 
-[Installation and platform support →](/bot-marshal/getting-started/#platform-prerequisites) ·
-[Client and container routing →](/bot-marshal/capture/)
+[Installation and platform support →](/getting-started/#platform-prerequisites) ·
+[Client and container routing →](/capture/)
 
 ## What you can do
 
@@ -54,53 +54,53 @@ controls for enforced containment; proxy settings alone route cooperative client
     permission. Refusals include a
     structured reason the agent can act on.
 
-    [How policy works →](/bot-marshal/concepts/#the-policy-chain-decides-whether) ·
-    [Configure request rules →](/bot-marshal/configuration/policy-layers/#rules)
+    [How policy works →](/concepts/#the-policy-chain-decides-whether) ·
+    [Configure request rules →](/configuration/policy-layers/#rules)
   </Card>
   <Card title="Use API keys without handing them to the agent" icon="seti:lock">
     Keep real credentials in marshal's protected environment or files. Marshal adds them to
     allowed requests for the destinations you choose and redacts learned secrets from its
     logs. Keep those sources outside the agent's environment and filesystem access.
 
-    [Configure secret injection →](/bot-marshal/configuration/transforms/#secret-injection) ·
-    [Provider examples →](/bot-marshal/configuration/secret-injection-examples/)
+    [Configure secret injection →](/configuration/transforms/#secret-injection) ·
+    [Provider examples →](/configuration/secret-injection-examples/)
   </Card>
   <Card title="Manage OAuth login and token renewal" icon="seti:lock">
     Enrol a credential once and let marshal refresh access tokens as needed. For a vendor
     CLI, supervised login capture can discover its OAuth configuration; capture mode decides
     whether the tool also receives a working credential.
 
-    [Choose a login workflow →](/bot-marshal/configuration/oauth2/) ·
-    [Login capture walkthrough →](/bot-marshal/configuration/oauth2/#from-bootstrap-to-an-authenticated-request)
+    [Choose a login workflow →](/configuration/oauth2/) ·
+    [Login capture walkthrough →](/configuration/oauth2/#from-bootstrap-to-an-authenticated-request)
   </Card>
   <Card title="Choose models without changing every client" icon="rocket">
     Give agents stable model names such as `fast` and `smart`, then map them to providers
     or your own compatible server. Translate between OpenAI Chat Completions and Anthropic
     Messages, including streaming responses and tool calls.
 
-    [Model routing and complete configuration →](/bot-marshal/configuration/llm-routing/)
+    [Model routing and complete configuration →](/configuration/llm-routing/)
   </Card>
   <Card title="Control individual MCP tools" icon="approve-check">
     Model Context Protocol (MCP) calls share an endpoint, but need different permissions.
     Permit selected tools and constrain their arguments—for example, issue creation only
     in approved repositories. Filter tool listings so agents see the tools they may use.
 
-    [MCP controls and configuration →](/bot-marshal/configuration/policy-layers/#mcp)
+    [MCP controls and configuration →](/configuration/policy-layers/#mcp)
   </Card>
   <Card title="Detect credentials leaving in requests" icon="seti:lock">
     Scan headers and query strings for known credential patterns, and optionally inspect
     request bodies with an explicit size cap. Refuse matches before forwarding. This is
     pattern detection; response scanning is not implemented.
 
-    [Leak detection and its limits →](/bot-marshal/configuration/policy-layers/#dlp)
+    [Leak detection and its limits →](/configuration/policy-layers/#dlp)
   </Card>
   <Card title="Give each agent its own permissions" icon="approve-check">
     A release bot and a research assistant need different access. Select a named policy
     profile using connection identity, and launch Linux agents with `marshal run` to enforce
     proxy routing. Choose an identity resolver appropriate to your deployment.
 
-    [Configure agent identity →](/bot-marshal/configuration/identity/) ·
-    [Linux containment →](/bot-marshal/configuration/identity/#netns-enforces-rather-than-identifies)
+    [Configure agent identity →](/configuration/identity/) ·
+    [Linux containment →](/configuration/identity/#netns-enforces-rather-than-identifies)
   </Card>
   <Card title="Add an AI judge where static rules fall short" icon="open-book">
     Put hard rules first, then ask an LLM to judge requests that need additional context.
@@ -109,30 +109,30 @@ controls for enforced containment; proxy settings alone route cooperative client
 
     Native decision APIs are also available for bounded verdicts and agent decision routing.
 
-    [Jev and DecisionsApi →](/bot-marshal/configuration/decision-apis/) ·
-    [Judge configuration and failure behavior →](/bot-marshal/configuration/policy-layers/#judge)
+    [Jev and DecisionsApi →](/configuration/decision-apis/) ·
+    [Judge configuration and failure behavior →](/configuration/policy-layers/#judge)
   </Card>
   <Card title="Keep streamed responses responsive" icon="rocket">
     Bodies stream by default, including server-sent events (SSE), WebSockets and large
     uploads. Features that inspect a whole body require explicit, bounded buffering, so
     you can choose inspection costs deliberately.
 
-    [Streaming and buffering →](/bot-marshal/concepts/#bodies-stream-by-default) ·
-    [Response size limits →](/bot-marshal/configuration/transforms/#response-size-limits)
+    [Streaming and buffering →](/concepts/#bodies-stream-by-default) ·
+    [Response size limits →](/configuration/transforms/#response-size-limits)
   </Card>
   <Card title="See what happened and why" icon="open-book">
     Follow each request's agent identity, policy decision and accumulated evidence. Use
     structured audit records and metrics to investigate refusals, and warn mode to discover
     an existing agent's needs before enforcing a new policy.
 
-    [Audit records →](/bot-marshal/observability/#the-audit-log) ·
-    [Roll out with warn mode →](/bot-marshal/operations/#rolling-it-out)
+    [Audit records →](/observability/#the-audit-log) ·
+    [Roll out with warn mode →](/operations/#rolling-it-out)
   </Card>
 </CardGrid>
 
-Headers and response sizes are configurable too: [set or filter request headers](/bot-marshal/configuration/transforms/#header-transforms)
-and [cap response bodies](/bot-marshal/configuration/transforms/#response-size-limits). For service
-operation, use the [management API and reload guide](/bot-marshal/operations/) to inspect
+Headers and response sizes are configurable too: [set or filter request headers](/configuration/transforms/#header-transforms)
+and [cap response bodies](/configuration/transforms/#response-size-limits). For service
+operation, use the [management API and reload guide](/operations/) to inspect
 health, change policies and identify settings that require a restart.
 
 ## Follow a request
@@ -151,7 +151,7 @@ an audit record.
   <span class="deny">refusal + reason</span>
 </div>
 
-[The full request lifecycle →](/bot-marshal/concepts/#the-path-a-request-takes)
+[The full request lifecycle →](/concepts/#the-path-a-request-takes)
 
 ## Try it
 
@@ -184,4 +184,4 @@ curl --cacert ~/.config/bot-marshal/ca.crt -x http://127.0.0.1:8080 https://api.
 This allowlisted request should succeed. Follow the walkthrough for denied requests and
 Linux namespace isolation; proxy variables alone do not enforce containment.
 
-[Full walkthrough →](/bot-marshal/getting-started/) · [Documentation index →](/bot-marshal/overview/)
+[Full walkthrough →](/getting-started/) · [Documentation index →](/overview/)

@@ -12,7 +12,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SITE = path.resolve(here, '..');
 const DOCS = path.resolve(SITE, '../docs');
 const OUT = path.join(SITE, 'src/content/docs');
-const BASE = '/bot-marshal';
+const BASE = '';
 const REPO = 'https://github.com/gregbacchus/bot-marshal/blob/main';
 
 // A short, human subtitle per page. Starlight shows it under the title and in

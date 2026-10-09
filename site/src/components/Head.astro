@@ -9,3 +9,11 @@ import Default from '@astrojs/starlight/components/Head.astro';
   rel="stylesheet"
   href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
 />
+
+<!-- Cloudflare Web Analytics: keep this external script unbundled. -->
+<script
+  is:inline
+  type="module"
+  src="https://static.cloudflareinsights.com/beacon.min.js"
+  data-cf-beacon='{"token": "ba12f3f433e940079cb1271fad5cdf80"}'
+></script>

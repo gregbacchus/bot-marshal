@@ -3,8 +3,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://gregbacchus.github.io',
-  base: '/bot-marshal',
+  site: 'https://bot-marshal.sh',
   trailingSlash: 'always',
   integrations: [
     starlight({
@@ -32,19 +31,19 @@ export default defineConfig({
           // Absolute URLs preserve section anchors through Starlight's path formatter.
           label: 'Explore features',
           items: [
-            { label: 'Request rules', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#rules' },
-            { label: 'Secret injection', link: 'https://gregbacchus.github.io/bot-marshal/configuration/transforms/#secret-injection' },
+            { label: 'Request rules', link: 'https://bot-marshal.sh/configuration/policy-layers/#rules' },
+            { label: 'Secret injection', link: 'https://bot-marshal.sh/configuration/transforms/#secret-injection' },
             { slug: 'configuration/oauth2', label: 'OAuth login and renewal' },
             { slug: 'configuration/llm-routing', label: 'Model and provider routing' },
-            { label: 'MCP tool controls', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#mcp' },
-            { label: 'Credential leak detection', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#dlp' },
-            { label: 'Agent identity and isolation', link: 'https://gregbacchus.github.io/bot-marshal/configuration/identity/' },
+            { label: 'MCP tool controls', link: 'https://bot-marshal.sh/configuration/policy-layers/#mcp' },
+            { label: 'Credential leak detection', link: 'https://bot-marshal.sh/configuration/policy-layers/#dlp' },
+            { label: 'Agent identity and isolation', link: 'https://bot-marshal.sh/configuration/identity/' },
             { slug: 'configuration/decision-apis', label: 'Native decision APIs' },
-            { label: 'AI request judge', link: 'https://gregbacchus.github.io/bot-marshal/configuration/policy-layers/#judge' },
-            { label: 'Header rewriting', link: 'https://gregbacchus.github.io/bot-marshal/configuration/transforms/#header-transforms' },
-            { label: 'Response size limits', link: 'https://gregbacchus.github.io/bot-marshal/configuration/transforms/#response-size-limits' },
-            { label: 'Management API and reload', link: 'https://gregbacchus.github.io/bot-marshal/operations/' },
-            { label: 'Audit trail', link: 'https://gregbacchus.github.io/bot-marshal/observability/#the-audit-log' },
+            { label: 'AI request judge', link: 'https://bot-marshal.sh/configuration/policy-layers/#judge' },
+            { label: 'Header rewriting', link: 'https://bot-marshal.sh/configuration/transforms/#header-transforms' },
+            { label: 'Response size limits', link: 'https://bot-marshal.sh/configuration/transforms/#response-size-limits' },
+            { label: 'Management API and reload', link: 'https://bot-marshal.sh/operations/' },
+            { label: 'Audit trail', link: 'https://bot-marshal.sh/observability/#the-audit-log' },
           ],
         },
         {
