@@ -1,8 +1,19 @@
 ---
 import Default from '@astrojs/starlight/components/Head.astro';
+
+const website = {
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  name: 'bot-marshal',
+  url: 'https://bot-marshal.sh/',
+  description: 'An open-source egress firewall for AI agents.',
+};
 ---
 
 <Default><slot /></Default>
+{Astro.url.pathname === '/' && (
+  <script is:inline type="application/ld+json" set:html={JSON.stringify(website)} />
+)}
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link

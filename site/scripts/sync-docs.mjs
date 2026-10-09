@@ -19,7 +19,7 @@ const REPO = 'https://github.com/gregbacchus/bot-marshal/blob/main';
 // search results, so a missing one is a visible gap rather than a nicety.
 const DESCRIPTIONS = {
   'overview': 'Default-deny egress control for AI agents: policy, credential injection, and a complete audit trail.',
-  'getting-started': 'Install it, write a minimal config, generate a CA, and put a request through it.',
+  'getting-started': 'Install bot-marshal, configure default-deny request rules, generate a TLS certificate authority, and connect your AI agent through the proxy.',
   'concepts': 'How a request travels from capture through identity, policy and transforms.',
   'cli': 'Every subcommand and global flag.',
   'capture': 'Explicit proxy ingress, the DNS resolver, and upstream destination checks.',
@@ -32,7 +32,7 @@ const DESCRIPTIONS = {
   'roadmap': 'What is built, what is next, and what was deliberately dropped.',
   'configuration/index': 'The config file, and how it splits across profiles, bundles and transforms.',
   'configuration/profiles': 'The unit of policy: embedded and named profiles.',
-  'configuration/policy-layers': 'denylist, allowlist, rules, dlp, mcp and judge.',
+  'configuration/policy-layers': 'Configure bot-marshal request rules, allowlists, denylists, credential leak detection, MCP tool controls, and AI policy judges.',
   'configuration/bundles': 'Named, reusable allow-lists.',
   'configuration/bind-groups': 'Named, reusable sandbox bind paths for marshal run --isolation netns.',
   'configuration/transforms': 'Header filtering, secret injection, and response rewriting.',
@@ -92,7 +92,7 @@ function transform(src, rel) {
     .join('');
 
   const slug = slugFor(rel);
-  const description = DESCRIPTIONS[slug];
+  const description = DESCRIPTIONS[slug] ?? `Design decision for bot-marshal, the AI agent egress firewall: ${title.replace(/^ADR \d+: /, '')}.`;
   const fm = [
     '---',
     `title: ${JSON.stringify(title)}`,

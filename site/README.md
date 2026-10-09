@@ -47,3 +47,23 @@ Cloudflare Web Analytics does not support custom click or code-copy events.
 The site is built for the root of `https://bot-marshal.sh/`. Configure that custom domain
 and HTTPS in the repository's GitHub Pages settings; DNS configuration alone does not
 change the Pages domain.
+
+## Google Search discovery
+
+Starlight emits static HTML, page titles, descriptions, canonical URLs, and an XML sitemap.
+`public/robots.txt` allows crawling and advertises `https://bot-marshal.sh/sitemap-index.xml`.
+The homepage includes WebSite structured data identifying the site name. Page descriptions
+are maintained in `scripts/sync-docs.mjs`; the homepage metadata lives in `src/home/index.mdx`.
+
+After deploying to the custom domain:
+
+1. Add a **Domain property** for `bot-marshal.sh` in [Google Search Console](https://search.google.com/search-console).
+2. Add Google's supplied TXT verification record in Cloudflare DNS, then verify ownership.
+3. Submit `https://bot-marshal.sh/sitemap-index.xml` in **Sitemaps**.
+4. Use **URL inspection** on the homepage and getting-started page, test the live URLs,
+   and request indexing. Monitor **Page indexing** and **Performance** for crawl errors,
+   impressions, search queries, and clicks.
+
+Confirm the public sitemap and robots file return HTTP 200, and that Cloudflare does not
+challenge Googlebot. Search Console measures Google discovery; Cloudflare Web Analytics
+measures visits after readers arrive. Sitemap submission does not guarantee indexing or ranking.
