@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.6.1](https://github.com/gregbacchus/bot-marshal/compare/f221f3a04e1f47d25a70843e53d4a88fd1ec4010..v0.6.1) - 2026-10-09
+#### Bug Fixes
+- update documentation links to use the new domain and adjust base paths - ([f221f3a](https://github.com/gregbacchus/bot-marshal/commit/f221f3a04e1f47d25a70843e53d4a88fd1ec4010)) - test
+
+- - -
+
 ## [v0.6.0](https://github.com/gregbacchus/bot-marshal/compare/ecb945b34dc37f965cc785793efa6b12ab549abd..v0.6.0) - 2026-10-02
 #### Features
 - add support for native decision APIs and System One dialect - ([d313cbe](https://github.com/gregbacchus/bot-marshal/commit/d313cbe6c9342dde0dfaa762f89c1652180b6a96)) - test
