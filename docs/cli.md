@@ -25,7 +25,10 @@ the first thing most people hit is the default path they never typed.
 Loads and validates the config, prints every diagnostic, exits non-zero on any error. That
 includes building every profile's `request_transforms.secrets` — whose schema the validator
 cannot see, since the config model carries those entries untyped — so a misspelled field in a
-secret source fails here rather than at the next start. Nothing is resolved or fetched:
+secret source fails here rather than at the next start. Unsupported response-body transforms produce a warning naming the transform and explaining
+that `serve` refuses the profile; only response `limit` is implemented.
+
+Nothing is resolved or fetched:
 building a source parses its configuration, it does not read the environment variable, open
 the file, or call the token endpoint. The one thing it does read is `tls.upstream_ca_certs`,
 so a config naming a CA file that is not there now fails the check rather than the next start.

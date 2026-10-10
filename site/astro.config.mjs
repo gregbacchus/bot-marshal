@@ -1,12 +1,13 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { shellFreeSearch } from './scripts/search-integration.mjs';
 
 export default defineConfig({
   site: 'https://bot-marshal.sh',
   trailingSlash: 'always',
   integrations: [
-    starlight({
+    shellFreeSearch(starlight({
       title: 'bot-marshal',
       description:
         'An egress firewall for AI agents: default-deny per-request policy, credentials injected at the boundary, and a complete audit trail.',
@@ -79,6 +80,6 @@ export default defineConfig({
           ],
         },
       ],
-    }),
+    })),
   ],
 });

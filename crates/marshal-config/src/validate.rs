@@ -346,6 +346,14 @@ fn check_profile(
                 ),
             });
         }
+        if !matches!(t, crate::model::BodyTransform::Limit { .. }) {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                location: format!("{at}.response_transforms.body[{i}]"),
+                message: format!("`{}` is not implemented; serve refuses this profile. Remove the transform to make the profile runnable", t.name()),
+            });
+            continue;
+        }
         out.push(Diagnostic {
             severity: Severity::Warning,
             location: format!("{at}.response_transforms.body[{i}]"),
@@ -752,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn response_body_transforms_warn_about_buffering() {
+    fn unimplemented_response_transforms_warn_that_serve_refuses_the_profile() {
         use crate::model::{BodyTransform, ResponseTransforms};
         let cfg = cfg_with(Profile {
             response_transforms: ResponseTransforms {
@@ -768,7 +776,9 @@ mod tests {
         assert!(
             d.iter().any(|d| d.severity == Severity::Warning
                 && d.location == "profiles.p.response_transforms.body[0]"
-                && d.message.contains("cannot stream")),
+                && d.message.contains("not implemented")
+                && d.message.contains("serve")
+                && !d.message.contains("cannot stream")),
             "{d:?}"
         );
     }

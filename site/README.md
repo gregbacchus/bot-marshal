@@ -22,6 +22,18 @@ npm run dev
 npm run build && npm run preview   # exactly what CI publishes
 ```
 
+## Build checks
+
+Run `npm test` for the content-cache and search-index failure regressions, then `npm run build`.
+The docs loader evicts changed or removed cached files before loading them, working around
+Astro 5's duplicate-ID warning for updated entries while retaining unchanged collision
+records. It does not suppress duplicate-ID diagnostics.
+
+Search stays enabled in Starlight. `scripts/search-integration.mjs` replaces its shell-based
+build hook with the Pagefind Node API, uses the pinned direct dependency, and fails the build
+if indexing or writing the search bundle fails. This avoids Node's `DEP0190` warning without
+hiding deprecations or disabling search.
+
 ## Adding a page
 
 Add the markdown under `docs/`, then add it to the `sidebar` in `astro.config.mjs` — ADRs are

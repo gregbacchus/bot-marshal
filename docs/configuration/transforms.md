@@ -307,7 +307,8 @@ replaces that default rather than combining with it.
 
 `redact`, `summarize` and `compact` are declared configuration shapes but **are not
 implemented**. A profile naming any of them is rejected when `serve` builds its chain.
-`config check` can parse these shapes and warn about buffering without proving they work.
+`config check` parses these shapes and warns that the transform is unimplemented and
+`serve` refuses the profile. Remove the unsupported transform to make the profile runnable.
 Do not rely on them to scrub a response or to preserve streaming.
 
 For reference, `redact` declares `patterns` (default `[]`) and a `max_bytes` buffering cap
