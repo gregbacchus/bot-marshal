@@ -25,7 +25,7 @@ const DESCRIPTIONS = {
   'cli': 'Every subcommand and global flag.',
   'capture': 'Explicit proxy ingress, the DNS resolver, and upstream destination checks.',
   'troubleshooting': 'Diagnose startup, trust, attribution, policy and OAuth failures.',
-  'configuration/decision-apis': 'Native Jev and DecisionsApi judges, confidence thresholds and decision routing.',
+  'configuration/decision-apis': 'Native decision judges, confidence thresholds and decision routing.',
   'configuration/llm-routing': 'Model aliases, OpenAI/Anthropic JSON and SSE translation, and native decision routing.',
   'observability': 'Logs, the audit trail, and what to watch.',
   'operations': 'The management API, hot reload, and rolling out default-deny.',

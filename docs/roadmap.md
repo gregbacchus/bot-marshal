@@ -115,6 +115,5 @@ without a network.
 | `marshal-audit` | JSON records, tracing layer |
 | `marshal-cli` | the `marshal` binary |
 
-Native System One decisions are supported as judge providers (`system_one` and `decisions_api`)
-and as agent model routes. DecisionsApi is an independent service; an official OpenAI decision
-adapter awaits a published contract. See [Decision APIs](configuration/decision-apis.md).
+Native System One decisions are supported through `dialect: system_one`
+and an explicit service address, and as agent model routes. Chat judges use `openai` or `anthropic` dialects. See [Decision APIs](configuration/decision-apis.md).

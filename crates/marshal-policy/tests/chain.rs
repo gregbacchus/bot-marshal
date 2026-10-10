@@ -166,7 +166,7 @@ profile:
   default_action: deny
   policy:
     - layer: judge
-      provider: { type: anthropic, model: m, api_key_env: K }
+      provider: { dialect: anthropic, model: m, api_key_env: K }
       prompt: "x"
 "#);
     // A config naming a layer we cannot run must fail loudly: silently dropping it would

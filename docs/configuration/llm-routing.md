@@ -12,6 +12,11 @@ OpenRouter, Azure, vLLM or an internal compatible gateway. A mapping may keep th
 or translate OpenAI to Anthropic and Anthropic to OpenAI in either direction. System One
 maps only to System One; decision/chat translation is refused.
 
+Judge providers and router entries use the same `dialect` names for wire formats. A judge
+selects its implementation directly from `provider.dialect`; neither configuration needs a
+provider `type`. The router selects its destination through the model map independently of
+the judge.
+
 ## A complete mapping
 
 ```yaml

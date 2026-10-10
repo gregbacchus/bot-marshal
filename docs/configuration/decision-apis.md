@@ -1,34 +1,40 @@
 # Decision APIs
 
 Use a native decision model when you need a bounded answer rather than generated text.
-Marshal supports TypeSafe/Jev System One and the independent DecisionsApi service, both at
-`POST /v1/systemone`. They can judge marshal's policy requests or serve decision requests
-made by your agents through the model router.
+Marshal supports the System One decision API format at `POST /v1/systemone`, including
+compatible hosted services and local servers such as Ollama.
 
 These are separate uses: the **judge** receives only reduced request metadata, while a
 **routed agent request** carries the state and questions the agent supplies. Allow that
 outbound data deliberately in your policy.
 
-## Services and maturity
+## Judge dialects
 
-| judge provider type | default origin | model example |
+A judge's `provider.dialect` selects both its API format and implementation. `base_url`
+selects the service. There is no `provider.type` field.
+
+| judge dialect | mechanism | service address |
 |---|---|---|
-| `system_one` | `https://api.typesafe.ai` | `jev-latest` |
-| `decisions_api` | `https://decisionapi.net` | `typesafe/jev-1.13` |
+| `openai` | forced verdict tool call through Chat Completions | optional `base_url`, defaults to `https://api.openai.com` |
+| `anthropic` | forced verdict tool call through Messages | optional `base_url`, defaults to `https://api.anthropic.com` |
+| `system_one` | validated native Choice answer | required `base_url`, no default service |
 
-DecisionsApi is an independent multi-provider service. Its site discusses an OpenAI Decisions
-API preview, but this adapter implements the site's documented System One endpoint; it does
-not call an undocumented official OpenAI endpoint. Availability and model IDs may change.
-Use your own compatibility, latency, cost and accuracy measurements before switching a
-production judge. Existing OpenAI/Anthropic judges remain available.
+Chat dialects accept `max_tokens`; `system_one` accepts `min_confidence`. Options belonging
+to another dialect are rejected. Native authentication is optional through `api_key_env`;
+chat dialects require it.
 
-Source contracts: [TypeSafe OpenAPI](https://api.typesafe.ai/openapi.json),
-[DecisionsApi documentation](https://decisionapi.net/docs), and its
-[OpenAI preview guide](https://decisionapi.net/decisions-api). Checked 2 October 2026.
+For agent request routing, `dialect` uses the same format names; the model map selects its
+destination. Routing and judge configuration are independent. Chat and decision formats
+cannot be translated into one another.
+
+Source contracts: [TypeSafe OpenAPI](https://api.typesafe.ai/openapi.json) and
+[Ollama System One reference](https://docs.ollama.com/api/systemone). Schema compatibility
+is not evidence of model accuracy or account access; evaluate the selected model on your
+policy cases before relying on it.
 
 ## Use a decision model as the judge
 
-This is a complete profile fragment. Keep `DECISIONS_API_KEY` in marshal's environment or
+This is a complete profile fragment. Keep `DECISION_API_KEY` in marshal's environment or
 protected env file, outside the agent's environment and accessible filesystem.
 
 ```yaml
@@ -40,9 +46,10 @@ policy:
     on_miss: deny
   - layer: judge
     provider:
-      type: decisions_api
-      model: "typesafe/jev-1.13"
-      api_key_env: DECISIONS_API_KEY
+      dialect: system_one
+      base_url: https://api.typesafe.ai
+      model: "jev-latest"
+      api_key_env: DECISION_API_KEY
       min_confidence: 0.9
     scope: [{ host: "api.github.com" }]
     prompt: "Permit GET and HEAD repository reads. Refuse repository writes. Pass when the available metadata does not establish which applies."
@@ -51,20 +58,22 @@ policy:
     on_timeout: deny
 ```
 
-For direct TypeSafe access, change `type` to `system_one`, `model` to an available TypeSafe
-model such as `jev-latest`, and `api_key_env` to your TypeSafe key variable.
+For a local Ollama judge, set `base_url: http://localhost:11434`, choose a decision model
+such as `nimble`, and omit `api_key_env`. Download the model on the server first. For hosted
+services, keep the key in marshal's environment, outside the agent's environment.
 
 | field | default | meaning |
 |---|---|---|
 | `model` | required | service model ID or alias |
-| `api_key_env` | required | variable holding that service's bearer API key |
-| `base_url` | service origin above | optional `http(s)://host[:port]`, without a path; useful for compatible gateways or local tests |
+| `api_key_env` | omitted | optional variable holding the service bearer key; when supplied, it must exist |
+| `base_url` | required | `http(s)://host[:port]`, without a path; selects the decision service |
 | `min_confidence` | `0.9` | finite value from 0 to 1; below it the judge returns `pass` |
 
 The endpoint path is `/v1/systemone`. Native models do not generate a verdict explanation,
 so there is no `max_tokens` setting for these providers. Marshal supplies one Choice question
-with `allow`, `deny` and `pass` options. The operator's policy is in the question's
-instructions; the request is separate state containing method, host, path and header names.
+with `allow`, `deny` and `pass` options. The operator's policy and a fixed evaluation
+question are separate fields in an `instructions` object; the request is separate state
+containing method, host, path and header names.
 Neither header values nor request bodies reach the judge.
 
 Marshal validates the answer type, selected option, confidence and probability distribution.
@@ -94,10 +103,6 @@ request_transforms:
     listen: [{ dialect: system_one, hosts: ["decisions.local"] }]
     models:
       quick:
-        model: "typesafe/jev-1.13"
-        dialect: system_one
-        host: "decisionapi.net"
-      direct:
         model: "jev-latest"
         dialect: system_one
         host: "api.typesafe.ai"
@@ -105,12 +110,8 @@ request_transforms:
     max_request_bytes: 65536
     max_response_bytes: 262144
   secrets:
-    - name: DECISIONS
-      source: { type: env, var: DECISIONS_API_KEY }
-      inject: { type: bearer }
-      rules: [{ host: "decisionapi.net" }]
-    - name: TYPESAFE
-      source: { type: env, var: TYPESAFE_API_KEY }
+    - name: DECISION
+      source: { type: env, var: DECISION_API_KEY }
       inject: { type: bearer }
       rules: [{ host: "api.typesafe.ai" }]
 ```
@@ -118,8 +119,8 @@ request_transforms:
 Configure the agent's API base URL as `https://decisions.local` and send a native request to
 `/v1/systemone` with `model: "quick"`, `state`, and a non-empty `questions` object. The proxy
 can route this synthetic hostname without resolving it to a real server; the client must use
-marshal's explicit proxy and trust its CA. Choosing `direct` sends the same wire format to
-TypeSafe instead. The service still determines which question types its selected model accepts.
+marshal's explicit proxy and trust its CA. The service still determines which question
+types its selected model accepts.
 
 Policy evaluates the client-facing host and model before mapping. The mapped destination
 still passes the upstream guard. Client credentials are removed; the service credential is

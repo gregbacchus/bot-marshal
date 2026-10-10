@@ -269,7 +269,6 @@ fn check_profile(
         if let crate::layer::LayerConfig::Judge(judge) = layer {
             match &judge.provider {
                 crate::layer::Provider::SystemOne { min_confidence, .. }
-                | crate::layer::Provider::DecisionsApi { min_confidence, .. }
                     if !min_confidence.is_finite() || !(0.0..=1.0).contains(min_confidence) =>
                 {
                     out.push(Diagnostic {

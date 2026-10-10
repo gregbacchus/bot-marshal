@@ -1,4 +1,4 @@
-//! Native decisions, verified against TypeSafe's OpenAPI schema and DecisionsApi's docs.
+//! Native decisions using the System One wire format.
 //! The operator's question stays separate from request data. Native choices replace the
 //! forced tool call; no provider-supplied prose or arbitrary label becomes a verdict.
 
@@ -14,7 +14,7 @@ use crate::request::JudgeRequest;
 
 pub struct SystemOneProvider {
     model: String,
-    api_key: String,
+    api_key: Option<String>,
     endpoint: Endpoint,
     min_confidence: f64,
     tls_config: Arc<rustls::ClientConfig>,
@@ -44,11 +44,21 @@ impl SystemOneProvider {
         }
         Ok(Self {
             model,
-            api_key,
+            api_key: Some(api_key),
             endpoint: Endpoint::parse(base_url)?,
             min_confidence,
             tls_config: default_tls_config(),
         })
+    }
+
+    pub fn without_auth(
+        model: String,
+        base_url: &str,
+        min_confidence: f64,
+    ) -> Result<Self, ProviderError> {
+        let mut provider = Self::new(model, String::new(), base_url, min_confidence)?;
+        provider.api_key = None;
+        Ok(provider)
     }
 
     pub fn from_env(
@@ -82,10 +92,15 @@ impl Provider for SystemOneProvider {
         request: &JudgeRequest,
         prompt: &str,
     ) -> Result<JudgeVerdict, ProviderError> {
+        let authorization = self.api_key.as_ref().map(|key| format!("Bearer {key}"));
+        let headers: Vec<(&str, &str)> = authorization
+            .as_deref()
+            .map(|value| vec![("authorization", value)])
+            .unwrap_or_default();
         let req = json_post_request(
             &self.endpoint,
             "/v1/systemone",
-            &[("authorization", &format!("Bearer {}", self.api_key))],
+            &headers,
             self.body(request, prompt),
         );
         let response =
@@ -118,7 +133,7 @@ fn parse_verdict(response: Value, min_confidence: f64) -> Result<JudgeVerdict, P
             "expected a valid allow/deny/pass choice with normalized probabilities".into(),
         )
     };
-    // DecisionsApi documents both direct responses and a result envelope. Accept either
+    // Compatible gateways may wrap answers in a result envelope. Accept either
     // explicitly, but refuse competing answers rather than picking the permissive one.
     if response.get("answers").is_some() && response.pointer("/result/answers").is_some() {
         return Err(invalid());

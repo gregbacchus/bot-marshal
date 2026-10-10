@@ -279,23 +279,6 @@ pub fn build_chain(
                 })?;
 
                 let provider: Arc<dyn Provider> = match &cfg.provider {
-                    marshal_config::layer::Provider::Anthropic {
-                        model,
-                        api_key_env,
-                        max_tokens,
-                        base_url,
-                    } => Arc::new(
-                        AnthropicProvider::from_env(
-                            model.clone(),
-                            api_key_env,
-                            *max_tokens,
-                            base_url.as_deref(),
-                        )
-                        .map_err(|source| BuildError::JudgeProvider {
-                            profile: profile_name.to_owned(),
-                            source,
-                        })?,
-                    ),
                     marshal_config::layer::Provider::OpenAi {
                         model,
                         api_key_env,
@@ -313,38 +296,46 @@ pub fn build_chain(
                             source,
                         })?,
                     ),
+                    marshal_config::layer::Provider::Anthropic {
+                        model,
+                        api_key_env,
+                        max_tokens,
+                        base_url,
+                    } => Arc::new(
+                        AnthropicProvider::from_env(
+                            model.clone(),
+                            api_key_env,
+                            *max_tokens,
+                            base_url.as_deref(),
+                        )
+                        .map_err(|source| BuildError::JudgeProvider {
+                            profile: profile_name.to_owned(),
+                            source,
+                        })?,
+                    ),
                     marshal_config::layer::Provider::SystemOne {
                         model,
                         api_key_env,
                         base_url,
                         min_confidence,
-                    }
-                    | marshal_config::layer::Provider::DecisionsApi {
-                        model,
-                        api_key_env,
-                        base_url,
-                        min_confidence,
                     } => {
-                        let default_base = match &cfg.provider {
-                            marshal_config::layer::Provider::DecisionsApi { .. } => {
-                                "https://decisionapi.net"
-                            }
-                            _ => "https://api.typesafe.ai",
-                        };
-                        Arc::new(
-                            SystemOneProvider::from_env(
+                        let result = match api_key_env {
+                            Some(key) => SystemOneProvider::from_env(
                                 model.clone(),
-                                api_key_env,
-                                base_url.as_deref().unwrap_or(default_base),
+                                key,
+                                base_url,
                                 *min_confidence,
-                            )
-                            .map_err(|source| {
-                                BuildError::JudgeProvider {
-                                    profile: profile_name.to_owned(),
-                                    source,
-                                }
-                            })?,
-                        )
+                            ),
+                            None => SystemOneProvider::without_auth(
+                                model.clone(),
+                                base_url,
+                                *min_confidence,
+                            ),
+                        };
+                        Arc::new(result.map_err(|source| BuildError::JudgeProvider {
+                            profile: profile_name.to_owned(),
+                            source,
+                        })?)
                     }
                 };
 

@@ -57,16 +57,16 @@ request_transforms:
 If requests carry an `OpenAI-Organization` or `OpenAI-Project` header, those aren't secrets —
 set them with `set_headers` alongside this swap, not through injection.
 
-### Jev System One and DecisionsApi
+### System One decision services
 
-Both native decision services use a Bearer token. For agent requests, inject the origin's
-credential after model routing, with a rule scoped to `api.typesafe.ai` or `decisionapi.net`
-as appropriate. The [Decision APIs guide](decision-apis.md#route-an-agents-decision-requests)
-includes a complete routing and secret-injection example for both services.
+For agent requests to an authenticated decision service, inject its Bearer credential after
+model routing with a rule scoped to the mapped origin, such as `api.typesafe.ai`.
+The [Decision APIs guide](decision-apis.md#route-an-agents-decision-requests) includes a
+complete routing and secret-injection example. Local unauthenticated servers need no swap.
 
-Judge calls use the provider's `api_key_env` directly rather than request transforms; see
-[using a native decision judge](decision-apis.md#use-a-decision-model-as-the-judge). DecisionsApi
-is an independent service, so its key is separate from an OpenAI API key.
+Judge calls use `dialect: system_one`, and an explicit `base_url`.
+They use the optional `api_key_env` directly rather than request transforms; see
+[using a native decision judge](decision-apis.md#use-a-decision-model-as-the-judge).
 
 ### OpenRouter
 

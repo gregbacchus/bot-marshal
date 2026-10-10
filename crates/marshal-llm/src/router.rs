@@ -510,7 +510,7 @@ mod tests {
     async fn native_decision_routing_preserves_questions_and_strips_client_credentials() {
         let config = serde_json::from_value(json!({
             "listen": [{"dialect": "system_one", "hosts": ["decisions.test"]}],
-            "models": {"quick": {"model": "typesafe/jev-1.13", "dialect": "system_one", "host": "decisionapi.net"}}
+            "models": {"quick": {"model": "jev-latest", "dialect": "system_one", "host": "api.typesafe.ai"}}
         })).unwrap();
         let router = LlmRouter::new(config);
         let questions = json!({"route": {"type": "choice", "instructions": "Pick a route", "criteria": {"fast": "Simple", "slow": "Complex"}}});
@@ -521,16 +521,16 @@ mod tests {
             json!({"model": "quick", "state": state, "questions": questions}),
         );
         RequestTransform::apply(&router, &mut cx).await.unwrap();
-        assert_eq!(cx.authority.host, "decisionapi.net");
+        assert_eq!(cx.authority.host, "api.typesafe.ai");
         assert_eq!(cx.uri.path(), "/v1/systemone");
         assert!(!cx.headers.contains_key("authorization"));
         assert!(!cx.headers.contains_key("x-api-key"));
         let body = json_body(&cx.body);
-        assert_eq!(body["model"], "typesafe/jev-1.13");
+        assert_eq!(body["model"], "jev-latest");
         assert_eq!(body["state"], state);
         assert_eq!(body["questions"], questions);
         let answers = json!({"route": {"type": "choice", "choice": "fast", "confidence": 0.9, "probabilities": {"fast": 0.95, "slow": 0.05}}});
-        let mut response = ResponseParts { status: http::StatusCode::OK, headers: http::HeaderMap::new(), body: BodyHandle::Buffered(Bytes::from(serde_json::to_vec(&json!({"model": "typesafe/jev-1.13", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 0}})).unwrap())) };
+        let mut response = ResponseParts { status: http::StatusCode::OK, headers: http::HeaderMap::new(), body: BodyHandle::Buffered(Bytes::from(serde_json::to_vec(&json!({"model": "jev-latest", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 0}})).unwrap())) };
         ResponseTransform::apply(&router, &cx, &mut response).await.unwrap();
         let output = json_body(&response.body);
         assert_eq!(output["model"], "quick");

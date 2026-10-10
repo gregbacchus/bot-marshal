@@ -9,10 +9,17 @@ every restart.
 * [Bind groups](bind-groups.md) — named, reusable `--isolation netns` bind paths.
 * [Transforms](transforms.md) — header setting/filtering, secret injection, response rewriting.
 * [LLM routing](llm-routing.md) — model aliases, OpenAI/Anthropic translation and native decision routing.
-* [Decision APIs](decision-apis.md) — native Jev/DecisionsApi judging and agent routing.
+* [Decision APIs](decision-apis.md) — native decision judging and agent routing.
+
 * [OAuth2 credentials](oauth2.md) — grants, private-key auth, and an agent-driven flow marshal captures in band.
 * [Secret injection examples](secret-injection-examples.md) — worked configs for OpenAI, Anthropic, OpenRouter, Claude Code, Codex, GitHub, and others.
 * [Identity](identity.md) — which agent is connecting, and `marshal run`.
+
+Judge providers use `dialect: openai`, `anthropic`, or `system_one`. There is no `type`
+field. When migrating older chat configs, rename `provider.type` to `provider.dialect`.
+For old native providers, set `dialect: system_one` and supply the service origin explicitly
+through `base_url`. If migrating from a mechanism-plus-dialect config, remove `type` and
+keep `dialect`. There are no legacy provider aliases.
 
 ## Where the config lives
 

@@ -1,6 +1,6 @@
 # ADR 0042: A native decision answer may replace the judge's forced tool call
 
-* **Status:** Accepted
+* **Status:** Partially superseded by [ADR-0043](0043-judge-mechanism-and-wire-dialect-are-separate.md) (provider naming and default decision origins)
 * **Date:** 2026-10-02
 * **Supersedes:** ADR-0012, only its requirement for a forced tool call and message-tag representation
 

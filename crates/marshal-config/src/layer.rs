@@ -214,45 +214,32 @@ pub struct JudgeScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "dialect", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Provider {
-    Anthropic {
-        model: String,
-        api_key_env: String,
-        #[serde(default)]
-        max_tokens: Option<u32>,
-        /// Overrides the real API endpoint — for an Anthropic-compatible gateway or
-        /// self-hosted deployment. `scheme://host[:port]`, no path.
-        #[serde(default)]
-        base_url: Option<String>,
-    },
     #[serde(rename = "openai")]
     OpenAi {
         model: String,
         api_key_env: String,
         #[serde(default)]
         max_tokens: Option<u32>,
-        /// Overrides the real API endpoint — this is what makes any OpenAI-compatible
-        /// server usable: Azure OpenAI, OpenRouter, a local vLLM or Ollama instance, an
-        /// internal gateway. `scheme://host[:port]`, no path.
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    Anthropic {
+        model: String,
+        api_key_env: String,
+        #[serde(default)]
+        max_tokens: Option<u32>,
         #[serde(default)]
         base_url: Option<String>,
     },
     SystemOne {
         model: String,
-        api_key_env: String,
+        /// Omit for a local service that does not require authentication.
         #[serde(default)]
-        base_url: Option<String>,
-        /// Below this native confidence the judge passes; it never guesses an allow.
-        #[serde(default = "default_decision_confidence")]
-        min_confidence: f64,
-    },
-    DecisionsApi {
-        model: String,
-        api_key_env: String,
-        #[serde(default)]
-        base_url: Option<String>,
-        /// Below this native confidence the judge passes; it never guesses an allow.
+        api_key_env: Option<String>,
+        /// Explicit origin keeps the API format separate from the hosting service.
+        base_url: String,
         #[serde(default = "default_decision_confidence")]
         min_confidence: f64,
     },

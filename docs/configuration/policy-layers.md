@@ -205,7 +205,7 @@ caches and circuit-breaks.
 ```yaml
 - layer: judge
   provider:
-    type: anthropic
+    dialect: anthropic
     model: "claude-haiku-4-5-20251001"
     api_key_env: ANTHROPIC_API_KEY
   scope:
@@ -224,15 +224,18 @@ caches and circuit-breaks.
 
 ### Providers
 
-`type: anthropic` or `type: openai` use forced tool calls. Native `system_one` and
-`decisions_api` providers use bounded Choice answers with a configurable confidence threshold;
-see [Decision APIs](decision-apis.md) for service origins, complete examples and maturity limits.
-Both chat providers take an optional `base_url` — Azure OpenAI,
+`dialect: openai` or `anthropic` uses forced tool calls. `dialect: system_one` uses bounded
+Choice answers and a configurable confidence threshold. The dialect selects the judge
+implementation directly; there is no `type` field. System One requires an explicit
+`base_url`; its optional `api_key_env` may be omitted for unauthenticated local servers.
+Chat dialects require `api_key_env`. See [Decision APIs](decision-apis.md) for the dialect
+table and examples.
+Both LLM dialects take an optional `base_url` — Azure OpenAI,
 OpenRouter, a local vLLM or Ollama instance, an internal gateway. `scheme://host[:port]`, no
 path; `http://` is honoured for a local server, not upgraded to `https`.
 
 ```yaml
-provider: { type: openai, model: "...", api_key_env: OPENAI_API_KEY, base_url: "http://localhost:11434" }
+provider: { dialect: openai, model: "...", api_key_env: OPENAI_API_KEY, base_url: "http://localhost:11434" }
 ```
 
 Adding a provider is additive by design: the scoping constraints below live in the layer

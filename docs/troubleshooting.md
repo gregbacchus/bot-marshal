@@ -85,8 +85,8 @@ layer or `default_action`. Inspect the judge evidence and confidence threshold; 
 not approve the request. A malformed Choice answer, provider HTTP error or timeout follows
 `on_error`, and may produce `judge_unavailable` when that setting is `deny`.
 
-Check the configured model, service origin and `api_key_env`. Direct Jev and DecisionsApi
-have separate credentials. Native agent routes must use `system_one` on both sides;
+Check `dialect: system_one`, the model and explicit `base_url`.
+For authenticated services, check `api_key_env`; omit it for unauthenticated local servers. Native agent routes must use `system_one` on both sides;
 chat/decision conversion and native streaming are refused. See [Decision APIs](configuration/decision-apis.md)
 for supported answer shapes, confidence behavior and complete configurations.
 

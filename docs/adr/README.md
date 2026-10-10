@@ -53,7 +53,9 @@ later, so a future change is made knowingly rather than by accident.
 | [0040](0040-header-filtering-is-allow-or-deny-never-both.md) | Header filtering is allow or deny, never both — and never touches wire framing | Accepted |
 | [0041](0041-llm-router-may-connect-to-a-mapped-origin.md) | The LLM router rewrites destination after allow; intercept may connect to a mapped origin | Accepted |
 
-| [0042](0042-native-decision-answers-may-replace-judge-tool-calls.md) | Native decisions may replace judge tool calls; native decision routing stays within its family | Accepted |
+| [0042](0042-native-decision-answers-may-replace-judge-tool-calls.md) | Native decisions may replace judge tool calls; native decision routing stays within its family | Partially superseded by [0043](0043-judge-mechanism-and-wire-dialect-are-separate.md) |
+| [0043](0043-judge-mechanism-and-wire-dialect-are-separate.md) | Judge mechanism, wire dialect and service are separate settings | Superseded by [0044](0044-judge-dialect-selects-the-implementation.md) |
+| [0044](0044-judge-dialect-selects-the-implementation.md) | The judge dialect selects its implementation directly | Accepted |
 
 ## Writing a new one
 
