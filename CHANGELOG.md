@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.10.0](https://github.com/gregbacchus/bot-marshal/compare/50a99dbb991fdf82c6b54adc8fa111bc53aaf6ea..v0.10.0) - 2026-10-10
+#### Features
+- implement caching for documentation loader and add search indexing integration - ([9604572](https://github.com/gregbacchus/bot-marshal/commit/96045724c91f651098c7b768590e8566039220fc)) - test
+
+- - -
+
 ## [v0.9.0](https://github.com/gregbacchus/bot-marshal/compare/e1f3caf000788e38630ae7478d79aad97777f909..v0.9.0) - 2026-10-09
 #### Features
 - add Google Analytics tracking script to enhance site analytics - ([e1f3caf](https://github.com/gregbacchus/bot-marshal/commit/e1f3caf000788e38630ae7478d79aad97777f909)) - test
